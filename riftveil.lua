@@ -1,9 +1,30 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v2.3  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v2.4  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v2.4 – Velocity-constrained desync: CfgAngle guesses now clamp to
+--            VelCap(spd) (58°→0° linear falloff by VEL_CAP_SPD=580u/s),
+--            kept separate from LiveCap so fast mouse-turns don't get
+--            misread as body jitter. New PKA vuln window (peek
+--            acceleration: stopped→fast mirrors STP, catches torso before
+--            body-yaw-delay AAs catch up post-peek). DB-seeded confidence:
+--            repeat opponents with a proven prior (3+ kills, >50% hit
+--            rate) skip the cold-start conf ramp -- matters in short 2v2
+--            engagements. Shifting guard on LAGCOMP/PHASE: a choke==0 tick
+--            with a missing tm[] lookback slot now counts against trust
+--            instead of silently falling through. Overlay redesign:
+--            tighter techy separators (│ ·), status dots (●/○) replacing
+--            check/cross glyphs, finer 10-segment side meter (■/·), and a
+--            new off-angle awareness line for the second live enemy.
+--            Blind-guess brute cycle: the true last-resort meta_aggressive
+--            path (zero side data at all) now cycles side+half/full
+--            magnitude across ticks (NIXWARE-style) instead of freezing on
+--            one static guess. CanSeeHead: the "standing = fully exposed"
+--            vuln TTL boost is now trace-verified (client.trace_line)
+--            instead of inferred from velocity/duck/ground alone; fails
+--            open so a bad trace never costs a boost the old code granted.
 --    v2.3 – 6-script counter batch (serenity, aesthetic×2, ambani,
 --            testarossa, gasolina). TorsoCluster (circular mean, W=7,
 --            THR=25) counters ways()/sanya/Bobro/random-limits.
@@ -291,6 +312,13 @@ local CFG = {
     POSE_THRESH  = 10,      -- minimum delta between samples to count as flip
     HOLD_STABLE  = 4,       -- ticks same sign = hold AA
 
+    -- Velocity-constrained desync
+    -- Fast players can't hold full desync -- body yaw catch-up rate is
+    -- limited, so plausible max desync shrinks toward 0 as speed rises.
+    -- VEL_CAP_SPD is empirical (borrowed from public resolver logic), not
+    -- an engine constant -- tune against observed hit-rate if needed.
+    VEL_CAP_SPD  = 580.0,   -- u/s at which velocity-implied cap reaches 0
+
     -- Spike / latency
     SPIKE_THR    = 0.030,   -- |cur_lat - avg_lat| above this = spike
 
@@ -306,7 +334,7 @@ local CFG = {
     STOP_SPD_LO  = 8.0,     -- now below this = stop event
 
     -- Vulnerability window TTLs (base ticks before LC window extension)
-    VULN_TTL     = {lby=2, unk=1, stp=3, lnd=2, dck=2, ctr=1},
+    VULN_TTL     = {lby=2, unk=1, stp=3, lnd=2, dck=2, ctr=1, pka=2},
 
     -- Period prediction
     PERIOD_MIN   = 4,       -- minimum flip samples before trusting the period
@@ -382,6 +410,7 @@ local VTYPE = {
     LND = "lnd",  -- landing: on_ground flipped false→true
     DCK = "dck",  -- duck transition: duck_amount crossed 0.5
     CTR = "ctr",  -- jitter center pass: pose near 0 on alt pattern
+    PKA = "pka",  -- peek acceleration: stopped -> fast (body yaw hasn't caught up)
 }
 
 -- Known config profiles (from luasense_beta/luasensedev analysis)
@@ -412,9 +441,9 @@ local ASYM_FALLBACK = {
 }
 
 local AA_SHORT = {
-    [AA.TWO_WAY]="2-WAY", [AA.THREE_WAY]="3-WAY", [AA.FIVE_WAY]="5-WAY",
-    [AA.SKITTER]="SKITTER", [AA.HOLD]="HOLD",
-    [AA.STATIC]="STATIC",  [AA.UNKNOWN]="?",
+    [AA.TWO_WAY]="2way", [AA.THREE_WAY]="3way", [AA.FIVE_WAY]="5way",
+    [AA.SKITTER]="skitter", [AA.HOLD]="hold",
+    [AA.STATIC]="static",  [AA.UNKNOWN]="?",
 }
 
 local CFG_LABEL = {
@@ -599,12 +628,11 @@ end
 -- ══════════════════════════════════════════════════════════════════
 -- (MaxDesync removed — was used to compute max_d which was dead after pick chain refactor)
 
-local function ClassifyState(player, as)
+local function ClassifyState(player, as, spd)
     local flags = entity.get_prop(player, "m_fFlags") or 0
     local og    = bit.band(flags, 1) ~= 0
     local duck  = as and (as.duck_amount or 0) > 0.5
-    local vx, vy = entity.get_prop(player, "m_vecVelocity")
-    local spd   = (isnum(vx) and isnum(vy)) and math.sqrt(vx*vx + vy*vy) or 0
+    spd = spd or 0
     if not og   then return duck and STATE.AIR_CROUCH  or STATE.AIR           end
     if duck     then return spd > 20 and STATE.CROUCH_MOVING or STATE.CROUCH  end
     if spd > 5 and spd < 100 then return STATE.SLOWMOTION                     end
@@ -612,12 +640,30 @@ local function ClassifyState(player, as)
     return STATE.STANDING
 end
 
--- Return correction angle for a given side using config knowledge or fallback
-local function CfgAngle(side, state, config_type)
+-- Return correction angle for a given side using config knowledge or fallback.
+-- Optional cap clamps the static guess to the velocity/live-desync bound
+-- (VelCap) so a fast-moving enemy doesn't get an overshoot correction.
+local function CfgAngle(side, state, config_type, cap)
     local tbl = config_type and CFG_COUNTER[config_type] and CFG_COUNTER[config_type][state]
-    if tbl then return side > 0 and tbl.R or -tbl.L end
-    local a = ASYM_FALLBACK[state] or ASYM_FALLBACK[STATE.STANDING]
-    return side > 0 and a[2] or -a[1]
+    local raw
+    if tbl then
+        raw = side > 0 and tbl.R or -tbl.L
+    else
+        local a = ASYM_FALLBACK[state] or ASYM_FALLBACK[STATE.STANDING]
+        raw = side > 0 and a[2] or -a[1]
+    end
+    return cap and Clamp(raw, -cap, cap) or raw
+end
+
+-- Velocity-constrained desync: fast players can't hold full desync, so the
+-- plausible correction magnitude shrinks toward 0 as speed approaches
+-- CFG.VEL_CAP_SPD. Only used to clamp OUR own correction guesses (CfgAngle
+-- callers) -- kept separate from LiveCap so a fast mouse turn during a
+-- peek isn't misread as body-yaw jitter.
+local function VelCap(spd, cap)
+    cap = cap or CFG.DESYNC_CAP
+    if not isnum(spd, 0) then return cap end
+    return Clamp(cap * (1 - spd / CFG.VEL_CAP_SPD), 0, cap)
 end
 
 -- (GenAngle removed — override block uses CfgAngle directly;
@@ -961,11 +1007,34 @@ local function TorsoCluster(rec, torso)
 end
 
 -- ══════════════════════════════════════════════════════════════════
+--  LINE OF SIGHT
+--  Cheap trace-based visibility check -- gates the "standing = fully
+--  exposed" vuln TTL boost so it doesn't fire on a target standing still
+--  behind a window frame or thin wall that just happens to read as
+--  stationary via velocity/duck/ground state alone.
+--  Fails OPEN (returns true) on any missing data or trace error, so a
+--  bad read never costs a TTL boost the old heuristic would've granted.
+-- ══════════════════════════════════════════════════════════════════
+local function CanSeeHead(me, target)
+    if not me or not target then return true end
+    local mx, my, mz = entity.get_origin(me)
+    local tx, ty, tz = entity.get_origin(target)
+    if not (isnum(mx) and isnum(tx)) then return true end
+    local _, _, mvz = entity.get_prop(me, "m_vecViewOffset")
+    local _, _, tvz = entity.get_prop(target, "m_vecViewOffset")
+    local ok, frac, hit = pcall(client.trace_line, me,
+        mx, my, mz + (isnum(mvz) and mvz or 64),
+        tx, ty, tz + (isnum(tvz) and tvz or 64))
+    if not ok or not isnum(frac) then return true end
+    return frac >= 0.98 or hit == target
+end
+
+-- ══════════════════════════════════════════════════════════════════
 --  VULNERABILITY DETECTOR
 --  Returns: vtype, correction_angle, confidence  OR  nil, 0, 0
 --  rec.prev_* fields must be set from the previous tick.
 -- ══════════════════════════════════════════════════════════════════
-local function DetectVuln(rec, as, pose, eye_y)
+local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap)
     -- Guard: if eye_y is zero or suspiciously small, try last ring buffer entry
     local safe_eye = (math.abs(eye_y) > 1.0) and eye_y
                      or (RLen(rec.hist) > 0 and RGet(rec.hist, 1) and RGet(rec.hist, 1).e)
@@ -982,7 +1051,7 @@ local function DetectVuln(rec, as, pose, eye_y)
         -- no dependency on eye_y which is still the fake angle at snap time.
         local real_side = -Sign(rec.prev_pose)
         if real_side == 0 then return nil, 0, 0 end
-        return VTYPE.LBY, CfgAngle(real_side, rec.state, rec.config_type), 0.95
+        return VTYPE.LBY, CfgAngle(real_side, rec.state, rec.config_type, corr_cap), 0.95
     end
 
     -- [UNK] unchoke tick: first real packet after a choke burst
@@ -1048,12 +1117,28 @@ local function DetectVuln(rec, as, pose, eye_y)
     -- STOP_SPD_HI — a real stop persists; a fakelag burst collapses in 1 tick.
     if rec.prev_spd  and rec.prev_spd  >= CFG.STOP_SPD_HI
     and rec.prev_spd2 and rec.prev_spd2 >= CFG.STOP_SPD_HI then
-        local vx, vy = entity.get_prop(rec.eidx or 0, "m_vecVelocity")
-        local spd = (isnum(vx) and isnum(vy)) and math.sqrt(vx*vx + vy*vy) or 0
-        if spd < CFG.STOP_SPD_LO then
+        if (spd or 0) < CFG.STOP_SPD_LO then
             local gfy = as.goal_feet_yaw or safe_eye
             if not gfy or math.abs(gfy) < 1.0 then return nil, 0, 0 end
             return VTYPE.STP, gfy, 0.80
+        end
+    end
+
+    -- [PKA] peek acceleration: velocity crossed from confirmed-stopped to fast
+    -- (the mirror of STP). Modern AA delays body yaw behind the fake yaw by
+    -- several ticks after a peek starts (aesthetic_beta: 3-16t depending on
+    -- state) — right at peek onset, torso_yaw is still showing whatever it
+    -- settled on while stopped, before the delay catches up to the new fake
+    -- angle. Require 2 consecutive low-velocity ticks beforehand (same
+    -- fakelag-burst guard as STP, mirrored) so a burst spike can't fake it.
+    if rec.prev_spd  and rec.prev_spd  <= CFG.STOP_SPD_LO
+    and rec.prev_spd2 and rec.prev_spd2 <= CFG.STOP_SPD_LO
+    and (spd or 0) >= CFG.STOP_SPD_HI then
+        local torso = as.torso_yaw
+        -- Skip near-zero: faszsag/defensive-pose torso reads are as unreliable
+        -- here as they are for UNK (see torpedo counter above).
+        if torso and math.abs(torso) >= 8 then
+            return VTYPE.PKA, torso, 0.75
         end
     end
 
@@ -1150,9 +1235,17 @@ end
 
 local function NewRec(player, s64)
     local db = DB[s64] or {}
+    -- DB-seeded confidence: a proven prior against this steam64 (3+ kills,
+    -- decent hit rate) skips the cold-start ramp so short 2v2 engagements
+    -- don't end before CONF_MIN is even reached. Capped well below
+    -- CONF_LOCK -- a prior is a hint, not this round's evidence.
+    local seeded_conf = 0
+    if (db.kills or 0) >= 3 and (db.hit_rate or 0) > 0.5 then
+        seeded_conf = math.min(db.hit_rate * 0.5, 0.35)
+    end
     return {
         hist=RNew(CFG.HIST_SIZE), tm={}, yc={}, fl={},
-        side=0, period=0, conf=0,
+        side=0, period=0, conf=seeded_conf,
         aa_type=AA.UNKNOWN, flip=false, lt=-1,
         hit_side=0, hit_count=0, resolver_misses=0,
         def_tickbase=false,
@@ -1180,6 +1273,16 @@ local function NewRec(player, s64)
         -- Suppress streak: cap consecutive suppress ticks to prevent stuck-suppress pattern
         -- (from log: hxlw1ss had 375/914 corrections as suppress — mid-conf lock-in)
         _sup_streak = 0,           -- consecutive ticks suppress has been active
+        -- Shifting guard: counts consecutive choke==0 ticks where the LC lookback
+        -- (rec.tm) is missing a slot it should have. Real packet loss shows up as
+        -- choke>0; a gap despite choke==0 means the backtrack record was broken
+        -- (shift-style), not lost -- don't trust LAGCOMP/PHASE while this is high.
+        _shift_streak = 0,
+        -- Blind-guess brute cycle: index into the last-resort NIXWARE-style
+        -- shot-cycle fallback (meta_aggressive with zero side data). _brute_half
+        -- marks the half-magnitude phase of that cycle.
+        _brute_idx = 0,
+        _brute_half = false,
     }
 end
 
@@ -1282,8 +1385,13 @@ local function ProcessPlayer(player, ctx)
             break
         end
 
+        -- Velocity — read once, shared by ClassifyState, the velocity
+        -- correction cap, and DetectVuln's STP/PKA checks below.
+        local vx0, vy0 = entity.get_prop(player, "m_vecVelocity")
+        spd = (isnum(vx0) and isnum(vy0)) and math.sqrt(vx0*vx0 + vy0*vy0) or 0
+
         -- State
-        local state_key = ClassifyState(player, as)
+        local state_key = ClassifyState(player, as, spd)
         rec.state = state_key
         if rec.conf == 0 then rec.conf = CFG.STATE_SEED[state_key] or 0.25 end
 
@@ -1293,6 +1401,10 @@ local function ProcessPlayer(player, ctx)
         local live_mn, live_mx, live_cap = LiveCap(as)
         rec.live_min = live_mn
         rec.live_max = live_mx
+
+        -- Velocity-constrained correction cap — see VelCap(). Used only to
+        -- clamp CfgAngle's static guesses, never the engine-read live_cap.
+        local corr_cap = VelCap(spd, live_cap)
 
         if ui.get(ui_verb) then
             if live_cap ~= CFG.DESYNC_CAP then
@@ -1328,8 +1440,6 @@ local function ProcessPlayer(player, ctx)
         pose = praw * CFG.POSE_SCALE - 60
         local _, eyy = entity.get_prop(player, "m_angEyeAngles")
         local eye_y  = as.eye_angles_y or eyy or 0
-        local vx, vy = entity.get_prop(player, "m_vecVelocity")
-        spd       = (isnum(vx) and isnum(vy)) and math.sqrt(vx*vx + vy*vy) or 0
         duck      = as.duck_amount or 0
         on_ground = as.on_ground
 
@@ -1402,16 +1512,21 @@ local function ProcessPlayer(player, ctx)
         -- Vulnerability window
         if rec.vuln_ttl > 0 then rec.vuln_ttl = rec.vuln_ttl - 1 end
 
-        local vtype, vcorr = DetectVuln(rec, as, pose, eye_y)
+        local vtype, vcorr = DetectVuln(rec, as, pose, eye_y, spd, corr_cap)
         if vtype then
             local lc_ttl = math.floor(CFG.LC_WINDOW_S / ctx.ti) - 1
             local base_ttl = CFG.VULN_TTL[vtype] or 1
             local is_standing = spd < 8 and duck < 0.1 and on_ground == true
 
-            -- One-shot boost: standing enemy = fully exposed head hitbox.
+            -- One-shot boost: standing enemy = fully exposed head hitbox,
+            -- confirmed via trace rather than assumed from velocity/duck/ground
+            -- alone (CanSeeHead fails open, so this never costs a boost the old
+            -- heuristic would've granted -- it only withholds it on a confirmed
+            -- blocked line, e.g. standing behind a window frame or thin wall).
             -- +1 tick gives the aimbot more backtrack candidates to find
             -- a clean headshot position within the vulnerability window.
-            if is_standing and (vtype == VTYPE.LBY or vtype == VTYPE.UNK) then
+            if is_standing and (vtype == VTYPE.LBY or vtype == VTYPE.UNK)
+               and CanSeeHead(entity.get_local_player(), player) then
                 base_ttl = base_ttl + 1
             end
 
@@ -1453,6 +1568,7 @@ local function ProcessPlayer(player, ctx)
 
         local tracked_side   = rec.side
         local tracked_method = METH.RING
+        rec._brute_half       = false  -- set true below only on a true blind-guess tick
 
         if rec.vuln_ttl == 0 then
             -- No active vuln window — run the side detection chain
@@ -1476,16 +1592,25 @@ local function ProcessPlayer(player, ctx)
                 local lco = LCTicks(false)
                 local h   = rec.tm[st - lco]
                 if h then
+                    rec._shift_streak = 0
                     local s = Sign(h.p)
                     if s ~= 0 then
                         tracked_side   = s
                         tracked_method = METH.LAGCOMP
                     end
-                elseif #rec.fl > 0 and rec.side ~= 0 and rec.period > 0 then
-                    local since = (st - lco) - rec.fl[#rec.fl]
-                    tracked_side   = math.floor(since / rec.period) % 2 == 0
-                                     and rec.side or -rec.side
-                    tracked_method = METH.PHASE
+                else
+                    -- SHIFTING GUARD: choke==0 means packets ARE arriving, so a
+                    -- missing tm[] slot at this lookback isn't ordinary loss —
+                    -- it looks like a shift-style backtrack record break. Track
+                    -- it, and stop trusting the PHASE fallback too once it's
+                    -- happened repeatedly rather than locking onto a broken window.
+                    rec._shift_streak = (rec._shift_streak or 0) + 1
+                    if rec._shift_streak < 3 and #rec.fl > 0 and rec.side ~= 0 and rec.period > 0 then
+                        local since = (st - lco) - rec.fl[#rec.fl]
+                        tracked_side   = math.floor(since / rec.period) % 2 == 0
+                                         and rec.side or -rec.side
+                        tracked_method = METH.PHASE
+                    end
                 end
 
             elseif rec.def_tickbase then
@@ -1532,8 +1657,15 @@ local function ProcessPlayer(player, ctx)
                               or (rec.side ~= 0 and rec.side)           -- raw ring side
                               or 0
                     if base == 0 then
-                        -- Absolute last resort: opposite of flip state
-                        base = rec.flip and -1 or 1
+                        -- Absolute last resort: no side data at all. Cycle a short
+                        -- candidate sequence (NIXWARE-style shot-cycle fallback:
+                        -- side A full, side A half, side B full, side B half)
+                        -- instead of freezing on one guess -- a sustained
+                        -- no-signal streak shouldn't spam the same wrong angle.
+                        rec._brute_idx = ((rec._brute_idx or 0) + 1) % 4
+                        base = (rec._brute_idx < 2) and 1 or -1
+                        if rec.flip then base = -base end
+                        rec._brute_half = (rec._brute_idx % 2) == 1
                     else
                         -- Apply flip to raw ring side (hit_side already encodes it)
                         if base == rec.side and rec.flip then base = -base end
@@ -1567,13 +1699,13 @@ local function ProcessPlayer(player, ctx)
             should_override = true
             override_val    = six_desync > 0
                               and (six_side * six_desync)
-                              or CfgAngle(six_side, rec.state, rec.config_type)
+                              or CfgAngle(six_side, rec.state, rec.config_type, corr_cap)
             override_meth   = METH.SIX_LEX
 
         -- [3] Hit-side memory: confirmed hit this match
         elseif ui.get(ui_hitmem) and rec.hit_count >= 2 and rec.hit_side ~= 0 then
             should_override = true
-            override_val    = CfgAngle(rec.hit_side, rec.state, rec.config_type)
+            override_val    = CfgAngle(rec.hit_side, rec.state, rec.config_type, corr_cap)
             override_meth   = METH.HIT_MEM
 
         -- [4] Suppress [EXP]: force wrong angle to gate aimbot hit-chance.
@@ -1596,7 +1728,7 @@ local function ProcessPlayer(player, ctx)
                 should_override = true
                 local bs = tracked_side ~= 0 and tracked_side or dom_side
                 if bs == 0 then bs = 1 end
-                override_val  = -CfgAngle(bs, rec.state, rec.config_type)
+                override_val  = -CfgAngle(bs, rec.state, rec.config_type, corr_cap)
                 override_meth = METH.SUPPRESS
             end
         end
@@ -1619,7 +1751,8 @@ local function ProcessPlayer(player, ctx)
             -- ambani torpedo, aesthetic records — patterns the 2022-era built-in
             -- has no answer for). Hold our best tracked_side correction rather than
             -- releasing to a resolver that's already proven it can't handle this AA.
-            local meta_val = CfgAngle(tracked_side, rec.state, rec.config_type)
+            local meta_val = CfgAngle(tracked_side, rec.state, rec.config_type, corr_cap)
+            if rec._brute_half then meta_val = meta_val * 0.5 end
             plist.set(player, "Force body yaw", true)
             plist.set(player, "Force body yaw value", meta_val)
             plist.set(player, "Correction active", true)
@@ -1866,6 +1999,8 @@ local function on_aim_miss(e)
                     -- switched configs. Stale cluster = wrong correction for new config.
                     rec.torso_hist = {}
                     rec._sup_streak = 0
+                    rec._shift_streak = 0
+                    rec._brute_idx = 0
                 end
             end
         end
@@ -1949,13 +2084,14 @@ client.register_esp_flag("MYW", 160, 75, 255, function(ent)
 end)
 
 -- ══════════════════════════════════════════════════════════════════
---  DRAWOVERLAY  (v2.2 — simplified technical design)
+--  DRAWOVERLAY  (v2.4 — minimal/techy redesign)
 --
---  Row 1  header   match summary H/M/HR               always
---  Row 2  target   name + AA type + conf%              when threat
---  Row 3  status   [✔RES] / [✘UNK] / [⚡VLN]           when threat
---  Row 4  side     ◀ L ▓▓▓▓▓░░░ 78%  or  22% ░░░▓▓▓▓▓ R ▶
---  Row 5  supp     bt / config / DEF / SPIKE            optional
+--  Row 1  header    match summary H/M/HR                    always
+--  Row 2  target    name │ AA type │ conf%                   when threat
+--  Row 3  status    ⚡ vtype·ttl  /  ● res·meth  /  ○ AA·conf%
+--  Row 4  side      ◀ ■■■■■■···· 62%  or  62% ····■■■■■■ ▶
+--  Row 5  supp      bt · config · def · spike · agg           optional
+--  Row 6  off-angle ↳ name · AA · conf%  (second live enemy)   optional
 --
 --  Log analysis (v2.0 session, 55k lines):
 --    453 hits / 35k corr entries → 98% were stale TTL echoes (now fixed).
@@ -1986,19 +2122,19 @@ local METH_LABEL = {
 -- Color caller provides: blue for L, orange for R, gray for unknown.
 local function SideBar(side, conf)
     local cf     = Clamp(conf, 0, 1)
-    local BARS   = 8
+    local BARS   = 10
     local filled = math.floor(cf * BARS + 0.5)
-    local full   = string.rep("\xe2\x96\x93", filled)        -- ▓ U+2593
-    local empty  = string.rep("\xe2\x96\x91", BARS - filled) -- ░ U+2591
+    local full   = string.rep("\xe2\x96\xa0", filled)         -- ■ U+25A0
+    local empty  = string.rep("\xc2\xb7", BARS - filled)      -- · U+00B7
     local pct    = math.floor(cf * 100)
     if side < 0 then
-        -- ◀ L  ▓▓▓▓░░░░  62%
-        return "\xe2\x97\x80 L  " .. full .. empty .. "  " .. pct .. "%"
+        -- ◀ ■■■■■■····  62%
+        return "\xe2\x97\x80 " .. full .. empty .. " " .. pct .. "%"
     elseif side > 0 then
-        --   62%  ░░░░▓▓▓▓  R ▶
-        return pct .. "%  " .. empty .. full .. "  R \xe2\x96\xb6"
+        --   62%  ····■■■■■■ ▶
+        return pct .. "% " .. empty .. full .. " \xe2\x96\xb6"
     else
-        return "  \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 ? \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80  --"
+        return "\xc2\xb7\xc2\xb7\xc2\xb7 unk \xc2\xb7\xc2\xb7\xc2\xb7"
     end
 end
 
@@ -2014,8 +2150,8 @@ local function DrawOverlay()
     local total  = mh + mm
     local hr_str = total > 0
         and string.format("%d%%", math.floor(mh / total * 100)) or "--"
-    renderer.indicator(70, 70, 70, 140,
-        string.format("RIFTVEIL  %dH/%dM  %s", mh, mm, hr_str))
+    renderer.indicator(150, 150, 150, 140,
+        string.format("RIFTVEIL \xe2\x94\x82 %dH/%dM \xe2\x94\x82 %s", mh, mm, hr_str))
 
     -- ── Spike / threat guard ───────────────────────────────────────
     local _, avg_lat = GetLat()
@@ -2023,7 +2159,7 @@ local function DrawOverlay()
     local threat     = client.current_threat()
 
     if not threat or not entity.is_alive(threat) then
-        if is_spike then renderer.indicator(255, 125, 28, 225, "\xe2\x96\xb2 SPIKE") end
+        if is_spike then renderer.indicator(255, 125, 28, 225, "\xe2\x96\xb2 spike") end
         return
     end
 
@@ -2039,37 +2175,35 @@ local function DrawOverlay()
     if #name > 15 then name = name:sub(1, 14) .. "\xe2\x80\xa6" end -- …
     local tc   = AA_SHORT[rec.aa_type] or "?"
     renderer.indicator(c_r, c_g, 38, 242,
-        string.format("%s   %s   %d%%", name, tc, math.floor(cf * 100)))
+        string.format("%s \xe2\x94\x82 %s \xe2\x94\x82 %d%%", name, tc, math.floor(cf * 100)))
 
-    -- ── Row 3: resolver status ─────────────────────────────────────
+    -- ── Row 3: resolver status — dot + method/vtype + angle ─────────
     -- Three states: vuln window active > resolved > unresolved/building.
-    -- Shows method source and last applied correction angle.
     local meth    = rec.last_meth
     local mlbl    = (meth and meth ~= "builtin") and (METH_LABEL[meth] or meth) or nil
     local has_val = isnum(rec.last_val) and math.abs(rec.last_val) > 0.5
-    local angle_s = has_val and string.format("  %+.0f\xc2\xb0", rec.last_val) or ""
+    local angle_s = has_val and string.format(" %+.0f\xc2\xb0", rec.last_val) or ""
 
     if rec.vuln_ttl > 0 then
         -- Vulnerability window — red, blinks on/off
         local vt    = (rec.vuln_type or "?"):upper()
         local blink = math.floor(globals.realtime() * 9) % 2 == 0
         renderer.indicator(248, 20, 20, blink and 255 or 115,
-            string.format("\xe2\x9a\xa1 VLN:%s  \xe2\x96\xb6%dt%s",
-                vt, rec.vuln_ttl, angle_s))
-        -- ⚡ VLN:LBY  ▶3t  +41°
+            string.format("\xe2\x9a\xa1 %s \xc2\xb7 %dt%s", vt, rec.vuln_ttl, angle_s))
+        -- ⚡ LBY · 3t +41°
 
     elseif rec.resolved and cf >= CFG.CONF_ESP then
-        -- Confirmed resolved — teal/green
-        local src = mlbl and ("  " .. mlbl) or ""
+        -- Confirmed resolved — filled dot, teal/green
+        local src = mlbl and (" \xc2\xb7 " .. mlbl) or ""
         renderer.indicator(45, 215, 95, 242,
-            string.format("\xe2\x9c\x94 RES%s%s", src, angle_s))
-        -- ✔ RES  hit-mem  +41°
+            string.format("\xe2\x97\x8f res%s%s", src, angle_s))
+        -- ● res · hit-mem +41°
 
     else
-        -- Building or uncertain — amber
+        -- Building or uncertain — hollow dot, amber
         renderer.indicator(215, 105, 32, 222,
-            string.format("\xe2\x9c\x98 UNRES   %s   %d%%", tc, math.floor(cf * 100)))
-        -- ✘ UNRES   5-WAY   42%
+            string.format("\xe2\x97\x8b %s \xc2\xb7 %d%%", tc, math.floor(cf * 100)))
+        -- ○ 5way · 42%
     end
 
     -- ── Row 4: side bar ───────────────────────────────────────────
@@ -2088,11 +2222,30 @@ local function DrawOverlay()
     if rec.config_type and rec.config_conf >= CFG.CFG_THRESH then
         sup[#sup+1] = CFG_LABEL[rec.config_type] or rec.config_type
     end
-    if rec.def_tickbase   then sup[#sup+1] = "DEF" end
-    if is_spike           then sup[#sup+1] = "\xe2\x96\xb2 SPK" end
-    if rec.meta_aggressive then sup[#sup+1] = "AGG" end  -- built-in failing, we took over
+    if rec.def_tickbase   then sup[#sup+1] = "def" end
+    if is_spike           then sup[#sup+1] = "\xe2\x96\xb2 spk" end
+    if rec.meta_aggressive then sup[#sup+1] = "agg" end  -- built-in failing, we took over
     if #sup > 0 then
-        renderer.indicator(132, 118, 188, 172, table.concat(sup, "  "))
+        renderer.indicator(150, 140, 195, 172, table.concat(sup, " \xc2\xb7 "))
+    end
+
+    -- ── Row 6: off-angle awareness — the other live enemy, if any ───
+    -- 2v2/duel modes only ever have one other enemy; a quick dim line so
+    -- the un-aimed side of a fast peek isn't a total blind spot.
+    for _, p in ipairs(entity.get_players()) do
+        if p ~= threat and entity.is_enemy(p) and entity.is_alive(p) then
+            local os64 = EIDX_S64[p]
+            local orec = os64 and REC[os64]
+            if orec then
+                local oname = entity.get_player_name(p) or "?"
+                if #oname > 15 then oname = oname:sub(1, 14) .. "\xe2\x80\xa6" end
+                local otc = AA_SHORT[orec.aa_type] or "?"
+                renderer.indicator(130, 130, 130, 165,
+                    string.format("\xe2\x86\xb3 %s \xc2\xb7 %s \xc2\xb7 %d%%",
+                        oname, otc, math.floor(orec.conf * 100)))
+            end
+            break
+        end
     end
 end
 
