@@ -1,9 +1,17 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v2.5  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v2.6  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v2.6 – Overlay condensed from 6 indicator rows to 3-4: identity
+--            (name/AA/conf) and status (vuln/resolved/method/angle) merged
+--            into one line, carried by the leading glyph+color (⚡ red /
+--            ● green / ○ gray) instead of separate rows; side-meter and
+--            supplemental tags (bt/config/def/spk/agg) merged into another.
+--            Header shortened to "RV". Off-angle row unchanged. Same
+--            information, half the vertical footprint -- was reading as
+--            HUD spam rather than a glance-able readout.
 --    v2.5 – Performance pass: GetLat() (3 pcall-wrapped FFI calls) was
 --            being called once per player per tick via ChokedPkts, again
 --            per LAGCOMP check via LCTicks, AND every single rendered
@@ -2116,14 +2124,19 @@ client.register_esp_flag("MYW", 160, 75, 255, function(ent)
 end)
 
 -- ══════════════════════════════════════════════════════════════════
---  DRAWOVERLAY  (v2.4 — minimal/techy redesign)
+--  DRAWOVERLAY  (v2.6 — condensed to 3-4 lines, was 6)
 --
---  Row 1  header    match summary H/M/HR                    always
---  Row 2  target    name │ AA type │ conf%                   when threat
---  Row 3  status    ⚡ vtype·ttl  /  ● res·meth  /  ○ AA·conf%
---  Row 4  side      ◀ ■■■■■■···· 62%  or  62% ····■■■■■■ ▶
---  Row 5  supp      bt · config · def · spike · agg           optional
---  Row 6  off-angle ↳ name · AA · conf%  (second live enemy)   optional
+--  Line 1  header     RV │ H/M │ HR%                                 always
+--  Line 2  identity   ⚡ name·VTYPE ttl+ang / ● name·AA%·meth+ang /
+--                     ○ name·AA%                                     when threat
+--  Line 3  side+tags  ◀ ■■■■■■···· 62%  bt:4 · luasense · def         when threat
+--  Line 4  off-angle  ↳ name · AA conf%  (second live enemy)          optional
+--
+--  v2.5 had this at 6 separate indicator rows (header, target, status,
+--  side, supplemental, off-angle) -- too much vertical noise for what's
+--  meant to be a glance-able HUD. Collapsed target+status into one line
+--  (the dot glyph+color already carries the state) and side+supplemental
+--  into another (tags are secondary context, not the headline signal).
 --
 --  Log analysis (v2.0 session, 55k lines):
 --    453 hits / 35k corr entries → 98% were stale TTL echoes (now fixed).
@@ -2173,7 +2186,7 @@ end
 local function DrawOverlay()
     if not ui.get(ui_on) or not ui.get(ui_esp) then return end
 
-    -- ── Row 1: match header ────────────────────────────────────────
+    -- ── Line 1: header — muted, single line, always present ─────────
     local mh, mm = 0, 0
     for _, r in pairs(REC) do
         mh = mh + (r.hit_count or 0)
@@ -2182,8 +2195,8 @@ local function DrawOverlay()
     local total  = mh + mm
     local hr_str = total > 0
         and string.format("%d%%", math.floor(mh / total * 100)) or "--"
-    renderer.indicator(150, 150, 150, 140,
-        string.format("RIFTVEIL \xe2\x94\x82 %dH/%dM \xe2\x94\x82 %s", mh, mm, hr_str))
+    renderer.indicator(150, 150, 150, 130,
+        string.format("RV \xe2\x94\x82 %dH/%dM \xe2\x94\x82 %s", mh, mm, hr_str))
 
     -- ── Spike / threat guard ───────────────────────────────────────
     -- is_spike is computed once per net_update in Update() (LAST_SPIKE) --
@@ -2194,7 +2207,7 @@ local function DrawOverlay()
     local threat     = client.current_threat()
 
     if not threat or not entity.is_alive(threat) then
-        if is_spike then renderer.indicator(255, 125, 28, 225, "\xe2\x96\xb2 spike") end
+        if is_spike then renderer.indicator(255, 125, 28, 200, "\xe2\x96\xb2 spike") end
         return
     end
 
@@ -2202,75 +2215,66 @@ local function DrawOverlay()
     local rec = s64 and REC[s64]
     if not rec then return end
 
-    -- ── Row 2: target — name + AA + conf% ─────────────────────────
+    -- ── Line 2: identity + status, one line ──────────────────────────
+    -- name / AA-type / confidence / resolver state / method / angle used
+    -- to live across 3 separate indicator rows -- collapsed to one, with
+    -- the leading glyph+color alone carrying the state at a glance:
+    -- ⚡ red = vuln window, ● green = resolved, ○ amber = building.
     local cf   = rec.conf
-    local c_r  = math.floor(Clamp((1 - cf) * 2, 0, 1) * 230)
-    local c_g  = math.floor(Clamp(cf * 2,       0, 1) * 210)
     local name = entity.get_player_name(threat) or "?"
     if #name > 15 then name = name:sub(1, 14) .. "\xe2\x80\xa6" end -- …
-    local tc   = AA_SHORT[rec.aa_type] or "?"
-    renderer.indicator(c_r, c_g, 38, 242,
-        string.format("%s \xe2\x94\x82 %s \xe2\x94\x82 %d%%", name, tc, math.floor(cf * 100)))
-
-    -- ── Row 3: resolver status — dot + method/vtype + angle ─────────
-    -- Three states: vuln window active > resolved > unresolved/building.
+    local tc      = AA_SHORT[rec.aa_type] or "?"
     local meth    = rec.last_meth
     local mlbl    = (meth and meth ~= "builtin") and (METH_LABEL[meth] or meth) or nil
     local has_val = isnum(rec.last_val) and math.abs(rec.last_val) > 0.5
     local angle_s = has_val and string.format(" %+.0f\xc2\xb0", rec.last_val) or ""
 
+    local glyph, gr, gg, gb, ga, body
     if rec.vuln_ttl > 0 then
-        -- Vulnerability window — red, blinks on/off
         local vt    = (rec.vuln_type or "?"):upper()
         local blink = math.floor(globals.realtime() * 9) % 2 == 0
-        renderer.indicator(248, 20, 20, blink and 255 or 115,
-            string.format("\xe2\x9a\xa1 %s \xc2\xb7 %dt%s", vt, rec.vuln_ttl, angle_s))
-        -- ⚡ LBY · 3t +41°
-
+        glyph, gr, gg, gb, ga = "\xe2\x9a\xa1", 248, 20, 20, (blink and 255 or 110)
+        body = string.format("%s \xc2\xb7 %s %dt%s", name, vt, rec.vuln_ttl, angle_s)
+        -- ⚡ name · LBY 3t +41°
     elseif rec.resolved and cf >= CFG.CONF_ESP then
-        -- Confirmed resolved — filled dot, teal/green
         local src = mlbl and (" \xc2\xb7 " .. mlbl) or ""
-        renderer.indicator(45, 215, 95, 242,
-            string.format("\xe2\x97\x8f res%s%s", src, angle_s))
-        -- ● res · hit-mem +41°
-
+        glyph, gr, gg, gb, ga = "\xe2\x97\x8f", 45, 215, 95, 235
+        body = string.format("%s \xc2\xb7 %s %d%%%s%s", name, tc, math.floor(cf * 100), src, angle_s)
+        -- ● name · 5way 78% · hit-mem +41°
     else
-        -- Building or uncertain — hollow dot, amber
-        renderer.indicator(215, 105, 32, 222,
-            string.format("\xe2\x97\x8b %s \xc2\xb7 %d%%", tc, math.floor(cf * 100)))
-        -- ○ 5way · 42%
+        glyph, gr, gg, gb, ga = "\xe2\x97\x8b", 195, 195, 195, 190
+        body = string.format("%s \xc2\xb7 %s %d%%", name, tc, math.floor(cf * 100))
+        -- ○ name · 5way 42%
     end
+    renderer.indicator(gr, gg, gb, ga, glyph .. " " .. body)
 
-    -- ── Row 4: side bar ───────────────────────────────────────────
-    -- Blue for left, orange for right, gray for unknown.
-    -- Fill grows with confidence, anchor follows side direction.
+    -- ── Line 3: side meter + tags, one line ──────────────────────────
+    -- Side confidence bar used to be its own row with a separate tag row
+    -- below it (bt/config/def/spike/agg) -- merged into one, tags trailing
+    -- the bar since they're secondary context, not the headline signal.
     local side = rec.side
     local sr, sg, sb_b
     if    side < 0 then sr, sg, sb_b = 60,  138, 255  -- L → blue
     elseif side > 0 then sr, sg, sb_b = 255, 140, 42  -- R → orange
-    else                 sr, sg, sb_b = 92,  92,  92  end -- ? → gray
-    renderer.indicator(sr, sg, sb_b, 215, SideBar(side, cf))
+    else                 sr, sg, sb_b = 100, 100, 100 end -- ? → gray
 
-    -- ── Row 5: supplemental — compact, optional ────────────────────
     local sup = {}
     if rec.preferred_bt > 0 then sup[#sup+1] = "bt:" .. rec.preferred_bt end
     if rec.config_type and rec.config_conf >= CFG.CFG_THRESH then
         sup[#sup+1] = CFG_LABEL[rec.config_type] or rec.config_type
     end
-    if rec.def_tickbase   then sup[#sup+1] = "def" end
-    if is_spike           then sup[#sup+1] = "\xe2\x96\xb2 spk" end
-    if rec.meta_aggressive then sup[#sup+1] = "agg" end  -- built-in failing, we took over
-    if #sup > 0 then
-        renderer.indicator(150, 140, 195, 172, table.concat(sup, " \xc2\xb7 "))
-    end
+    if rec.def_tickbase    then sup[#sup+1] = "def" end
+    if is_spike            then sup[#sup+1] = "spk" end
+    if rec.meta_aggressive then sup[#sup+1] = "agg" end
+    local tag_s = (#sup > 0) and ("  " .. table.concat(sup, " \xc2\xb7 ")) or ""
+    renderer.indicator(sr, sg, sb_b, 200, SideBar(side, cf) .. tag_s)
 
-    -- ── Row 6: off-angle awareness — the other live enemy, if any ───
-    -- 2v2/duel modes only ever have one other enemy; a quick dim line so
-    -- the un-aimed side of a fast peek isn't a total blind spot.
-    -- Reads LIVE_ENEMIES (cached once per net_update in Update()) instead of
-    -- calling entity.get_players() + is_enemy/is_alive again here -- this
-    -- runs every rendered frame, so re-scanning every player each time was
-    -- a real per-frame allocation + API-call cost for data already on hand.
+    -- ── Line 4 (optional): off-angle awareness ───────────────────────
+    -- 2v2/duel modes only ever have one other enemy; a quiet, dim line so
+    -- the un-aimed side of a fast peek isn't a total blind spot. Reads
+    -- LIVE_ENEMIES (cached once per net_update in Update()) instead of
+    -- calling entity.get_players() + is_enemy/is_alive again here every
+    -- rendered frame.
     for _, p in ipairs(LIVE_ENEMIES) do
         if p ~= threat then
             local os64 = EIDX_S64[p]
@@ -2279,8 +2283,8 @@ local function DrawOverlay()
                 local oname = entity.get_player_name(p) or "?"
                 if #oname > 15 then oname = oname:sub(1, 14) .. "\xe2\x80\xa6" end
                 local otc = AA_SHORT[orec.aa_type] or "?"
-                renderer.indicator(130, 130, 130, 165,
-                    string.format("\xe2\x86\xb3 %s \xc2\xb7 %s \xc2\xb7 %d%%",
+                renderer.indicator(120, 120, 120, 150,
+                    string.format("\xe2\x86\xb3 %s \xc2\xb7 %s %d%%",
                         oname, otc, math.floor(orec.conf * 100)))
             end
             break
