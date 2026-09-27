@@ -1,9 +1,23 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v2.4  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v2.5  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v2.5 – Performance pass: GetLat() (3 pcall-wrapped FFI calls) was
+--            being called once per player per tick via ChokedPkts, again
+--            per LAGCOMP check via LCTicks, AND every single rendered
+--            frame in DrawOverlay's spike check -- latency isn't a
+--            per-player value, so all three now read the ctx.cur_lat/
+--            avg_lat already computed once per net_update in Update()
+--            (cached to LAST_SPIKE for DrawOverlay). DrawOverlay's
+--            off-angle row was also calling entity.get_players() +
+--            is_enemy/is_alive on every paint frame (allocates a fresh
+--            table every frame); it now reads LIVE_ENEMIES, populated for
+--            free inside Update()'s existing per-tick player loop. Net
+--            effect: paint no longer touches GetLat, client.latency, or
+--            entity.get_players() at all -- it was doing all three, every
+--            frame, regardless of framerate.
 --    v2.4 – Velocity-constrained desync: CfgAngle guesses now clamp to
 --            VelCap(spd) (58°→0° linear falloff by VEL_CAP_SPD=580u/s),
 --            kept separate from LiveCap so fast mouse-turns don't get
@@ -139,6 +153,13 @@ local REC      = {}   -- per-player resolver records this match
 local EIDX_S64 = {}   -- [entity_index] = steam64_str, refreshed each tick
 local SHOTS    = {}   -- [shot_id] = context snapshot at aim_fire
 local DT_HIST  = {}   -- [s64] = simtime-delta samples for DT detection
+
+-- Per-frame render cache, filled once per net_update_end (Update()) and read
+-- by DrawOverlay (paint fires every rendered frame -- often 5-10x more often
+-- than net updates, so anything DrawOverlay can read instead of recompute is
+-- a real, multiplicative FPS win, not a micro-optimization).
+local LIVE_ENEMIES = {}   -- array of live enemy entindexes, this net_update
+local LAST_SPIKE    = false
 
 info("db", "loaded with %d entries", (function() local c=0; for _ in pairs(DB) do c=c+1 end; return c end)())
 
@@ -672,12 +693,15 @@ end
 -- ══════════════════════════════════════════════════════════════════
 --  CHOKE ESTIMATION
 -- ══════════════════════════════════════════════════════════════════
-local function ChokedPkts(st_raw, player)
+-- cur_lat comes from the caller's per-tick ctx (Update() reads it once via
+-- GetLat()) instead of this function calling GetLat() itself -- GetLat does
+-- 3 pcall-wrapped FFI calls, and calling it once per player per tick instead
+-- of once per tick was pure waste (latency isn't a per-player value).
+local function ChokedPkts(st_raw, cur_lat)
     if not isnum(st_raw, 0.001) then return 0 end
-    local cur, _ = GetLat()
     local diff = globals.curtime() - st_raw
     if diff < 0 or diff > 2.0 then return 0 end
-    return Clamp(TT(math.max(0.0, diff - cur)), 0, 14)
+    return Clamp(TT(math.max(0.0, diff - cur_lat)), 0, 14)
 end
 
 -- ══════════════════════════════════════════════════════════════════
@@ -714,10 +738,10 @@ end)
 
 local function WeDefensive() return brk.ahead and brk.def > 2 and brk.def < 14 end
 
-local function LCTicks(use_avg)
+-- cur_lat/avg_lat come from the caller's per-tick ctx -- see ChokedPkts.
+local function LCTicks(use_avg, cur_lat, avg_lat)
     local ti      = globals.tickinterval()
-    local cur, avg = GetLat()
-    local lat     = use_avg and avg or cur
+    local lat     = use_avg and avg_lat or cur_lat
     local shift   = WeDefensive() and (brk.def * ti) or 0
     local lerp    = 0.031; pcall(function() lerp = cvar.cl_interp:get_float() end)
     return math.max(0, math.floor((lat + lerp + shift) / ti))
@@ -1356,7 +1380,7 @@ local function ProcessPlayer(player, ctx)
 
     TrackDT(s64, st_raw)
 
-    local choke = ChokedPkts(st_raw, player)
+    local choke = ChokedPkts(st_raw, ctx.cur_lat)
     rec.was_choked   = rec.cur_choke > 0
     rec.cur_choke    = choke
     rec.def_tickbase = IsDefTick(s64)
@@ -1589,7 +1613,7 @@ local function ProcessPlayer(player, ctx)
                 end
 
             elseif not ctx.is_spike and choke == 0 and not rec.def_tickbase then
-                local lco = LCTicks(false)
+                local lco = LCTicks(false, ctx.cur_lat, ctx.avg_lat)
                 local h   = rec.tm[st - lco]
                 if h then
                     rec._shift_streak = 0
@@ -1816,16 +1840,24 @@ local function Update()
         ti       = globals.tickinterval(),
         cur_tc   = globals.tickcount(),
     }
+    LAST_SPIKE = ctx.is_spike
 
     client.update_player_list()
+    local n_live = 0
     for _, player in ipairs(entity.get_players()) do
         if entity.is_enemy(player) and entity.is_alive(player) then
+            -- Cache the live-enemy list here (already paid for is_enemy/
+            -- is_alive this tick) so DrawOverlay's off-angle row doesn't
+            -- re-scan every player again on every single rendered frame.
+            n_live = n_live + 1
+            LIVE_ENEMIES[n_live] = player
             local ok, msg = pcall(ProcessPlayer, player, ctx)
             if not ok then
                 err("update", "player=%d crash=%s", player, tostring(msg))
             end
         end
     end
+    for i = #LIVE_ENEMIES, n_live + 1, -1 do LIVE_ENEMIES[i] = nil end
 
     -- Tight interp is handled by its ui.set_callback — nothing to do here
 
@@ -2154,8 +2186,11 @@ local function DrawOverlay()
         string.format("RIFTVEIL \xe2\x94\x82 %dH/%dM \xe2\x94\x82 %s", mh, mm, hr_str))
 
     -- ── Spike / threat guard ───────────────────────────────────────
-    local _, avg_lat = GetLat()
-    local is_spike   = math.abs(client.latency() - avg_lat) > CFG.SPIKE_THR
+    -- is_spike is computed once per net_update in Update() (LAST_SPIKE) --
+    -- paint fires every rendered frame, so recomputing it here via GetLat()
+    -- (3 pcall-wrapped FFI calls) plus client.latency() every single frame
+    -- was pure per-frame overhead for a value that doesn't change that often.
+    local is_spike   = LAST_SPIKE
     local threat     = client.current_threat()
 
     if not threat or not entity.is_alive(threat) then
@@ -2232,8 +2267,12 @@ local function DrawOverlay()
     -- ── Row 6: off-angle awareness — the other live enemy, if any ───
     -- 2v2/duel modes only ever have one other enemy; a quick dim line so
     -- the un-aimed side of a fast peek isn't a total blind spot.
-    for _, p in ipairs(entity.get_players()) do
-        if p ~= threat and entity.is_enemy(p) and entity.is_alive(p) then
+    -- Reads LIVE_ENEMIES (cached once per net_update in Update()) instead of
+    -- calling entity.get_players() + is_enemy/is_alive again here -- this
+    -- runs every rendered frame, so re-scanning every player each time was
+    -- a real per-frame allocation + API-call cost for data already on hand.
+    for _, p in ipairs(LIVE_ENEMIES) do
+        if p ~= threat then
             local os64 = EIDX_S64[p]
             local orec = os64 and REC[os64]
             if orec then
