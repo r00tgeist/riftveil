@@ -1,0 +1,2151 @@
+-- ════════════════════════════════════════════════════════════════════
+--  RIFTVEIL  v2.3  ·  gamesense.pub  ·  unmatched.gg
+--  Two-tier memory · period prediction · config recognition
+--  Vulnerability windows · backtrack learning · debug logger
+-- ════════════════════════════════════════════════════════════════════
+--  Changelog
+--    v2.3 – 6-script counter batch (serenity, aesthetic×2, ambani,
+--            testarossa, gasolina). TorsoCluster (circular mean, W=7,
+--            THR=25) counters ways()/sanya/Bobro/random-limits.
+--            Faszsag near-zero skip (torpedo counter). meta_aggressive:
+--            builtin_miss_streak triggers RIFTVEIL full-control mode;
+--            META_HOLD tier; suppress threshold 0.45→0.28 (starves
+--            testarossa AB). Bug fixes: circular mean wrap-around at
+--            ±180°; builtin_miss_streak reset out of in_vuln gate.
+--            Improvement pass: STP two-tick velocity confirmation
+--            (gasolina fluctuate_fakelag counter); DCK 10-tick cooldown
+--            (fake_duck spam counter); suppress streak cap 8+4 ticks
+--            (hxlw1ss 375/914 stuck-suppress fix); UNK conf boost when
+--            torso within live cap bounds; torso_hist cleared on soft
+--            reset; _sup_streak and _dck_cooldown in NewRec.
+--    v2.2 – Log analysis (55k lines, 453 hits): fixed [corr] noise —
+--            only emit on method/val change (was 98% stale TTL echoes).
+--            DrawOverlay simplified: 1 resolver status (✔/✘/⚡) + side
+--            bar (◀/▶ with conf fill), blue=L orange=R gray=unknown.
+--            SideBar() helper. Removed MethodColor/ConfBar.
+--    v2.1 – Live desync bounds (as.min_yaw/max_yaw), get_desync() probe,
+--            7 descriptive ESP flags, 5-row overlay with conf bar
+--    v2.0 – Refactor: CFG table, named enums, ProcessPlayer split,
+--            single pcall per player, REC shape docs, consistent style
+--    v1.2 – Bug fixes: update_player_list order, BUG4 prev_pose reset,
+--            nil-concat crash, SHOTS prune, double seen increment
+--    v1.1 – Skeet-style indicators, ESP flags, menu redesign
+--    v1.0 – Initial: two-tier memory, 6lex, period prediction, vuln
+-- ════════════════════════════════════════════════════════════════════
+--
+--  TABLE OF CONTENTS          (approximate line numbers)
+--    L045   Debug logger
+--    L115   Persistent database + per-match state
+--    L130   Cvar originals
+--    L135   UI / menu
+--    L200   Console commands (rv_stats, rv_db, rv_clear, rv_reset)
+--    L250   CFG  — all tunable constants in one table
+--    L320   Enums — AA, STATE, METH, VTYPE (no bare string keys)
+--    L370   FFI  — animstate struct, animlayer, interfaces
+--    L445   Math helpers + isnum() input validation
+--    L465   6lex extraction (playback_rate primary, weight fallback)
+--    L510   Engine helpers (MaxDesync, ClassifyState, angle tables)
+--    L575   Choke estimation
+--    L595   Defensive tickbase tracking
+--    L620   Our tickbase gate
+--    L645   Backtrack interp manipulation
+--    L670   Ring buffer
+--    L680   AA detection (PoseVar, CountClusters, IsSkitter, DetectAA)
+--    L770   Config recognition (luasense_beta / luasense_std profiles)
+--    L795   Jitter period prediction
+--    L830   Vulnerability detector (6 window types)
+--    L875   Record management + REC field documentation
+--    L950   DB flush (permanent database write)
+--    L990   ProcessPlayer — per-player resolver logic
+--    L1140  Update — orchestration loop
+--    L1170  Shot feedback (on_aim_fire, on_aim_hit, on_aim_miss)
+--    L1265  ESP flags
+--    L1305  DrawOverlay — skeet-style stacked indicators
+--    L1365  Cleanup (ResetPlist, EndMatch, FullShutdown)
+--    L1395  Event registration
+-- ════════════════════════════════════════════════════════════════════
+
+local ffi = require "ffi"
+
+-- ══════════════════════════════════════════════════════════════════
+--  DEBUG LOGGER
+--  writefile / readfile are confirmed global GS API functions.
+--  Output: %localappdata%\gamesense\riftveil_debug.txt (append).
+--  Structured format: [HH:MM:SS.mmm][LVL][MOD] key=val ...
+-- ══════════════════════════════════════════════════════════════════
+local LOG_FILE  = "riftveil_debug.txt"
+local log_buf   = {}
+local log_total = 0
+
+local function ts()
+    local h, m, s, ms = client.system_time()
+    return string.format("%02d:%02d:%02d.%03d", h, m, s, ms)
+end
+
+local function log_write(level, mod, msg)
+    local line = string.format("[%s][%s][%s] %s", ts(), level, mod, msg)
+    log_buf[#log_buf + 1] = line
+    log_total = log_total + 1
+    if #log_buf >= 512 then
+        local existing = readfile(LOG_FILE) or ""
+        writefile(LOG_FILE, existing .. table.concat(log_buf, "\n") .. "\n")
+        log_buf = {}
+    end
+end
+
+local function flush_log()
+    if #log_buf == 0 then return end
+    local existing = readfile(LOG_FILE) or ""
+    writefile(LOG_FILE, existing .. table.concat(log_buf, "\n") .. "\n")
+    log_buf = {}
+end
+
+-- Module-scoped emit helpers. Use: dbg("6lex", "side=%d", side)
+local function dbg(mod, fmt, ...) if select("#", ...) > 0 then log_write("DBG", mod, string.format(fmt, ...)) else log_write("DBG", mod, fmt) end end
+local function info(mod, fmt, ...) if select("#", ...) > 0 then log_write("INF", mod, string.format(fmt, ...)) else log_write("INF", mod, fmt) end end
+local function warn(mod, fmt, ...) if select("#", ...) > 0 then log_write("WRN", mod, string.format(fmt, ...)) else log_write("WRN", mod, fmt) end end
+local function err(mod, fmt, ...)  if select("#", ...) > 0 then log_write("ERR", mod, string.format(fmt, ...)) else log_write("ERR", mod, fmt) end end
+
+-- ══════════════════════════════════════════════════════════════════
+--  PERSISTENT DATABASE  (read once at load, written on match end)
+--  DB[steam64_str] = {config_type, vuln_pref, bt_pref, hit_rate, kills}
+--
+--  PER-MATCH STATE  (keyed by steam64, wiped on game_end/level_init)
+-- ══════════════════════════════════════════════════════════════════
+local DB_KEY   = "riftveil_v1"
+local DB       = database.read(DB_KEY) or {}
+local REC      = {}   -- per-player resolver records this match
+local EIDX_S64 = {}   -- [entity_index] = steam64_str, refreshed each tick
+local SHOTS    = {}   -- [shot_id] = context snapshot at aim_fire
+local DT_HIST  = {}   -- [s64] = simtime-delta samples for DT detection
+
+info("db", "loaded with %d entries", (function() local c=0; for _ in pairs(DB) do c=c+1 end; return c end)())
+
+-- ══════════════════════════════════════════════════════════════════
+--  CVAR ORIGINALS  (saved before any modification)
+-- ══════════════════════════════════════════════════════════════════
+local ORIG_INTERP  = cvar.cl_interp:get_float()
+local ORIG_RATIO   = cvar.cl_interp_ratio:get_int()
+local ORIG_IPOLATE = cvar.cl_interpolate:get_int()
+
+-- ══════════════════════════════════════════════════════════════════
+--  UI  —  skeet / deutsch style, LUA "B" container
+--
+--  Philosophy: built-in resolver runs by default.
+--  We only take control when our signal is stronger than its guess.
+--  [SAFE] = tested, additive, won't break the built-in
+--  [EXP]  = experimental, disable if resolver feels worse
+-- ══════════════════════════════════════════════════════════════════
+local _h0      = ui.new_label("LUA","B","[*] RIFTVEIL")
+local ui_on    = ui.new_checkbox("LUA","B","  Enable")
+
+-- SAFE — these only override when signal is definitive
+local _h1      = ui.new_label("LUA","B","-- safe overrides")
+local ui_6lex  = ui.new_checkbox("LUA","B","  [SAFE] 6lex extraction")
+local ui_vuln  = ui.new_checkbox("LUA","B","  [SAFE] Vulnerability windows")
+local ui_hitmem= ui.new_checkbox("LUA","B","  [SAFE] Hit-side memory")
+
+-- EXPERIMENTAL — disable if things feel worse
+local _h2      = ui.new_label("LUA","B","-- experimental")
+local ui_per   = ui.new_checkbox("LUA","B","  [EXP] Period prediction")
+local ui_asym  = ui.new_checkbox("LUA","B","  [EXP] Asymmetric angles")
+local ui_sup   = ui.new_checkbox("LUA","B","  [EXP] Suppress shots")
+
+-- INTERFACE
+local _h3      = ui.new_label("LUA","B","-- interface")
+local ui_tight = ui.new_checkbox("LUA","B","  Tight interp")
+local ui_esp   = ui.new_checkbox("LUA","B","  Indicators")
+local ui_verb  = ui.new_checkbox("LUA","B","  Verbose log")
+
+local _h4      = ui.new_label("LUA","B","-- controls")
+
+-- Forward-declare FlushDB so button callbacks can reference it
+local FlushDB
+
+local _btn_flush = ui.new_button("LUA","B","  Flush DB", function()
+    if FlushDB then FlushDB() end
+    client.log("[RIFTVEIL] DB flushed")
+end)
+local _btn_reset = ui.new_button("LUA","B","  Reset match", function()
+    local n = 0
+    for s64 in pairs(REC) do DB[s64] = nil; n = n + 1 end
+    REC = {}; DT_HIST = {}; SHOTS = {}; EIDX_S64 = {}
+    client.log(string.format("[RIFTVEIL] reset %d profiles", n))
+    info("reset", "manual reset, %d profiles cleared", n)
+end)
+local _btn_clr = ui.new_button("LUA","B","  Clear log", function()
+    writefile(LOG_FILE, "")
+    log_buf = {}; log_total = 0
+    client.log("[RIFTVEIL] log cleared")
+end)
+
+local SUB_ITEMS = {
+    _h1, ui_6lex, ui_vuln, ui_hitmem,
+    _h2, ui_per, ui_asym, ui_sup,
+    _h3, ui_tight, ui_esp, ui_verb,
+    _h4, _btn_flush, _btn_reset, _btn_clr,
+}
+local function RefreshVis()
+    local on = ui.get(ui_on)
+    for _, item in ipairs(SUB_ITEMS) do ui.set_visible(item, on) end
+end
+ui.set_callback(ui_on, RefreshVis)
+RefreshVis()
+
+ui.set_callback(ui_tight, function()
+    if not ui.get(ui_on) then return end
+    if ui.get(ui_tight) then
+        pcall(function()
+            cvar.cl_interpolate:set_int(0)
+            cvar.cl_interp_ratio:set_int(1)
+            cvar.cl_interp:set_float(0.031)
+        end)
+        info("interp", "tight ON")
+    else
+        pcall(function()
+            cvar.cl_interpolate:set_int(ORIG_IPOLATE)
+            cvar.cl_interp_ratio:set_int(ORIG_RATIO)
+            cvar.cl_interp:set_float(ORIG_INTERP)
+        end)
+        info("interp", "tight OFF")
+    end
+end)
+
+-- ══════════════════════════════════════════════════════════════════
+--  CONSOLE COMMANDS  (console_input — confirmed cheat event)
+--    rv_stats   match stats per player
+--    rv_db      permanent DB contents
+--    rv_clear   wipe log file
+--    rv_reset   hard reset match + DB entries for current enemies
+-- ══════════════════════════════════════════════════════════════════
+client.set_event_callback("console_input", function(text)
+    local cmd = (text:match("^%s*(%S+)") or ""):lower()
+
+    if cmd == "rv_stats" then
+        local out = {"[RIFTVEIL] === MATCH STATS ==="}
+        for s64, rec in pairs(REC) do
+            out[#out+1] = string.format(
+                "  %s | %s | conf:%d%% | hits:%d | rmiss:%d | bt:%d | cfg:%s",
+                entity.get_player_name(rec.eidx or 0) or s64,
+                rec.aa_type, math.floor(rec.conf*100),
+                rec.hit_count, rec.resolver_misses,
+                rec.preferred_bt, rec.config_type or "?")
+        end
+        out[#out+1] = string.format("  log lines: %d", log_total)
+        local s = table.concat(out, "\n")
+        client.log(s); log_write("CMD","stats", s)
+
+    elseif cmd == "rv_db" then
+        local out = {"[RIFTVEIL] === PERMANENT DB ==="}
+        for s64, e in pairs(DB) do
+            out[#out+1] = string.format(
+                "  %s | cfg:%s | vuln:%s | bt:%s | hr:%d%% | kills:%d",
+                s64, e.config_type or "?", e.vuln_pref or "?",
+                tostring(e.bt_pref), math.floor((e.hit_rate or 0)*100),
+                e.kills or 0)
+        end
+        local s = table.concat(out, "\n")
+        client.log(s); log_write("CMD","db", s)
+
+    elseif cmd == "rv_clear" then
+        writefile(LOG_FILE, ""); log_buf = {}; log_total = 0
+        client.log("[RIFTVEIL] log cleared")
+
+    elseif cmd == "rv_reset" then
+        local n = 0
+        for s64 in pairs(REC) do DB[s64] = nil; n = n + 1 end
+        REC = {}; DT_HIST = {}; SHOTS = {}; EIDX_S64 = {}
+        client.log(string.format("[RIFTVEIL] reset %d profiles", n))
+        info("reset", "%d profiles cleared", n)
+    end
+end)
+
+-- ══════════════════════════════════════════════════════════════════
+--  CFG  — single tunables table (edit here, not buried in logic)
+-- ══════════════════════════════════════════════════════════════════
+local CFG = {
+    -- Animstate / FFI
+    AS_OFFSET    = 0x9960,  -- CCSPlayerAnimState within CBasePlayer
+    AL_OFFSET    = 10640,   -- animlayer array offset
+    AL_LAYER     = 6,       -- animlayer index carrying 6lex data
+    AL_IDX_VTBL  = 3,       -- IClientEntityList vtable slot for GetClientEntity
+
+    -- History
+    HIST_SIZE    = 16,      -- pose ring buffer depth
+    YAW_BUF      = 6,       -- eye yaw history length for yaw-jitter detection
+    TM_HORIZON   = 36,      -- lagcomp lookup table: ticks to keep
+
+    -- Pose
+    POSE_SCALE   = 120,     -- m_flPoseParameter[11] → pose: raw*120-60
+    DESYNC_CAP   = 58.0,    -- engine max desync angle (degrees)
+
+    -- Confidence
+    CONF_MIN     = 0.20,    -- below this: clear correction, don't apply
+    CONF_GROW    = 0.20,    -- per-tick confidence gain when jitter detected
+    CONF_DECAY   = 0.88,    -- per-tick decay multiplier when quiet
+    CONF_ESP     = 0.38,    -- minimum conf to show "resolved" flag/indicator
+    CONF_LOCK    = 0.65,    -- minimum to write to permanent DB
+
+    -- Detection
+    CLUSTER_GAP  = 15,      -- pose delta to split into separate cluster
+    POSE_THRESH  = 10,      -- minimum delta between samples to count as flip
+    HOLD_STABLE  = 4,       -- ticks same sign = hold AA
+
+    -- Spike / latency
+    SPIKE_THR    = 0.030,   -- |cur_lat - avg_lat| above this = spike
+
+    -- Defensive tickbase
+    DT_THRESH    = 3,       -- simtime ticks ahead = def-tickbase
+    DT_WINDOW    = 16,      -- simtime delta history size
+
+    -- Vulnerability windows (thresholds)
+    LBY_HIGH     = 20.0,    -- pose must have been above this to count as jitter
+    LBY_LOW      = 10.0,    -- pose must drop below this to trigger LBY snap
+    CTR_THRESH   = 12.0,    -- pose < this on jitter history = center pass
+    STOP_SPD_HI  = 50.0,    -- was moving above this (u/s)
+    STOP_SPD_LO  = 8.0,     -- now below this = stop event
+
+    -- Vulnerability window TTLs (base ticks before LC window extension)
+    VULN_TTL     = {lby=2, unk=1, stp=3, lnd=2, dck=2, ctr=1},
+
+    -- Period prediction
+    PERIOD_MIN   = 4,       -- minimum flip samples before trusting the period
+    PERIOD_MAX   = 8,       -- maximum believable jitter period (ticks)
+
+    -- Backtrack
+    LC_WINDOW_S  = 0.200,   -- sv_maxunlag estimate (seconds)
+
+    -- Config recognition tolerances
+    CFG_THRESH   = 0.50,    -- config_conf minimum before applying known angles
+    CFG_GAIN     = 0.15,    -- confidence gain per matching recognition
+    CFG_TICKS    = 32,      -- rerun recognition every N simtime ticks
+
+    -- State confidence seeds (first tick for a new player)
+    STATE_SEED = {
+        standing=0.40, running=0.30, crouch=0.30,
+        crouch_moving=0.15, air=0.25, air_crouch=0.15, slowmotion=0.20,
+    },
+
+    -- SHOTS table stale-entry prune age (ticks)
+    SHOTS_MAX_AGE = 256,
+}
+
+-- ══════════════════════════════════════════════════════════════════
+--  ENUMS  — named constants replacing bare string keys everywhere
+--  Typos in enum references are caught by Lua as nil, not silently
+--  matching a wrong string.
+-- ══════════════════════════════════════════════════════════════════
+
+-- AA types returned by DetectAA
+local AA = {
+    UNKNOWN  = "unknown",
+    STATIC   = "static",
+    HOLD     = "hold",
+    TWO_WAY  = "2way",
+    THREE_WAY= "3way",
+    FIVE_WAY = "5way",
+    SKITTER  = "skitter",
+}
+
+-- Movement states returned by ClassifyState
+local STATE = {
+    STANDING      = "standing",
+    RUNNING       = "running",
+    CROUCH        = "crouch",
+    CROUCH_MOVING = "crouch_moving",
+    AIR           = "air",
+    AIR_CROUCH    = "air_crouch",
+    SLOWMOTION    = "slowmotion",
+}
+
+-- Resolver correction methods (what last_meth gets set to)
+local METH = {
+    RING      = "ring",
+    HIT_MEM   = "hit_mem",
+    SIX_LEX   = "6lex",
+    PERIOD    = "period",
+    LAGCOMP   = "lagcomp",
+    PHASE     = "phase",
+    DEF_TICK  = "def_tick",
+    RING_SPK  = "ring_spike",
+    YAW_CACHE = "yaw_cache",
+    SYM_FLIP  = "sym_flip",
+    SUPPRESS  = "suppress",
+    META_HOLD = "meta_hold",  -- meta_aggressive holdover when built-in fails the meta
+}
+
+-- Vulnerability window types returned by DetectVuln
+local VTYPE = {
+    LBY = "lby",  -- LBY snap: pose collapsed
+    UNK = "unk",  -- unchoke tick: first real packet after burst
+    STP = "stp",  -- stop event: velocity crossed zero
+    LND = "lnd",  -- landing: on_ground flipped false→true
+    DCK = "dck",  -- duck transition: duck_amount crossed 0.5
+    CTR = "ctr",  -- jitter center pass: pose near 0 on alt pattern
+}
+
+-- Known config profiles (from luasense_beta/luasensedev analysis)
+local KNOWN_CFGS = {
+    luasense_beta = {avg_left=26, avg_right=41, tol=6},
+    luasense_std  = {avg_left=30, avg_right=38, tol=6},
+    symmetric     = {avg_left=35, avg_right=35, tol=8},
+}
+
+-- Pre-computed counter angles per state per known config
+local CFG_COUNTER = {
+    luasense_beta = {
+        standing={L=24,R=41}, running={L=24,R=37}, crouch={L=32,R=46},
+        crouch_moving={L=22,R=44}, air={L=29,R=35},
+        air_crouch={L=18,R=44}, slowmotion={L=23,R=47},
+    },
+    luasense_std = {
+        standing={L=30,R=38}, running={L=28,R=35},
+        crouch={L=28,R=40}, crouch_moving={L=24,R=36},
+        air={L=26,R=32}, air_crouch={L=20,R=36}, slowmotion={L=26,R=40},
+    },
+}
+
+-- Fallback asymmetric table when no config is recognized
+local ASYM_FALLBACK = {
+    standing={24,41}, running={24,37}, crouch={32,46},
+    crouch_moving={22,44}, air={29,35}, air_crouch={18,44}, slowmotion={23,47},
+}
+
+local AA_SHORT = {
+    [AA.TWO_WAY]="2-WAY", [AA.THREE_WAY]="3-WAY", [AA.FIVE_WAY]="5-WAY",
+    [AA.SKITTER]="SKITTER", [AA.HOLD]="HOLD",
+    [AA.STATIC]="STATIC",  [AA.UNKNOWN]="?",
+}
+
+local CFG_LABEL = {
+    luasense_beta = "luasense β",
+    luasense_std  = "luasense",
+    symmetric     = "symmetric",
+}
+
+local HG = {
+    "generic","head","chest","stomach",
+    "left arm","right arm","left leg","right leg","neck","?","gear",
+}
+
+local SKITTER_PAT = {-1,1,0,-1,1,0,-1,0,1,-1,0,1}
+
+-- ══════════════════════════════════════════════════════════════════
+--  FFI  — animstate struct + animlayer
+--  Offsets verified against luasensedev.lua and luasense_beta.lua.
+--  AS_OFFSET and AL_OFFSET named above in CFG.
+-- ══════════════════════════════════════════════════════════════════
+pcall(ffi.cdef, [[
+struct rv_as {
+    char p0[24];  float anim_update_timer;
+    char p1[12];  float started_moving_time; float last_move_time;
+    char p2[16];  float last_lby_time;
+    char p3[8];   float run_amount;
+    char p4[16];
+    void *entity; void *active_weapon; void *last_active_weapon;
+    float last_csanim_time; int last_csanim_frame;
+    float eye_timer;      float eye_angles_y; float eye_angles_x;
+    float goal_feet_yaw;  float current_feet_yaw; float torso_yaw;
+    float last_move_yaw;  float lean_amount;
+    char p5[4];   float feet_cycle; float feet_yaw_rate;
+    char p6[4];   float duck_amount; float landing_duck_amount;
+    char p7[4];   float cur_origin[3]; float last_origin[3];
+    float velocity_x; float velocity_y;
+    char p8[4];   float u1;
+    char p9[8];   float u2; float u3; float u4;
+    float m_vel; float jump_fall_vel; float clamped_vel;
+    float feet_spd_fwd; float feet_spd_unk;
+    float last_move_start; float last_move_stop;
+    bool  on_ground; bool hit_in_ground_anim;
+    char p10[4];  float time_in_air; float last_z;
+    float head_from_ground; float stop_to_full_run;
+    char p11[4];  float magic;
+    char p12[60]; float world_force;
+    char p13[458]; float min_yaw; float max_yaw;
+};
+]])
+
+local al_t = ffi.typeof([[
+    struct {
+        char pad[24]; uint32_t seq;
+        float prev_cycle; float weight; float weight_delta_rate;
+        float playback_rate; float cycle;
+        void *entity; char pad2[4];
+    }**
+]])
+local cpt  = ffi.typeof("void***")
+local aspt = ffi.typeof("struct rv_as **")
+local ncfn = ffi.typeof("float(__thiscall*)(void*, int)")
+
+local cel = ffi.cast(cpt,
+    client.create_interface("client.dll","VClientEntityList003")
+    or error("[RIFTVEIL] VClientEntityList003 not found"))
+local get_ent = ffi.cast("void*(__thiscall*)(void*, int)", cel[0][CFG.AL_IDX_VTBL])
+local eng = ffi.cast(cpt,
+    client.create_interface("engine.dll","VEngineClient014")
+    or error("[RIFTVEIL] VEngineClient014 not found"))
+local get_nc  = ffi.cast("void*(__thiscall*)(void*)", eng[0][78])
+
+info("ffi", "interfaces acquired")
+
+local function GetPtr(ent)
+    local ok, p = pcall(get_ent, cel, ent)
+    return (ok and p and p ~= ffi.NULL) and p or nil
+end
+
+local function GetAS(ent)
+    local p = GetPtr(ent); if not p then return nil end
+    local ok, s = pcall(function()
+        return ffi.cast(aspt, ffi.cast("char*", p) + CFG.AS_OFFSET)[0]
+    end)
+    return (ok and s) or nil
+end
+
+local function GetAL(ptr, idx)
+    local ok, al = pcall(function()
+        return ffi.cast(al_t, ffi.cast("char*", ptr) + CFG.AL_OFFSET)[0][idx]
+    end)
+    return ok and al or nil
+end
+
+local function GetLat()
+    local ok, nc = pcall(function() return ffi.cast(cpt, get_nc(eng)) end)
+    if not ok or not nc or nc == ffi.NULL then
+        local l = client.latency(); return l, l
+    end
+    local ok1, cur = pcall(function() return ffi.cast(ncfn, nc[0][9])(nc, 0) end)
+    local ok2, avg = pcall(function() return ffi.cast(ncfn, nc[0][10])(nc, 0) end)
+    cur = (ok1 and cur and cur > 0) and cur or client.latency()
+    avg = (ok2 and avg and avg > 0) and avg or cur
+    return cur, avg
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--  MATH HELPERS + INPUT VALIDATION
+-- ══════════════════════════════════════════════════════════════════
+local function Clamp(v, a, b) return math.min(math.max(v, a), b) end
+local function Sign(x)        return x > 0 and 1 or (x < 0 and -1 or 0) end
+local function NA(a)
+    while a >  180 do a = a - 360 end
+    while a < -180 do a = a + 360 end
+    return a
+end
+local function TT(t) return t and math.floor(t / globals.tickinterval() + 0.5) or 0 end
+
+-- isnum: rejects nil, NaN, ±inf, and values beyond plausible game range
+local function isnum(v, lo, hi)
+    if type(v) ~= "number" or v ~= v or math.abs(v) >= 1e9 then return false end
+    if lo and v < lo then return false end
+    if hi and v > hi then return false end
+    return true
+end
+
+-- LiveCap: reads actual per-player desync bounds from animstate.
+-- Confirmed accessible: skeet DLL analysis (Dec 27 2024 build) showed
+-- min_yaw / max_yaw fields in rv_as after pad13[0x1CA].
+-- Returns (min_yaw, max_yaw, cap) where cap = max of their magnitudes.
+-- Falls back to CFG.DESYNC_CAP = 58 if the read is invalid or not yet
+-- populated (first tick on a new player).
+local function LiveCap(as)
+    if as then
+        local mn = as.min_yaw
+        local mx = as.max_yaw
+        if isnum(mn, -90, -0.5) and isnum(mx, 0.5, 90) then
+            return mn, mx, math.max(math.abs(mn), mx)
+        end
+    end
+    return -CFG.DESYNC_CAP, CFG.DESYNC_CAP, CFG.DESYNC_CAP
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--  6LEX EXTRACTION
+--  Primary:  animlayer[6].playback_rate digit[1]==9, d4d5 encodes side
+--  Fallback: animlayer[6].weight (same digit pattern — Nek0o technique)
+-- ══════════════════════════════════════════════════════════════════
+local function Dig(v, i)
+    if not isnum(v) then return 0 end
+    return math.abs(
+        math.floor(math.abs(v) * (10^i)) -
+        math.floor(math.abs(v) * (10^(i-1))) * 10
+    ) % 10
+end
+
+local function Extract6Lex(ptr, live_cap)
+    live_cap = live_cap or CFG.DESYNC_CAP
+    local al = GetAL(ptr, CFG.AL_LAYER)
+    if not al then return 0, 0 end
+
+    local function try(field_val)
+        if not isnum(field_val) or field_val == 0 then return 0, 0 end
+        if Dig(field_val, 1) ~= 9 then return 0, 0 end
+        local d4, d5 = Dig(field_val, 4), Dig(field_val, 5)
+        local d45    = d4 * 10 + d5
+        local side   = (d45 == 30 and 1) or (d45 == 29 and -1) or 0
+        if side == 0 then return 0, 0 end
+        -- Clamp to live per-player cap from animstate, not hardcoded 58
+        return side, Clamp((-3.4117 * (d4 + d5 * 0.1)) + 98.9393, 0, live_cap)
+    end
+
+    local s, d = try(al.playback_rate)
+    if s ~= 0 then return s, d end
+
+    s, d = try(al.weight)
+    if s ~= 0 then return s, math.min(35.0, live_cap) end  -- weight fallback: fixed estimate
+    return 0, 0
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--  ENGINE HELPERS
+-- ══════════════════════════════════════════════════════════════════
+-- (MaxDesync removed — was used to compute max_d which was dead after pick chain refactor)
+
+local function ClassifyState(player, as)
+    local flags = entity.get_prop(player, "m_fFlags") or 0
+    local og    = bit.band(flags, 1) ~= 0
+    local duck  = as and (as.duck_amount or 0) > 0.5
+    local vx, vy = entity.get_prop(player, "m_vecVelocity")
+    local spd   = (isnum(vx) and isnum(vy)) and math.sqrt(vx*vx + vy*vy) or 0
+    if not og   then return duck and STATE.AIR_CROUCH  or STATE.AIR           end
+    if duck     then return spd > 20 and STATE.CROUCH_MOVING or STATE.CROUCH  end
+    if spd > 5 and spd < 100 then return STATE.SLOWMOTION                     end
+    if spd >= 100             then return STATE.RUNNING                        end
+    return STATE.STANDING
+end
+
+-- Return correction angle for a given side using config knowledge or fallback
+local function CfgAngle(side, state, config_type)
+    local tbl = config_type and CFG_COUNTER[config_type] and CFG_COUNTER[config_type][state]
+    if tbl then return side > 0 and tbl.R or -tbl.L end
+    local a = ASYM_FALLBACK[state] or ASYM_FALLBACK[STATE.STANDING]
+    return side > 0 and a[2] or -a[1]
+end
+
+-- (GenAngle removed — override block uses CfgAngle directly;
+--  ui_asym toggle feeds into CfgAngle via ASYM_FALLBACK vs CFG_COUNTER selection)
+
+-- ══════════════════════════════════════════════════════════════════
+--  CHOKE ESTIMATION
+-- ══════════════════════════════════════════════════════════════════
+local function ChokedPkts(st_raw, player)
+    if not isnum(st_raw, 0.001) then return 0 end
+    local cur, _ = GetLat()
+    local diff = globals.curtime() - st_raw
+    if diff < 0 or diff > 2.0 then return 0 end
+    return Clamp(TT(math.max(0.0, diff - cur)), 0, 14)
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--  DEFENSIVE TICKBASE TRACKING
+-- ══════════════════════════════════════════════════════════════════
+local function TrackDT(s64, st_raw)
+    if not DT_HIST[s64] then DT_HIST[s64] = {} end
+    local h = DT_HIST[s64]
+    h[#h + 1] = st_raw / globals.tickinterval() - globals.tickcount()
+    if #h > CFG.DT_WINDOW then table.remove(h, 1) end
+end
+
+local function IsDefTick(s64)
+    local h = DT_HIST[s64]
+    if not h or #h < 6 then return false end
+    local ahead = 0
+    for _, v in ipairs(h) do if v > CFG.DT_THRESH then ahead = ahead + 1 end end
+    return ahead >= math.ceil(#h * 0.65)
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--  OUR TICKBASE GATE
+-- ══════════════════════════════════════════════════════════════════
+local brk = {def=0, check=0, ahead=false}
+client.set_event_callback("predict_command", function()
+    local me = entity.get_local_player()
+    if not me or not entity.is_alive(me) then brk.def = 0; brk.check = 0; return end
+    local tb = entity.get_prop(me, "m_nTickBase") or 0
+    brk.check = math.max(tb, brk.check)
+    if math.abs(tb - brk.check) > 64 then brk.def = 0; brk.check = 0 end
+    if brk.check > tb then brk.def = math.abs(tb - brk.check) end
+    brk.ahead = globals.tickcount() > tb
+end)
+
+local function WeDefensive() return brk.ahead and brk.def > 2 and brk.def < 14 end
+
+local function LCTicks(use_avg)
+    local ti      = globals.tickinterval()
+    local cur, avg = GetLat()
+    local lat     = use_avg and avg or cur
+    local shift   = WeDefensive() and (brk.def * ti) or 0
+    local lerp    = 0.031; pcall(function() lerp = cvar.cl_interp:get_float() end)
+    return math.max(0, math.floor((lat + lerp + shift) / ti))
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--  BACKTRACK INTERP MANIPULATION
+-- ══════════════════════════════════════════════════════════════════
+local function RestoreInterp()
+    if ui.get(ui_tight) then return end
+    pcall(function()
+        cvar.cl_interp:set_float(ORIG_INTERP)
+        cvar.cl_interp_ratio:set_int(ORIG_RATIO)
+    end)
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--  RING BUFFER
+-- ══════════════════════════════════════════════════════════════════
+local function RNew(n)    return {b={}, h=0, n=n} end
+local function RPush(r,v) r.h = (r.h % r.n) + 1; r.b[r.h] = v end
+local function RGet(r,o)  return r.b[((r.h - o - 1) % r.n) + 1] end
+local function RLen(r)    local c=0; for i=1,r.n do if r.b[i] then c=c+1 end end; return c end
+
+-- ══════════════════════════════════════════════════════════════════
+--  AA DETECTION
+-- ══════════════════════════════════════════════════════════════════
+local function PoseVar(hist)
+    local cnt = RLen(hist); if cnt < 2 then return 0 end
+    local sum, sq = 0, 0
+    for i = 0, cnt-1 do
+        local e = RGet(hist, i)
+        if e then sum = sum + e.p; sq = sq + e.p*e.p end
+    end
+    local m = sum / cnt; return sq/cnt - m*m
+end
+
+local function MeanSidePose(hist)
+    local sl, rl, sr, rr = 0, 0, 0, 0
+    for i = 0, RLen(hist)-1 do
+        local e = RGet(hist, i)
+        if e then
+            if e.p < 0 then sl = sl + math.abs(e.p); rl = rl + 1
+            elseif e.p > 0 then sr = sr + e.p; rr = rr + 1 end
+        end
+    end
+    return rl > 0 and sl/rl or 0, rr > 0 and sr/rr or 0
+end
+
+local function CountClusters(hist)
+    local cnt = RLen(hist); if cnt < 3 then return 0, {} end
+    local vals = {}
+    for i = 0, cnt-1 do local e = RGet(hist,i); if e then vals[#vals+1] = e.p end end
+    table.sort(vals)
+    -- Store {center, count, sum} so running average stays correct
+    local cl = {{vals[1], 1, vals[1]}}
+    for i = 2, #vals do
+        if math.abs(vals[i] - cl[#cl][1]) > CFG.CLUSTER_GAP then
+            cl[#cl+1] = {vals[i], 1, vals[i]}
+        else
+            local c = cl[#cl]
+            c[2] = c[2] + 1
+            c[3] = c[3] + vals[i]
+            c[1] = c[3] / c[2]  -- true running mean
+        end
+    end
+    return #cl, cl
+end
+
+local function IsSkitter(hist)
+    local cnt = RLen(hist); if cnt < 6 then return false end
+    local m = 0
+    for i = 0, 5 do
+        local e = RGet(hist, i)
+        if e then
+            local exp = SKITTER_PAT[(i % #SKITTER_PAT) + 1]
+            if exp == 0 and math.abs(e.p) < 10 then m = m + 1
+            elseif exp ~= 0 and Sign(e.p) == exp then m = m + 1 end
+        end
+    end
+    return m >= 4
+end
+
+local function IsHold(hist)
+    local cnt = RLen(hist); if cnt < CFG.HOLD_STABLE + 2 then return false end
+    local last = RGet(hist, 0); if not last then return false end
+    local fs, stable = Sign(last.p), 1  -- start at 1 counting the most recent sample
+    for i = 1, math.min(cnt-1, CFG.HOLD_STABLE+2) do
+        local e = RGet(hist, i)
+        if e then
+            if Sign(e.p) == fs then stable = stable + 1
+            else stable = 0 end
+        end
+    end
+    return stable >= CFG.HOLD_STABLE
+end
+
+-- Returns: aa_type, dominant_side, confidence, pose_sum
+local function DetectAA(hist)
+    local cnt = RLen(hist); if cnt < 4 then return AA.UNKNOWN, 0, 0, 0 end
+    if PoseVar(hist) < 25 then return AA.STATIC, 0, 0.8, 0 end
+    if IsHold(hist) then
+        local e = RGet(hist, 0); local s = e and Sign(e.p) or 0
+        return AA.HOLD, s, 0.65, s * 30
+    end
+    local pose_sum, flips = 0, 0
+    for i = 0, cnt-1 do
+        local e = RGet(hist, i); if e then pose_sum = pose_sum + e.p end
+        local a, b = RGet(hist, i), RGet(hist, i+1)
+        if a and b and math.abs(a.p - b.p) > CFG.POSE_THRESH and Sign(a.p) ~= Sign(b.p) then
+            flips = flips + 1
+        end
+    end
+    local dom  = Sign(pose_sum)
+    local conf = math.min(flips / math.max(cnt-1, 1), 1.0)
+    if IsSkitter(hist) then return AA.SKITTER, dom, math.max(conf, 0.6), pose_sum end
+    local nc, cl = CountClusters(hist)
+    if nc >= 4 then return AA.FIVE_WAY,   dom, conf, pose_sum end
+    if nc == 3 then
+        if cl[2] and math.abs(cl[2][1]) < 10 then dom = 0 end
+        return AA.THREE_WAY, dom, conf, pose_sum
+    end
+    if nc == 2 then return AA.TWO_WAY, dom, conf, pose_sum end
+    return AA.UNKNOWN, dom, conf, pose_sum
+end
+
+local function YawSide(yc, eye_y)
+    local n = #yc; if n < 2 then return 0 end
+    local y1, y2 = NA(yc[n]), NA(yc[n-1])
+    local s1, c1 = math.sin(math.rad(y1)), math.cos(math.rad(y1))
+    local s2, c2 = math.sin(math.rad(y2)), math.cos(math.rad(y2))
+    return Sign(NA(eye_y - NA(math.deg(math.atan2((s1+s2)/2, (c1+c2)/2)))))
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--  CONFIG RECOGNITION
+--  Runs every CFG.CFG_TICKS to match observed asymmetric pose
+--  distribution against KNOWN_CFGS profiles.
+-- ══════════════════════════════════════════════════════════════════
+local function RecognizeCfg(rec)
+    if RLen(rec.hist) < 12 then return nil end
+    local al, ar = MeanSidePose(rec.hist)
+    if al < 5 or ar < 5 then return nil end  -- need data on both sides
+    local best, best_err = nil, 999
+    for name, p in pairs(KNOWN_CFGS) do
+        local e = math.abs(al - p.avg_left) + math.abs(ar - p.avg_right)
+        if e < p.tol * 2 and e < best_err then best_err = e; best = name end
+    end
+    return best
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--  JITTER PERIOD PREDICTION
+--  Computes median inter-flip gap from flip timestamps.
+--  Predicts current side without reading the (possibly corrupted) pose.
+-- ══════════════════════════════════════════════════════════════════
+local function PredictSide(rec, cur_tc)
+    local fl = rec.fl
+    if #fl < CFG.PERIOD_MIN then return 0 end
+    local gaps = {}
+    for i = 2, #fl do
+        local g = fl[i] - fl[i-1]
+        if g >= 1 and g <= CFG.PERIOD_MAX then gaps[#gaps+1] = g end
+    end
+    if #gaps < 2 then return 0 end
+    table.sort(gaps)
+    local period = gaps[math.floor(#gaps / 2) + 1]
+    if not period or period < 1 then return 0 end
+    rec.period = period
+    local since = cur_tc - fl[#fl]
+    if since < 0 then return 0 end
+    local predicted = (math.floor(since / period) % 2 == 0) and rec.side or -rec.side
+    return predicted ~= 0 and predicted or 0
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--  TORSO CLUSTER  — enemy AA counter helpers
+--
+--  Modern AA patterns (from lua analysis):
+--
+--  serenity.lua (NeverLose):
+--    lambotruck.numbers.ways("Way Yaw", positions) — cycles N discrete
+--    torso positions per unchoke. 3-way = {-off, 0, +off}, 5-way adds
+--    ±off/2. Single unchoke reads ONE position; across 5-6 reads the
+--    mode cluster is the real dominant side.
+--    Edge yaw: raytrace 180° arc → aligns body with cover geometry.
+--    Result: torso clusters at one of N angles, edge cases near wall angle.
+--
+--  aesthetic_bin_oracle.lua (NeverLose v2.1):
+--    body_yaw_switch slider: body yaw TURNS OFF for N ticks cyclically.
+--    When off, the LBY snap reads as near-zero pose (not a real flip).
+--    body_yaw_left/right_random: fakelimit ±X% each unchoke.
+--    Records system: arbitrary stored animation sequences, no pattern.
+--    result: LBY near-zero snaps look like real flips but aren't.
+--
+--  ambani_dev.lua (NeverLose):
+--    torpedo jitter: alternates between faszsag pose (yawoffset≈0,
+--    body yaw OFF, different fakelimits) and normal pose every N ticks.
+--    Faszsag unchoke reads torso≈0 — NOT the real desync angle.
+--    sanya mode: 3-way every tick, Random every 10th sent_packet.
+--    tick body_yaw: ON/OFF at tickspeed with random fakelimit 47-60°
+--    and random inverter overrides. Anti-bruteforce: v56.ab.jitteralgo
+--    adapts to detected flip patterns.
+--
+--  ─────────────────────────────────────────────────────────────────
+--  BATCH 2 SCRIPTS:
+--
+--  aesthetic_beta_6483984.lua (NeverLose β):
+--    Same architecture as v2.1 but adds BODY YAW DELAY per state:
+--      Standing=3t, Crouching=9t, SlowWalk=16t (!), CT/Moving=10t.
+--    Body yaw lags behind fake yaw by N ticks — first unchoke reads
+--    the MID-DELAY torso position, NOT the settled real angle.
+--    "Meta" preset: delay=16t on slowwalk, freestanding_body_yaw=
+--    "Peek Real" on CT/Moving. Records system refined with custom
+--    base64 key cipher. modifier_random adds noise to offset each tick.
+--    Counter: TorsoCluster naturally handles delay by preferring stable
+--    cluster centers over transitional mid-delay readings. The settled
+--    position forms a cluster; transitional ticks scatter and fail
+--    CLUSTER_MIN. Body yaw delay effectively extends the time window
+--    before our cluster converges — patience is the counter.
+--
+--  testarossa.lua (NeverLose, v1.8.0, testarossa.tech):
+--    Anti-bruteforce: up to 10 configurable phases. Phase advances when
+--    bullet_impact hits within 50 units of local player — meaning EVERY
+--    missed shot triggers a phase switch. Each phase has its own
+--    yaw_offset_L/R and modifier configuration. Phase resets after
+--    configurable timer (default 5s) without being hit.
+--    "Delayed Switch" yaw: offset switches at tick_count/2 of the delay
+--    window — creates a mid-delay position that looks like neither side.
+--    "Custom Way" modifier: cycles 3 offset values every 3 ticks.
+--    Edge yaw: raytrace 20° steps, 30-unit range, same as serenity.
+--    Counter: meta_aggressive mode fires fewer missed shots (more
+--    accurate corrections), reducing AB phase triggers. Suppress when
+--    below vuln confidence starves the AB system of bullet_impact events.
+--    Lower suppress threshold on meta_aggressive players.
+--
+--  gasolina_bin_oracle.lua (NeverLose, pui):
+--    Delay system: Default (fixed ticks/1.95), Random (min-max),
+--    Custom (up to 6 programmable delay slots that cycle).
+--    Body yaw modes: Static, Ticks (same as ambani tick_body_yaw),
+--    Random (tickcount % random_N == 1).
+--    "Bobro" modifier: 7-position exploit-value cycle via get_exploit_
+--    values(): {-1, -0.5, -0.33, +0.33, +0.5, +1} × offset, cycling
+--    positions 1-7 per unchoke. Counter: CLUSTER_W=7 catches all 7.
+--    Random fakelimits: math.random(min, max) per unchoke — makes
+--    limit-based resolver assumptions fail. Counter: CLUSTER_THR=25
+--    absorbs ±5° random limit variance around the cluster center.
+--    Speed-based switch: after N ticks, L/R limit assignments swap.
+--    Counter: TorsoCluster averages through limit variance naturally.
+--
+--  Counter: TorsoCluster accumulates torso readings and returns the mode
+--  cluster center instead of the instantaneous value.
+--  W=7 covers Bobro's 7-position cycle; THR=25 absorbs random limits.
+-- ══════════════════════════════════════════════════════════════════
+local CLUSTER_W   = 7   -- readings to keep: covers Bobro's 7-way cycle
+local CLUSTER_THR = 25  -- °, within-cluster threshold; 25 absorbs random limit variance
+local CLUSTER_MIN = 3   -- minimum members to trust a cluster
+
+local function TorsoCluster(rec, torso)
+    local h = rec.torso_hist
+    table.insert(h, torso)
+    while #h > CLUSTER_W do table.remove(h, 1) end
+    if #h < CLUSTER_MIN then return nil end
+
+    -- Find best cluster using candidate-relative circular mean.
+    -- Summing raw angle values fails near ±180° (arithmetic mean of [175°, -175°]
+    -- gives 0°, not ±180°). Instead sum the NA()-wrapped *difference* from the
+    -- candidate center — differences are bounded ±180°, so wrap-around is safe.
+    -- Circular mean: center = NA(cand + mean_diff_from_cand)
+    local best_ctr, best_cnt = torso, 0
+    for _, cand in ipairs(h) do
+        local cnt, diff_sum = 0, 0.0
+        for _, v in ipairs(h) do
+            local diff = NA(v - cand)              -- always within ±180°
+            if math.abs(diff) <= CLUSTER_THR then
+                cnt      = cnt + 1
+                diff_sum = diff_sum + diff
+            end
+        end
+        if cnt > best_cnt then
+            best_cnt = cnt
+            best_ctr = NA(cand + diff_sum / cnt)  -- circular center
+        end
+    end
+
+    return best_cnt >= CLUSTER_MIN and best_ctr or nil
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--  VULNERABILITY DETECTOR
+--  Returns: vtype, correction_angle, confidence  OR  nil, 0, 0
+--  rec.prev_* fields must be set from the previous tick.
+-- ══════════════════════════════════════════════════════════════════
+local function DetectVuln(rec, as, pose, eye_y)
+    -- Guard: if eye_y is zero or suspiciously small, try last ring buffer entry
+    local safe_eye = (math.abs(eye_y) > 1.0) and eye_y
+                     or (RLen(rec.hist) > 0 and RGet(rec.hist, 1) and RGet(rec.hist, 1).e)
+                     or nil
+
+    -- [LBY] lean body yaw snap: pose collapsed from high to near-zero
+    if rec.prev_pose
+       and math.abs(rec.prev_pose) >= CFG.LBY_HIGH
+       and math.abs(pose) < CFG.LBY_LOW
+       and PoseVar(rec.hist) > 25 then
+        -- Sign of prev_pose tells us which side was faked.
+        -- Positive pose = body leaned right = real position is LEFT.
+        -- Use CfgAngle for the OPPOSITE side of the lean — deterministic,
+        -- no dependency on eye_y which is still the fake angle at snap time.
+        local real_side = -Sign(rec.prev_pose)
+        if real_side == 0 then return nil, 0, 0 end
+        return VTYPE.LBY, CfgAngle(real_side, rec.state, rec.config_type), 0.95
+    end
+
+    -- [UNK] unchoke tick: first real packet after a choke burst
+    if rec.was_choked and rec.cur_choke == 0 then
+        local torso = as.torso_yaw
+        local gfy   = as.goal_feet_yaw
+        if not torso or math.abs(torso) < 1.0 then return nil, 0, 0 end
+
+        -- TORPEDO/FASZSAG COUNTER (ambani_dev):
+        -- Torpedo jitter alternates between a "faszsag" defensive pose (yawoffset≈0,
+        -- body yaw OFF) and the real desync pose every N ticks. When faszsag fires,
+        -- the unchoke reveals torso≈0, which is NOT the real desync. Applying it
+        -- zeroes out our correction exactly when we need it most.
+        -- Skip: |torso| < 8° → this is a faszsag/defensive pose, wait for next unchoke.
+        if math.abs(torso) < 8 then return nil, 0, 0 end
+
+        local d = math.abs(NA(torso - (safe_eye or torso)))
+
+        -- Minimum desync threshold: if torso ≈ eye, unchoke revealed nothing useful.
+        -- Scale threshold up if this player has a recent unk miss streak —
+        -- their torso_yaw is unreliable for this AA pattern.
+        local min_d = 15 + math.min((rec.unk_miss_streak or 0) * 10, 30)
+        if d < min_d then return nil, 0, 0 end
+
+        -- Cross-validate: if goal_feet_yaw and torso disagree by > 45°,
+        -- torso is mid-transition between fake and real — not reliable yet.
+        if gfy and isnum(gfy) and math.abs(NA(gfy - torso)) > 45 then
+            return nil, 0, 0
+        end
+
+        -- WAYS()/SANYA COUNTER (serenity, ambani_dev):
+        -- lambotruck.ways() and sanya cycle through N discrete positions. A single
+        -- unchoke reads whichever position the cycle landed on — could be any of 5.
+        -- TorsoCluster accumulates readings and returns the dominant cluster center,
+        -- which is the most-common real body position across the cycling pattern.
+        -- If no stable cluster yet, fall back to the raw torso reading.
+        local cluster_val = TorsoCluster(rec, torso)
+        local correction  = cluster_val or torso
+        local conf        = cluster_val and 0.93 or 0.90  -- higher conf when clustered
+
+        -- LIVE CAP BOOST: when animstate min/max_yaw are populated and the correction
+        -- falls within the actual engine-reported desync bounds, it's a validated read.
+        -- Modest boost from 0.90→0.92 / 0.93→0.96 — not a guarantee, just extra signal.
+        -- Skeet DLL analysis confirmed min_yaw/max_yaw are accessible from animstate.
+        if rec.live_min and rec.live_max
+           and isnum(rec.live_min, -90, -0.5) and isnum(rec.live_max, 0.5, 90) then
+            local abs_c = math.abs(correction)
+            local cap   = math.max(math.abs(rec.live_min), rec.live_max)
+            if abs_c <= cap + 5 then   -- within live cap range (±5° tolerance)
+                conf = cluster_val and 0.96 or 0.92
+            end
+        end
+
+        return VTYPE.UNK, correction, conf
+    end
+
+    -- [STP] stop event: velocity crossed from high to low.
+    -- FAKELAG BURST GUARD (gasolina fluctuate_fakelag, ambani):
+    -- fluctuate_fakelag alternates fakelag 1↔14 every 5 ticks, sending a burst of
+    -- 14 ticks at once. This creates an artificial velocity spike (high→low) at the
+    -- burst boundary that looks exactly like a real stop event but isn't.
+    -- Require BOTH prev_spd (1 tick ago) and prev_spd2 (2 ticks ago) to be above
+    -- STOP_SPD_HI — a real stop persists; a fakelag burst collapses in 1 tick.
+    if rec.prev_spd  and rec.prev_spd  >= CFG.STOP_SPD_HI
+    and rec.prev_spd2 and rec.prev_spd2 >= CFG.STOP_SPD_HI then
+        local vx, vy = entity.get_prop(rec.eidx or 0, "m_vecVelocity")
+        local spd = (isnum(vx) and isnum(vy)) and math.sqrt(vx*vx + vy*vy) or 0
+        if spd < CFG.STOP_SPD_LO then
+            local gfy = as.goal_feet_yaw or safe_eye
+            if not gfy or math.abs(gfy) < 1.0 then return nil, 0, 0 end
+            return VTYPE.STP, gfy, 0.80
+        end
+    end
+
+    -- [LND] landing: on_ground flipped false → true
+    if rec.prev_onground == false and as.on_ground == true then
+        if not safe_eye then return nil, 0, 0 end
+        return VTYPE.LND, safe_eye, 0.85
+    end
+
+    -- [DCK] duck transition: duck_amount crossed 0.5.
+    -- DCK COOLDOWN (aesthetic_beta, gasolina fake_duck):
+    -- fake_duck generates rapid duck_amount crossings every ~4 ticks. Without a
+    -- cooldown, DCK floods the correction with low-confidence readings (0.78) and
+    -- drowns out higher-quality UNK and LBY corrections. Cap at 1 DCK per 10 ticks.
+    local dn, dp = as.duck_amount or 0, rec.prev_duck or 0
+    local cross  = 0.5
+    if (rec._dck_cooldown or 0) > 0 then
+        -- cooldown ticking — decrement only, no DCK this tick
+    elseif (dp < cross and dn >= cross) or (dp >= cross and dn < cross) then
+        local torso = as.torso_yaw or safe_eye
+        if torso and math.abs(torso) >= 1.0 then
+            rec._dck_cooldown = 10   -- set before returning so it persists
+            return VTYPE.DCK, torso, 0.78
+        end
+    end
+
+    -- [CTR] jitter center pass: high variance history, pose near 0
+    if PoseVar(rec.hist) > 60
+       and math.abs(pose) < CFG.CTR_THRESH
+       and rec.prev_pose and math.abs(rec.prev_pose) >= 18 then
+        if not safe_eye then return nil, 0, 0 end
+        return VTYPE.CTR, safe_eye, 0.72
+    end
+
+    return nil, 0, 0
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--  RECORD MANAGEMENT
+--
+--  REC FIELD DOCUMENTATION
+--  ──────────────────────────────────────────────────────────────────
+--  Field             Type        Range       Writer
+--  .hist             ring buf    –           Update (SamplePlayer)
+--  .tm[tick]         table       –           Update (SamplePlayer)
+--  .yc[]             array       –           Update (SamplePlayer)
+--  .fl[]             array       simtime tk  Update (ClassifyPlayer)
+--  .side             int         -1/0/1      Update (ClassifyPlayer)
+--  .period           int         0..8        PredictSide
+--  .conf             float       0..1        Update (ClassifyPlayer)
+--  .aa_type          string(AA)  enum        DetectAA
+--  .flip             bool        –           on_aim_miss
+--  .lt               int         simtime tk  Update (gate)
+--  .hit_side         int         -1/0/1      on_aim_hit
+--  .hit_count        int         0..         on_aim_hit
+--  .resolver_misses  int         0..         on_aim_miss
+--  .def_tickbase     bool        –           IsDefTick
+--  .six_side         int         -1/0/1      Extract6Lex
+--  .six_desync       float       0..58       Extract6Lex
+--  .state            string(STATE) enum      ClassifyState
+--  .config_type      string/nil  –           RecognizeCfg
+--  .config_conf      float       0..1        Update
+--  .bt_hist          table       depth→cnt   on_aim_hit
+--  .preferred_bt     int         0..16       on_aim_hit
+--  .vuln_profile     table       vtype→{s,h} Update/on_aim_hit
+--  .vuln_pref        string/nil  VTYPE enum  on_aim_hit
+--  .vuln_ttl         int         0..         Update
+--  .vuln_type        string/nil  VTYPE enum  DetectVuln
+--  .vuln_val         float       degrees     DetectVuln
+--  .prev_pose        float/nil   –           Update (save phase)
+--  .prev_spd         float/nil   u/s         Update (save phase)
+--  .prev_duck        float       0..1        Update (save phase)
+--  .prev_onground    bool/nil    –           Update (save phase)
+--  .cur_choke        int         0..14       Update
+--  .was_choked       bool        –           Update
+--  .kills            int         0..         on_aim_hit
+--  .eidx             int         entity idx  GetRec
+--  .active           bool        –           Update (apply phase)
+--  .resolved         bool        –           Update (apply phase)
+--  .last_val         float       degrees     Update (apply phase)
+--  .last_meth        string(METH) enum       Update (apply phase)
+-- ══════════════════════════════════════════════════════════════════
+local function GetS64(player)
+    local s64 = entity.get_steam64(player)
+    if s64 and s64 ~= 0 then
+        local k = tostring(s64); EIDX_S64[player] = k; return k
+    end
+    local n = entity.get_player_name(player)
+    if n and n ~= "" and n ~= "unknown" then
+        local k = "n:" .. n; EIDX_S64[player] = k; return k
+    end
+    return nil
+end
+
+local function NewRec(player, s64)
+    local db = DB[s64] or {}
+    return {
+        hist=RNew(CFG.HIST_SIZE), tm={}, yc={}, fl={},
+        side=0, period=0, conf=0,
+        aa_type=AA.UNKNOWN, flip=false, lt=-1,
+        hit_side=0, hit_count=0, resolver_misses=0,
+        def_tickbase=false,
+        six_side=0, six_desync=0, state=STATE.STANDING,
+        config_type=db.config_type or nil,
+        config_conf=db.config_type and 0.5 or 0,
+        bt_hist={}, preferred_bt=db.bt_pref or 0,
+        vuln_profile={}, vuln_pref=db.vuln_pref or nil,
+        vuln_ttl=0, vuln_type=nil, vuln_val=0,
+        prev_pose=nil, prev_spd=nil, prev_duck=nil, prev_onground=nil,
+        cur_choke=0, was_choked=false, unk_miss_streak=0,
+        kills=0, eidx=player,
+        active=false, resolved=false, last_val=0, last_meth=METH.RING,
+        -- Meta-aggressive override (built-in failing the current AA meta)
+        builtin_miss_streak = 0,   -- consecutive misses while built-in was in control
+        meta_aggressive     = false, -- true once built-in fails twice on same player
+        -- Torso history cluster (for ways()/sanya/torpedo pattern counters)
+        torso_hist = {},           -- rolling window of unchoke torso readings
+        -- STP: require 2 consecutive low-velocity ticks to prevent fakelag burst false positives
+        -- (gasolina fluctuate_fakelag alternates fakelag 1→14, creating false stop events)
+        prev_spd2  = nil,          -- velocity from 2 ticks ago; both must be < STOP_SPD_LO
+        -- DCK: cooldown prevents fake_duck spam flooding correction with DCK readings
+        -- (aesthetic/gasolina use fake_duck as a meta exploit with rapid duck transitions)
+        _dck_cooldown = 0,         -- ticks remaining before next DCK vuln allowed
+        -- Suppress streak: cap consecutive suppress ticks to prevent stuck-suppress pattern
+        -- (from log: hxlw1ss had 375/914 corrections as suppress — mid-conf lock-in)
+        _sup_streak = 0,           -- consecutive ticks suppress has been active
+    }
+end
+
+local function GetRec(player)
+    local s64 = GetS64(player); if not s64 then return nil end
+    if not REC[s64] then
+        REC[s64] = NewRec(player, s64)
+        info("rec", "new profile player=%s s64=%s",
+             entity.get_player_name(player) or "?", s64)
+    end
+    REC[s64].eidx = player
+    return REC[s64], s64
+end
+
+local function ClearEnt(player)
+    plist.set(player, "Force body yaw", false)
+    plist.set(player, "Force body yaw value", 0)
+    plist.set(player, "Correction active", false)
+    local s64 = EIDX_S64[player]
+    if s64 and REC[s64] then
+        REC[s64].active = false; REC[s64].resolved = false
+    end
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--  DB FLUSH
+--  Called on match end. Blends new match data with existing DB entry.
+-- ══════════════════════════════════════════════════════════════════
+FlushDB = function()
+    for s64, rec in pairs(REC) do
+        if rec.hit_count >= 2 then
+            local ex   = DB[s64] or {}
+            local nhr  = rec.hit_count / math.max(rec.hit_count + rec.resolver_misses, 1)
+            local ok   = ex.kills or 0
+            local tot  = ok + rec.kills
+            DB[s64] = {
+                config_type = rec.config_type or ex.config_type,
+                vuln_pref   = rec.vuln_pref   or ex.vuln_pref,
+                bt_pref     = rec.preferred_bt > 0 and rec.preferred_bt or ex.bt_pref,
+                hit_rate    = tot > 0
+                    and (nhr * rec.kills + (ex.hit_rate or 0) * ok) / tot
+                    or nhr,
+                kills       = tot,
+            }
+            info("db", "flush s64=%s cfg=%s vuln=%s bt=%d hr=%d%% kills=%d",
+                 s64,
+                 DB[s64].config_type or "?", DB[s64].vuln_pref or "?",
+                 DB[s64].bt_pref or 0,
+                 math.floor((DB[s64].hit_rate or 0) * 100),
+                 DB[s64].kills)
+        end
+    end
+    database.write(DB_KEY, DB)
+    local n = 0; for _ in pairs(DB) do n = n + 1 end
+    info("db", "written %d entries", n)
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--  PROCESSPLAYER  — all per-player resolver logic
+--  Called from Update() inside a pcall, so crashes are caught and
+--  logged without stalling the rest of the player loop.
+--  Returns early (without saving prev state) only when no data was
+--  sampled. Otherwise always saves prev_pose/spd/duck/on_ground.
+-- ══════════════════════════════════════════════════════════════════
+local function ProcessPlayer(player, ctx)
+    local st_raw = entity.get_prop(player, "m_flSimulationTime")
+    if not isnum(st_raw, 0.001) then return end
+
+    local rec, s64 = GetRec(player)
+    if not rec then return end
+
+    TrackDT(s64, st_raw)
+
+    local choke = ChokedPkts(st_raw, player)
+    rec.was_choked   = rec.cur_choke > 0
+    rec.cur_choke    = choke
+    rec.def_tickbase = IsDefTick(s64)
+
+    local st = math.floor(st_raw / ctx.ti)
+    if st == rec.lt then return end
+    rec.lt = st
+
+    -- pose/spd/duck/on_ground are nil until sampled.
+    -- They are saved to rec at the end of the function regardless of path taken.
+    local pose, spd, duck, on_ground = nil, nil, nil, nil
+
+    -- repeat...until true lets us break out early (goto-safe in LuaJIT)
+    -- while still running the save block below unconditionally.
+    repeat
+
+        local as = GetAS(player)
+        if not as then
+            rec.prev_pose = nil  -- prevent stale LBY trigger next tick
+            break
+        end
+
+        if choke > 2 then
+            ClearEnt(player)
+            rec.prev_pose = nil
+            break
+        end
+
+        -- State
+        local state_key = ClassifyState(player, as)
+        rec.state = state_key
+        if rec.conf == 0 then rec.conf = CFG.STATE_SEED[state_key] or 0.25 end
+
+        -- Live per-player desync bounds from animstate.
+        -- Replaces the hardcoded DESYNC_CAP = 58 with actual engine-reported
+        -- clamp values. Falls back to 58 if not yet populated.
+        local live_mn, live_mx, live_cap = LiveCap(as)
+        rec.live_min = live_mn
+        rec.live_max = live_mx
+
+        if ui.get(ui_verb) then
+            if live_cap ~= CFG.DESYNC_CAP then
+                dbg("dcap", "player=%s live=[%.1f .. %.1f] cap=%.1f",
+                    entity.get_player_name(player) or "?", live_mn, live_mx, live_cap)
+            end
+            -- Probe skeet's entity.get_desync() if exposed — compare vs struct read.
+            -- Skeet DLL (Dec 2024) confirmed get_desync() exists as Lua-callable.
+            -- If it differs from live_cap, get_desync() is the post-correction value;
+            -- we want the raw struct reads for our own resolver.
+            local ok_gd, gd = pcall(function()
+                return type(entity.get_desync) == "function" and entity.get_desync(player) or nil
+            end)
+            if ok_gd and gd and isnum(gd) then
+                dbg("gdesync", "player=%s entity.get_desync()=%.2f live_cap=%.1f diff=%.2f",
+                    entity.get_player_name(player) or "?", gd, live_cap, math.abs(gd - live_cap))
+            end
+        end
+
+        -- 6lex — pass live cap so playback_rate magnitude clamps to real bounds
+        local six_side, six_desync = 0, 0
+        if ui.get(ui_6lex) then
+            local ptr = GetPtr(player)
+            if ptr then
+                six_side, six_desync = Extract6Lex(ptr, live_cap)
+                rec.six_side   = six_side
+                rec.six_desync = six_desync
+            end
+        end
+
+        -- Sample
+        local praw = entity.get_prop(player, "m_flPoseParameter", 11) or 0
+        pose = praw * CFG.POSE_SCALE - 60
+        local _, eyy = entity.get_prop(player, "m_angEyeAngles")
+        local eye_y  = as.eye_angles_y or eyy or 0
+        local vx, vy = entity.get_prop(player, "m_vecVelocity")
+        spd       = (isnum(vx) and isnum(vy)) and math.sqrt(vx*vx + vy*vy) or 0
+        duck      = as.duck_amount or 0
+        on_ground = as.on_ground
+
+        RPush(rec.hist, {p=pose, e=eye_y, t=st})
+        rec.tm[st]      = rec.tm[st] or {p=pose, e=eye_y, t=st}
+        rec.tm[st - CFG.TM_HORIZON] = nil
+        rec.yc[#rec.yc+1] = eye_y
+        if #rec.yc > CFG.YAW_BUF then table.remove(rec.yc, 1) end
+
+        -- Classify
+        local aa_type, dom_side, raw_c, pose_sum = DetectAA(rec.hist)
+        rec.aa_type = aa_type
+
+        -- Use live per-player cap for jitter threshold — previously hardcoded 58*0.45=26.1°
+        local yaw_jit = false
+        if #rec.yc >= 2 then
+            local yd = math.abs(NA(rec.yc[#rec.yc] - rec.yc[#rec.yc-1]))
+            yaw_jit = yd >= live_cap * 0.45
+        end
+
+        if aa_type == AA.STATIC then
+            rec.conf = 0.5; ClearEnt(player); break
+        end
+
+        -- (asymmetric torso delta was tracked here but rec.asym_left/right
+        --  are never read — RecognizeCfg uses MeanSidePose directly)
+
+        -- Confidence
+        if six_side ~= 0 then
+            rec.conf = math.min(rec.conf + 0.08, 1.0)
+            if dom_side ~= 0 and dom_side == six_side then
+                rec.conf = math.min(rec.conf + 0.05, 1.0)
+            end
+        end
+        if raw_c > 0.35 or yaw_jit then
+            rec.conf = math.min(rec.conf + CFG.CONF_GROW, 1.0)
+            if dom_side ~= 0 then
+                if rec.side ~= 0 and dom_side ~= rec.side then
+                    -- Record flip BEFORE updating rec.side so fl timestamps
+                    -- stay aligned with the side value PredictSide reads
+                    rec.fl[#rec.fl+1] = st
+                    if #rec.fl > 24 then table.remove(rec.fl, 1) end
+                end
+                rec.side = dom_side
+            end
+        else
+            rec.conf = rec.conf * CFG.CONF_DECAY
+            if rec.conf < 0.08 then rec.side = 0 end
+        end
+
+        -- Config recognition (throttled)
+        if rec.config_conf < 0.8 and (st % CFG.CFG_TICKS) == 0 then
+            local rcfg = RecognizeCfg(rec)
+            if rcfg then
+                if rcfg == rec.config_type then
+                    rec.config_conf = math.min(rec.config_conf + CFG.CFG_GAIN, 1.0)
+                else
+                    if ui.get(ui_verb) then
+                        info("cfg", "switch %s->%s player=%s",
+                             rec.config_type or "?", rcfg,
+                             entity.get_player_name(player) or "?")
+                    end
+                    rec.config_type = rcfg; rec.config_conf = 0.30
+                end
+            end
+        end
+
+        if rec.conf < CFG.CONF_MIN then ClearEnt(player); break end
+
+        -- Vulnerability window
+        if rec.vuln_ttl > 0 then rec.vuln_ttl = rec.vuln_ttl - 1 end
+
+        local vtype, vcorr = DetectVuln(rec, as, pose, eye_y)
+        if vtype then
+            local lc_ttl = math.floor(CFG.LC_WINDOW_S / ctx.ti) - 1
+            local base_ttl = CFG.VULN_TTL[vtype] or 1
+            local is_standing = spd < 8 and duck < 0.1 and on_ground == true
+
+            -- One-shot boost: standing enemy = fully exposed head hitbox.
+            -- +1 tick gives the aimbot more backtrack candidates to find
+            -- a clean headshot position within the vulnerability window.
+            if is_standing and (vtype == VTYPE.LBY or vtype == VTYPE.UNK) then
+                base_ttl = base_ttl + 1
+            end
+
+            -- Large unchoke desync = high confidence real position exposed.
+            -- Extend so the aimbot can catch the peak exposure on backtrack.
+            -- safe_eye: use eye_y if valid, else last ring buffer entry
+            if vtype == VTYPE.UNK then
+                local torso    = as.torso_yaw
+                local safe_eye_pp = (math.abs(eye_y) > 1.0) and eye_y
+                                    or (RLen(rec.hist) > 0 and RGet(rec.hist, 1) and RGet(rec.hist, 1).e)
+                                    or nil
+                if torso and safe_eye_pp and math.abs(NA(torso - safe_eye_pp)) > 25 then
+                    base_ttl = base_ttl + 1
+                end
+            end
+
+            rec.vuln_ttl  = math.max(base_ttl, lc_ttl)
+            rec.vuln_type = vtype
+            rec.vuln_val  = vcorr
+            if not rec.vuln_profile[vtype] then
+                rec.vuln_profile[vtype] = {seen=0, hit=0}
+            end
+            rec.vuln_profile[vtype].seen = rec.vuln_profile[vtype].seen + 1
+            if ui.get(ui_verb) then
+                dbg("vuln", "type=%s val=%.1f player=%s ttl=%d%s",
+                    vtype, vcorr, entity.get_player_name(player) or "?",
+                    rec.vuln_ttl, is_standing and " [STAND]" or "")
+            end
+        end
+
+        -- Backtrack depth is observed passively via aim_fire.backtrack.
+        -- We do NOT manipulate cl_interp here — restricting it to preferred_bt
+        -- caps the aimbot's maximum backtrack window and kills deeper opportunities.
+
+        -- ── SIDE TRACKING ──────────────────────────────────────────────
+        -- Track which side we believe the enemy is on.
+        -- The override block below decides whether to apply it.
+        -- We do NOT compute an angle here — that happens per-case below.
+
+        local tracked_side   = rec.side
+        local tracked_method = METH.RING
+
+        if rec.vuln_ttl == 0 then
+            -- No active vuln window — run the side detection chain
+            if rec.hit_count >= 2 and rec.hit_side ~= 0 then
+                -- Empirical: hit this player on this side this match
+                tracked_side   = rec.hit_side   -- already flip-encoded at storage time
+                tracked_method = METH.HIT_MEM
+
+            elseif six_side ~= 0 and rec.conf > 0.30 then
+                tracked_side   = six_side
+                tracked_method = METH.SIX_LEX
+
+            elseif ui.get(ui_per) and #rec.fl >= CFG.PERIOD_MIN then
+                local ps = PredictSide(rec, ctx.cur_tc)
+                if ps ~= 0 then
+                    tracked_side   = ps
+                    tracked_method = METH.PERIOD
+                end
+
+            elseif not ctx.is_spike and choke == 0 and not rec.def_tickbase then
+                local lco = LCTicks(false)
+                local h   = rec.tm[st - lco]
+                if h then
+                    local s = Sign(h.p)
+                    if s ~= 0 then
+                        tracked_side   = s
+                        tracked_method = METH.LAGCOMP
+                    end
+                elseif #rec.fl > 0 and rec.side ~= 0 and rec.period > 0 then
+                    local since = (st - lco) - rec.fl[#rec.fl]
+                    tracked_side   = math.floor(since / rec.period) % 2 == 0
+                                     and rec.side or -rec.side
+                    tracked_method = METH.PHASE
+                end
+
+            elseif rec.def_tickbase then
+                tracked_side   = six_side ~= 0 and six_side
+                                 or (pose_sum ~= 0 and Sign(pose_sum) or rec.side)
+                tracked_method = METH.DEF_TICK
+
+            elseif ctx.is_spike then
+                tracked_side   = pose_sum ~= 0 and Sign(pose_sum) or rec.side
+                tracked_method = METH.RING_SPK
+
+            elseif #rec.yc >= 2 and rec.conf < 0.60 then
+                local ycs = YawSide(rec.yc, eye_y)
+                if ycs ~= 0 then
+                    tracked_side   = ycs
+                    tracked_method = METH.YAW_CACHE
+                end
+            end
+
+            -- Symmetric fallback: alternate when no signal
+            local is_jitter = aa_type == AA.TWO_WAY  or aa_type == AA.THREE_WAY
+                            or aa_type == AA.FIVE_WAY or aa_type == AA.SKITTER
+                            or aa_type == AA.HOLD
+            local is_sym = rec.side == 0 and
+                (aa_type == AA.THREE_WAY or aa_type == AA.FIVE_WAY or aa_type == AA.SKITTER)
+            if tracked_side == 0 and is_sym then
+                tracked_side   = rec.flip and 1 or -1
+                tracked_method = METH.SYM_FLIP
+            end
+
+            -- Apply flip (only when side was NOT from hit_side which encodes it already)
+            if rec.flip and tracked_method ~= METH.HIT_MEM then
+                tracked_side = -tracked_side
+            end
+
+            if tracked_side == 0 then
+                if rec.meta_aggressive then
+                    -- Built-in has proven it can't handle this player's meta.
+                    -- Never release back to it. Use our best available side.
+                    -- Priority: hit_side (confirmed) > ring side > flip guess.
+                    -- Note: flip was already applied above so work from rec.side (raw),
+                    -- then apply flip manually to avoid double-apply.
+                    local base = (rec.hit_side ~= 0 and rec.hit_side)  -- encoded, use direct
+                              or (rec.side ~= 0 and rec.side)           -- raw ring side
+                              or 0
+                    if base == 0 then
+                        -- Absolute last resort: opposite of flip state
+                        base = rec.flip and -1 or 1
+                    else
+                        -- Apply flip to raw ring side (hit_side already encodes it)
+                        if base == rec.side and rec.flip then base = -base end
+                    end
+                    tracked_side   = base ~= 0 and base or 1
+                    tracked_method = METH.META_HOLD
+                else
+                    ClearEnt(player); break
+                end
+            end
+        end
+
+        -- ── ADDITIVE OVERRIDE ──────────────────────────────────────────
+        -- Only take control from the built-in when signal is definitive.
+        -- Priority: vuln > 6lex > hit_mem > meta_hold > suppress > release
+        local should_override = false
+        local override_val    = 0
+        local override_meth   = tracked_method
+
+        -- [1] Vulnerability window: correction is deterministic.
+        -- Lower confidence threshold when meta_aggressive — even a weaker
+        -- vuln read beats the known-failing built-in.
+        local vuln_min = rec.meta_aggressive and 0.20 or 0.35
+        if ui.get(ui_vuln) and rec.vuln_ttl > 0 and rec.conf >= vuln_min then
+            should_override = true
+            override_val    = rec.vuln_val
+            override_meth   = "vuln_" .. rec.vuln_type
+
+        -- [2] 6lex: animlayer digit read — direct, no guessing
+        elseif ui.get(ui_6lex) and six_side ~= 0 and rec.conf > 0.25 then
+            should_override = true
+            override_val    = six_desync > 0
+                              and (six_side * six_desync)
+                              or CfgAngle(six_side, rec.state, rec.config_type)
+            override_meth   = METH.SIX_LEX
+
+        -- [3] Hit-side memory: confirmed hit this match
+        elseif ui.get(ui_hitmem) and rec.hit_count >= 2 and rec.hit_side ~= 0 then
+            should_override = true
+            override_val    = CfgAngle(rec.hit_side, rec.state, rec.config_type)
+            override_meth   = METH.HIT_MEM
+
+        -- [4] Suppress [EXP]: force wrong angle to gate aimbot hit-chance.
+        -- When meta_aggressive, lower threshold aggressively — fewer shots =
+        -- fewer bullet_impact events near the enemy = testarossa AB starved.
+        -- STREAK CAP: suppress that runs for >8 consecutive ticks means we're stuck.
+        -- Log analysis showed hxlw1ss at 375/914 suppress — mid-conf lock-in pattern
+        -- where conf hovers above threshold permanently with no vuln ever firing.
+        -- After 8 ticks suppress, pause 4 ticks and let a shot through. If we hit,
+        -- great; if we miss, the correction data resets the stuck loop.
+        elseif ui.get(ui_sup) and rec.vuln_ttl == 0 then
+            local is_jitter = aa_type == AA.TWO_WAY  or aa_type == AA.THREE_WAY
+                            or aa_type == AA.FIVE_WAY or aa_type == AA.SKITTER
+                            or aa_type == AA.HOLD
+            local sup_thresh = rec.meta_aggressive and 0.28 or 0.45
+            local streak = rec._sup_streak or 0
+            -- Allow suppress only when streak < 8; skip for 4 ticks after the cap
+            local streak_ok = streak < 8 or (streak >= 12)
+            if is_jitter and rec.conf > sup_thresh and streak_ok then
+                should_override = true
+                local bs = tracked_side ~= 0 and tracked_side or dom_side
+                if bs == 0 then bs = 1 end
+                override_val  = -CfgAngle(bs, rec.state, rec.config_type)
+                override_meth = METH.SUPPRESS
+            end
+        end
+
+        if should_override then
+            plist.set(player, "Force body yaw", true)
+            plist.set(player, "Force body yaw value", override_val)
+            plist.set(player, "Correction active", true)
+            rec.active = true; rec.resolved = true
+            rec.last_val = override_val; rec.last_meth = override_meth
+            -- Track suppress streak for the streak-cap logic above
+            if override_meth == METH.SUPPRESS then
+                rec._sup_streak = (rec._sup_streak or 0) + 1
+            else
+                rec._sup_streak = 0   -- any non-suppress override resets the streak
+            end
+
+        elseif rec.meta_aggressive and tracked_side ~= 0 then
+            -- META_HOLD: built-in has failed this player's meta (serenity ways(),
+            -- ambani torpedo, aesthetic records — patterns the 2022-era built-in
+            -- has no answer for). Hold our best tracked_side correction rather than
+            -- releasing to a resolver that's already proven it can't handle this AA.
+            local meta_val = CfgAngle(tracked_side, rec.state, rec.config_type)
+            plist.set(player, "Force body yaw", true)
+            plist.set(player, "Force body yaw value", meta_val)
+            plist.set(player, "Correction active", true)
+            rec.active = true; rec.resolved = true
+            rec.last_val = meta_val; rec.last_meth = METH.META_HOLD
+            rec._sup_streak = 0
+
+        else
+            plist.set(player, "Force body yaw", false)
+            plist.set(player, "Force body yaw value", 0)
+            plist.set(player, "Correction active", false)
+            rec.active = false; rec.resolved = false
+            rec.last_val = 0; rec.last_meth = "builtin"
+            rec._sup_streak = 0
+        end
+
+        -- Only log when the correction method or value actually CHANGES.
+        -- Log analysis showed 35k+ [corr] lines for 453 hits — 98% were
+        -- stale TTL echoes (same val repeated for 11+ ticks). This gate
+        -- cuts the log to only meaningful resolver decisions.
+        if ui.get(ui_verb) then
+            local val_changed  = math.abs((rec.last_val  or 0) - (rec._prev_log_val  or 0)) > 1.0
+            local meth_changed = rec.last_meth ~= rec._prev_log_meth
+            if val_changed or meth_changed then
+                dbg("corr", "player=%s aa=%s side=%d meth=%s val=%.1f override=%s",
+                    entity.get_player_name(player) or "?",
+                    aa_type, tracked_side, rec.last_meth, rec.last_val,
+                    tostring(should_override))
+                rec._prev_log_val  = rec.last_val
+                rec._prev_log_meth = rec.last_meth
+            end
+        end
+
+    until true  -- end of repeat block; break exits without running save
+
+    -- Save previous frame state (always, for every path that sampled data)
+    rec.prev_pose     = pose
+    rec.prev_spd2     = rec.prev_spd  -- shift: spd2 = last tick's spd before this update
+    rec.prev_spd      = spd
+    rec.prev_duck     = duck or 0
+    rec.prev_onground = on_ground
+    -- Decrement DCK cooldown each tick (set to 10 when DCK fires, counts down to 0)
+    if (rec._dck_cooldown or 0) > 0 then
+        rec._dck_cooldown = rec._dck_cooldown - 1
+    end
+end
+
+
+-- ══════════════════════════════════════════════════════════════════
+--  UPDATE  — orchestration loop
+-- ══════════════════════════════════════════════════════════════════
+local function Update()
+    if not ui.get(ui_on) then return end
+
+    local cur_lat, avg_lat = GetLat()
+    local ctx = {
+        cur_lat  = cur_lat,
+        avg_lat  = avg_lat,
+        is_spike = math.abs(cur_lat - avg_lat) > CFG.SPIKE_THR,
+        threat   = client.current_threat(),
+        ti       = globals.tickinterval(),
+        cur_tc   = globals.tickcount(),
+    }
+
+    client.update_player_list()
+    for _, player in ipairs(entity.get_players()) do
+        if entity.is_enemy(player) and entity.is_alive(player) then
+            local ok, msg = pcall(ProcessPlayer, player, ctx)
+            if not ok then
+                err("update", "player=%d crash=%s", player, tostring(msg))
+            end
+        end
+    end
+
+    -- Tight interp is handled by its ui.set_callback — nothing to do here
+
+    local prune_tc = ctx.cur_tc - CFG.SHOTS_MAX_AGE
+    for id, s in pairs(SHOTS) do
+        if (s.tick or 0) < prune_tc then SHOTS[id] = nil end
+    end
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--  SHOT FEEDBACK
+-- ══════════════════════════════════════════════════════════════════
+local function on_aim_fire(e)
+    local t = e.target; if not t then return end
+    local s64 = GetS64(t); local r = s64 and REC[s64]
+    local praw = entity.get_prop(t, "m_flPoseParameter", 11)
+    SHOTS[e.id] = {
+        s64     = s64,
+        fy      = praw and (praw * CFG.POSE_SCALE - 60) or 0,
+        meth    = r and r.last_meth or METH.RING,
+        val     = r and r.last_val  or 0,
+        side    = r and r.side      or 0,
+        flip    = r and r.flip      or false,   -- store flip state at fire time
+        conf    = r and r.conf      or 0,
+        aa      = r and r.aa_type   or AA.UNKNOWN,
+        bt      = e.backtrack or 0,
+        hc      = e.hit_chance or 0,
+        in_vuln = r and r.vuln_ttl > 0 or false,
+        vuln_t  = r and r.vuln_type or nil,
+        cfg     = r and r.config_type or nil,
+        tick    = globals.tickcount(),
+    }
+end
+
+local function on_aim_hit(e)
+    brk.def = 0; brk.check = 0
+    local d = SHOTS[e.id]; if not d then return end
+    local rec = d.s64 and REC[d.s64]
+
+    if rec then
+        rec.resolver_misses = 0
+        rec.conf            = math.min(rec.conf + 0.06, 1.0)
+        rec.kills           = rec.kills + 1
+        -- Any RIFTVEIL-sourced hit (not built-in) proves our correction works
+        -- on this player — reset the builtin failure streak so meta_aggressive
+        -- doesn't permanently suppress the built-in if we later hit with hit_mem,
+        -- 6lex, or any non-builtin method. Checked here, not inside the vuln gate,
+        -- so hit_mem and ring-buffer hits also reset it correctly.
+        if d.meth ~= "builtin" then
+            rec.builtin_miss_streak = 0
+        end
+        -- Only count head and neck hits as confirmed side for hit_mem.
+        -- Body shots (stomach, chest, limbs) have large hitboxes accessible
+        -- from many angles — they don't confirm the head correction angle.
+        -- hitgroup 1 = head, hitgroup 2 = neck
+        local is_head = e.hitgroup == 1 or e.hitgroup == 2
+        if d.side ~= 0 and is_head then
+            rec.hit_side  = d.flip and -d.side or d.side
+            rec.hit_count = rec.hit_count + 1
+        end
+        -- Backtrack depth learning. bt=0 means no backtrack used — skip it
+        -- to avoid conflicting with preferred_bt=0 which means "not learned".
+        local bt = d.bt or 0
+        if bt >= 1 and bt <= 16 then
+            rec.bt_hist[bt] = (rec.bt_hist[bt] or 0) + 1
+            local best_bt, best_c = 0, 0
+            for depth, count in pairs(rec.bt_hist) do
+                if count > best_c then best_c = count; best_bt = depth end
+            end
+            rec.preferred_bt = best_bt
+        end
+        if d.in_vuln and d.vuln_t then
+            local vp = rec.vuln_profile
+            if vp[d.vuln_t] then vp[d.vuln_t].hit = (vp[d.vuln_t].hit or 0) + 1 end
+            rec.vuln_pref = d.vuln_t
+            -- Successful unk hit means torso_yaw was reliable — reset unk streak
+            if d.vuln_t == "unk" then rec.unk_miss_streak = 0 end
+        end
+    end
+
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d%s",
+        entity.get_player_name(e.target) or "?",
+        HG[e.hitgroup + 1] or "?", e.damage or 0,
+        d.meth, d.val, d.bt,
+        d.in_vuln and (" !" .. d.vuln_t) or "")
+    SHOTS[e.id] = nil
+end
+
+local function on_aim_miss(e)
+    local d      = SHOTS[e.id]
+    local reason = e.reason or "?"
+    local is_resolver = reason == "?" or reason == "" or reason == "prediction error"
+
+    if d then
+        warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%%%s",
+            entity.get_player_name(e.target) or "?",
+            reason, d.meth, d.val, d.bt, d.hc,
+            d.in_vuln and (" !" .. d.vuln_t) or "")
+    end
+
+    if d and is_resolver then
+        local rec = d.s64 and REC[d.s64]
+        if rec then
+            -- BUILT-IN FAIL TRACKING (meta_aggressive counter):
+            -- When d.meth == "builtin", the built-in resolver was in control.
+            -- That means it missed — NOT RIFTVEIL. Don't flip, don't soft-reset our data.
+            -- Instead, count it against the built-in and activate meta_aggressive mode
+            -- once it fails twice on the same player. At that point RIFTVEIL takes over
+            -- permanently instead of releasing back to a resolver stuck in the old meta.
+            if d.meth == "builtin" then
+                rec.builtin_miss_streak = (rec.builtin_miss_streak or 0) + 1
+                if rec.builtin_miss_streak >= 2 and not rec.meta_aggressive then
+                    rec.meta_aggressive = true
+                    warn("meta", "built-in failing player=%s streak=%d -> RIFTVEIL takes over",
+                        entity.get_player_name(e.target) or "?", rec.builtin_miss_streak)
+                end
+                -- Built-in missed: don't corrupt our flip/hit_mem/conf data
+                SHOTS[e.id] = nil
+                return
+            end
+
+            -- Decide whether to flip.
+            -- Vuln corrections are absolute angles — flipping after a vuln miss
+            -- corrupts flip state and causes the dump pattern (shots 2-3 wrong side).
+            -- High-confidence misses are prediction errors, not wrong-side guesses.
+            -- hit_mem misses are confirmed-side data — don't discard with a flip.
+            local should_flip = true
+            if d.in_vuln then
+                should_flip = false   -- absolute angle, flip is meaningless
+                rec.vuln_ttl = 0
+                if d.vuln_t and rec.vuln_profile[d.vuln_t] then
+                    rec.vuln_profile[d.vuln_t].seen =
+                        rec.vuln_profile[d.vuln_t].seen + 1
+                end
+            elseif d.meth == METH.HIT_MEM then
+                should_flip = false   -- confirmed side, don't flip it away
+            elseif (d.conf or 0) > 0.65 then
+                should_flip = false   -- high confidence = prediction error, not wrong side
+            end
+
+            if should_flip then
+                rec.flip = not rec.flip
+            end
+
+            -- Only count non-vuln misses toward soft reset.
+            -- Most vuln misses are prediction errors, not resolver failures.
+            -- Counting them wipes hit_mem data prematurely.
+            -- Track per-player unk miss streak to scale back unreliable unchokes
+            if d.vuln_t == "unk" then
+                rec.unk_miss_streak = (rec.unk_miss_streak or 0) + 1
+            end
+
+            if not d.in_vuln then
+                rec.resolver_misses = rec.resolver_misses + 1
+                if reason == "prediction error" and rec.preferred_bt > 0 then
+                    rec.bt_hist[rec.preferred_bt] =
+                        math.max(0, (rec.bt_hist[rec.preferred_bt] or 0) - 1)
+                    local best_bt, best_c = 0, 0
+                    for depth, count in pairs(rec.bt_hist) do
+                        if count > best_c then best_c = count; best_bt = depth end
+                    end
+                    rec.preferred_bt = best_bt
+                end
+                if rec.resolver_misses >= 3 then
+                    warn("reset", "soft reset player=%s",
+                         entity.get_player_name(e.target) or "?")
+                    rec.conf = 0.22; rec.resolver_misses = 0
+                    rec.flip = false; rec.hit_side = 0; rec.hit_count = 0
+                    -- Clear torso history so old cluster readings don't persist.
+                    -- A soft reset means our corrections were wrong — the player likely
+                    -- switched configs. Stale cluster = wrong correction for new config.
+                    rec.torso_hist = {}
+                    rec._sup_streak = 0
+                end
+            end
+        end
+    end
+    SHOTS[e.id] = nil
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--  ESP FLAGS  (v2.1 redesign)
+--    VLN  crimson    — vulnerability window currently open
+--    RES  green      — resolver confident, correction applied
+--    6LX  blue       — 6lex digit read active this player
+--    HIT  lime       — hit-side memory confirmed (2+ head/neck hits)
+--    SUP  gold       — suppressing shots this tick
+--    DTB  amber      — defensive tickbase detected
+--    MYW  violet     — live min/max_yaw bounds readable from animstate
+-- ══════════════════════════════════════════════════════════════════
+local function ent_rec(ent)
+    if not ui.get(ui_on) then return nil end
+    if not entity.is_enemy(ent) or not entity.is_alive(ent) then return nil end
+    local s64 = EIDX_S64[ent]; return s64 and REC[s64] or nil
+end
+
+-- VLN — vulnerability window open (deterministic correction being applied)
+client.register_esp_flag("VLN", 230, 28, 28, function(ent)
+    local ok, r = pcall(function()
+        local rec = ent_rec(ent); return rec ~= nil and rec.vuln_ttl > 0
+    end); return ok and r or false
+end)
+
+-- RES — resolver has a confident read and is overriding the built-in
+client.register_esp_flag("RES", 55, 205, 70, function(ent)
+    local ok, r = pcall(function()
+        local rec = ent_rec(ent)
+        return rec ~= nil and rec.resolved and rec.conf >= CFG.CONF_ESP
+            and rec.vuln_ttl == 0 and rec.last_meth ~= METH.SUPPRESS
+    end); return ok and r or false
+end)
+
+-- 6LX — live 6lex digit extraction returned a side this tick
+client.register_esp_flag("6LX", 55, 135, 255, function(ent)
+    local ok, r = pcall(function()
+        local rec = ent_rec(ent)
+        return rec ~= nil and rec.six_side ~= 0
+    end); return ok and r or false
+end)
+
+-- HIT — hit-side memory has a confirmed side from head/neck hits this match
+client.register_esp_flag("HIT", 110, 250, 110, function(ent)
+    local ok, r = pcall(function()
+        local rec = ent_rec(ent)
+        return rec ~= nil and rec.hit_count >= 2 and rec.hit_side ~= 0
+            and rec.last_meth == METH.HIT_MEM
+    end); return ok and r or false
+end)
+
+-- SUP — suppressing shots (waiting for a cleaner window)
+client.register_esp_flag("SUP", 225, 210, 40, function(ent)
+    local ok, r = pcall(function()
+        local rec = ent_rec(ent)
+        return rec ~= nil and rec.last_meth == METH.SUPPRESS and rec.vuln_ttl == 0
+    end); return ok and r or false
+end)
+
+-- DTB — defensive tickbase: player's simtime running ahead of server
+client.register_esp_flag("DTB", 255, 180, 45, function(ent)
+    local ok, r = pcall(function()
+        local rec = ent_rec(ent); return rec ~= nil and rec.def_tickbase == true
+    end); return ok and r or false
+end)
+
+-- MYW — live desync bounds (min_yaw/max_yaw) currently readable from animstate.
+-- Confirms skeet has written real clamp values this tick — our live_cap is active.
+client.register_esp_flag("MYW", 160, 75, 255, function(ent)
+    if not ui.get(ui_on) then return false end
+    if not entity.is_enemy(ent) or not entity.is_alive(ent) then return false end
+    local ok, r = pcall(function()
+        local as = GetAS(ent); if not as then return false end
+        return isnum(as.min_yaw, -90, -0.5) and isnum(as.max_yaw, 0.5, 90)
+    end); return ok and r or false
+end)
+
+-- ══════════════════════════════════════════════════════════════════
+--  DRAWOVERLAY  (v2.2 — simplified technical design)
+--
+--  Row 1  header   match summary H/M/HR               always
+--  Row 2  target   name + AA type + conf%              when threat
+--  Row 3  status   [✔RES] / [✘UNK] / [⚡VLN]           when threat
+--  Row 4  side     ◀ L ▓▓▓▓▓░░░ 78%  or  22% ░░░▓▓▓▓▓ R ▶
+--  Row 5  supp     bt / config / DEF / SPIKE            optional
+--
+--  Log analysis (v2.0 session, 55k lines):
+--    453 hits / 35k corr entries → 98% were stale TTL echoes (now fixed).
+--    vuln_unk: 144/200 head hits (72%). TTL=11 on all events (lc_ttl wins).
+--    LBY old code used safe_eye (absolute yaw) → fixed in v2.1 with CfgAngle.
+-- ══════════════════════════════════════════════════════════════════
+
+-- METH_LABEL: short display strings for each resolver method
+local METH_LABEL = {
+    [METH.HIT_MEM]  = "hit-mem",
+    [METH.SIX_LEX]  = "6lex",
+    [METH.PERIOD]   = "period",
+    [METH.SUPPRESS] = "suppress",
+    [METH.DEF_TICK] = "def-tick",
+    [METH.LAGCOMP]  = "lagcomp",
+    [METH.PHASE]    = "phase",
+    [METH.RING]     = "ring",
+    [METH.RING_SPK] = "ring-spk",
+    [METH.YAW_CACHE]= "yaw-cache",
+    [METH.SYM_FLIP] = "sym-flip",
+    [METH.META_HOLD]= "meta",
+}
+
+-- SideBar: directional confidence fill.
+--   side=-1  →  ◀ L  ▓▓▓▓▓░░░  78%        (fill anchored left, grows with conf)
+--   side=+1  →    22%  ░░░▓▓▓▓▓  R ▶       (fill anchored right)
+--   side= 0  →      ─── ? ───  --           (unknown)
+-- Color caller provides: blue for L, orange for R, gray for unknown.
+local function SideBar(side, conf)
+    local cf     = Clamp(conf, 0, 1)
+    local BARS   = 8
+    local filled = math.floor(cf * BARS + 0.5)
+    local full   = string.rep("\xe2\x96\x93", filled)        -- ▓ U+2593
+    local empty  = string.rep("\xe2\x96\x91", BARS - filled) -- ░ U+2591
+    local pct    = math.floor(cf * 100)
+    if side < 0 then
+        -- ◀ L  ▓▓▓▓░░░░  62%
+        return "\xe2\x97\x80 L  " .. full .. empty .. "  " .. pct .. "%"
+    elseif side > 0 then
+        --   62%  ░░░░▓▓▓▓  R ▶
+        return pct .. "%  " .. empty .. full .. "  R \xe2\x96\xb6"
+    else
+        return "  \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80 ? \xe2\x94\x80\xe2\x94\x80\xe2\x94\x80  --"
+    end
+end
+
+local function DrawOverlay()
+    if not ui.get(ui_on) or not ui.get(ui_esp) then return end
+
+    -- ── Row 1: match header ────────────────────────────────────────
+    local mh, mm = 0, 0
+    for _, r in pairs(REC) do
+        mh = mh + (r.hit_count or 0)
+        mm = mm + (r.resolver_misses or 0)
+    end
+    local total  = mh + mm
+    local hr_str = total > 0
+        and string.format("%d%%", math.floor(mh / total * 100)) or "--"
+    renderer.indicator(70, 70, 70, 140,
+        string.format("RIFTVEIL  %dH/%dM  %s", mh, mm, hr_str))
+
+    -- ── Spike / threat guard ───────────────────────────────────────
+    local _, avg_lat = GetLat()
+    local is_spike   = math.abs(client.latency() - avg_lat) > CFG.SPIKE_THR
+    local threat     = client.current_threat()
+
+    if not threat or not entity.is_alive(threat) then
+        if is_spike then renderer.indicator(255, 125, 28, 225, "\xe2\x96\xb2 SPIKE") end
+        return
+    end
+
+    local s64 = EIDX_S64[threat]
+    local rec = s64 and REC[s64]
+    if not rec then return end
+
+    -- ── Row 2: target — name + AA + conf% ─────────────────────────
+    local cf   = rec.conf
+    local c_r  = math.floor(Clamp((1 - cf) * 2, 0, 1) * 230)
+    local c_g  = math.floor(Clamp(cf * 2,       0, 1) * 210)
+    local name = entity.get_player_name(threat) or "?"
+    if #name > 15 then name = name:sub(1, 14) .. "\xe2\x80\xa6" end -- …
+    local tc   = AA_SHORT[rec.aa_type] or "?"
+    renderer.indicator(c_r, c_g, 38, 242,
+        string.format("%s   %s   %d%%", name, tc, math.floor(cf * 100)))
+
+    -- ── Row 3: resolver status ─────────────────────────────────────
+    -- Three states: vuln window active > resolved > unresolved/building.
+    -- Shows method source and last applied correction angle.
+    local meth    = rec.last_meth
+    local mlbl    = (meth and meth ~= "builtin") and (METH_LABEL[meth] or meth) or nil
+    local has_val = isnum(rec.last_val) and math.abs(rec.last_val) > 0.5
+    local angle_s = has_val and string.format("  %+.0f\xc2\xb0", rec.last_val) or ""
+
+    if rec.vuln_ttl > 0 then
+        -- Vulnerability window — red, blinks on/off
+        local vt    = (rec.vuln_type or "?"):upper()
+        local blink = math.floor(globals.realtime() * 9) % 2 == 0
+        renderer.indicator(248, 20, 20, blink and 255 or 115,
+            string.format("\xe2\x9a\xa1 VLN:%s  \xe2\x96\xb6%dt%s",
+                vt, rec.vuln_ttl, angle_s))
+        -- ⚡ VLN:LBY  ▶3t  +41°
+
+    elseif rec.resolved and cf >= CFG.CONF_ESP then
+        -- Confirmed resolved — teal/green
+        local src = mlbl and ("  " .. mlbl) or ""
+        renderer.indicator(45, 215, 95, 242,
+            string.format("\xe2\x9c\x94 RES%s%s", src, angle_s))
+        -- ✔ RES  hit-mem  +41°
+
+    else
+        -- Building or uncertain — amber
+        renderer.indicator(215, 105, 32, 222,
+            string.format("\xe2\x9c\x98 UNRES   %s   %d%%", tc, math.floor(cf * 100)))
+        -- ✘ UNRES   5-WAY   42%
+    end
+
+    -- ── Row 4: side bar ───────────────────────────────────────────
+    -- Blue for left, orange for right, gray for unknown.
+    -- Fill grows with confidence, anchor follows side direction.
+    local side = rec.side
+    local sr, sg, sb_b
+    if    side < 0 then sr, sg, sb_b = 60,  138, 255  -- L → blue
+    elseif side > 0 then sr, sg, sb_b = 255, 140, 42  -- R → orange
+    else                 sr, sg, sb_b = 92,  92,  92  end -- ? → gray
+    renderer.indicator(sr, sg, sb_b, 215, SideBar(side, cf))
+
+    -- ── Row 5: supplemental — compact, optional ────────────────────
+    local sup = {}
+    if rec.preferred_bt > 0 then sup[#sup+1] = "bt:" .. rec.preferred_bt end
+    if rec.config_type and rec.config_conf >= CFG.CFG_THRESH then
+        sup[#sup+1] = CFG_LABEL[rec.config_type] or rec.config_type
+    end
+    if rec.def_tickbase   then sup[#sup+1] = "DEF" end
+    if is_spike           then sup[#sup+1] = "\xe2\x96\xb2 SPK" end
+    if rec.meta_aggressive then sup[#sup+1] = "AGG" end  -- built-in failing, we took over
+    if #sup > 0 then
+        renderer.indicator(132, 118, 188, 172, table.concat(sup, "  "))
+    end
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--  CLEANUP
+-- ══════════════════════════════════════════════════════════════════
+local function ResetPlist()
+    for i = 1, 64 do
+        pcall(function()
+            plist.set(i, "Force body yaw", false)
+            plist.set(i, "Force body yaw value", 0)
+            plist.set(i, "Correction active", false)
+        end)
+    end
+end
+
+local function EndMatch()
+    info("match", "ended -- flushing DB")
+    FlushDB()
+    ResetPlist()
+    REC = {}; DT_HIST = {}; SHOTS = {}; EIDX_S64 = {}
+    RestoreInterp()
+    flush_log()
+end
+
+local function FullShutdown()
+    EndMatch()
+    pcall(function()
+        cvar.cl_interpolate:set_int(ORIG_IPOLATE)
+        cvar.cl_interp_ratio:set_int(ORIG_RATIO)
+        cvar.cl_interp:set_float(ORIG_INTERP)
+    end)
+    flush_log()
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--  EVENT REGISTRATION
+-- ══════════════════════════════════════════════════════════════════
+client.set_event_callback("net_update_end", function()
+    if entity.is_alive(entity.get_local_player()) then
+        local ok, msg = pcall(Update)
+        if not ok then err("update", "top-level crash: %s", tostring(msg)) end
+    end
+end)
+client.set_event_callback("paint",       DrawOverlay)
+client.set_event_callback("aim_fire",    on_aim_fire)
+client.set_event_callback("aim_miss",    on_aim_miss)
+client.set_event_callback("aim_hit",     on_aim_hit)
+client.set_event_callback("round_start", ResetPlist)
+client.set_event_callback("game_end",    EndMatch)
+client.set_event_callback("level_init",  EndMatch)
+client.set_event_callback("shutdown",    FullShutdown)
+client.set_event_callback("disconnect",  FullShutdown)
+
+info("init", "RIFTVEIL v2.3 loaded -- commands: rv_stats  rv_db  rv_clear  rv_reset")
+flush_log()
