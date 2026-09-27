@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v2.3  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v2.4  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
@@ -18,6 +18,13 @@
 --            tighter techy separators (│ ·), status dots (●/○) replacing
 --            check/cross glyphs, finer 10-segment side meter (■/·), and a
 --            new off-angle awareness line for the second live enemy.
+--            Blind-guess brute cycle: the true last-resort meta_aggressive
+--            path (zero side data at all) now cycles side+half/full
+--            magnitude across ticks (NIXWARE-style) instead of freezing on
+--            one static guess. CanSeeHead: the "standing = fully exposed"
+--            vuln TTL boost is now trace-verified (client.trace_line)
+--            instead of inferred from velocity/duck/ground alone; fails
+--            open so a bad trace never costs a boost the old code granted.
 --    v2.3 – 6-script counter batch (serenity, aesthetic×2, ambani,
 --            testarossa, gasolina). TorsoCluster (circular mean, W=7,
 --            THR=25) counters ways()/sanya/Bobro/random-limits.
@@ -1000,6 +1007,29 @@ local function TorsoCluster(rec, torso)
 end
 
 -- ══════════════════════════════════════════════════════════════════
+--  LINE OF SIGHT
+--  Cheap trace-based visibility check -- gates the "standing = fully
+--  exposed" vuln TTL boost so it doesn't fire on a target standing still
+--  behind a window frame or thin wall that just happens to read as
+--  stationary via velocity/duck/ground state alone.
+--  Fails OPEN (returns true) on any missing data or trace error, so a
+--  bad read never costs a TTL boost the old heuristic would've granted.
+-- ══════════════════════════════════════════════════════════════════
+local function CanSeeHead(me, target)
+    if not me or not target then return true end
+    local mx, my, mz = entity.get_origin(me)
+    local tx, ty, tz = entity.get_origin(target)
+    if not (isnum(mx) and isnum(tx)) then return true end
+    local _, _, mvz = entity.get_prop(me, "m_vecViewOffset")
+    local _, _, tvz = entity.get_prop(target, "m_vecViewOffset")
+    local ok, frac, hit = pcall(client.trace_line, me,
+        mx, my, mz + (isnum(mvz) and mvz or 64),
+        tx, ty, tz + (isnum(tvz) and tvz or 64))
+    if not ok or not isnum(frac) then return true end
+    return frac >= 0.98 or hit == target
+end
+
+-- ══════════════════════════════════════════════════════════════════
 --  VULNERABILITY DETECTOR
 --  Returns: vtype, correction_angle, confidence  OR  nil, 0, 0
 --  rec.prev_* fields must be set from the previous tick.
@@ -1248,6 +1278,11 @@ local function NewRec(player, s64)
         -- choke>0; a gap despite choke==0 means the backtrack record was broken
         -- (shift-style), not lost -- don't trust LAGCOMP/PHASE while this is high.
         _shift_streak = 0,
+        -- Blind-guess brute cycle: index into the last-resort NIXWARE-style
+        -- shot-cycle fallback (meta_aggressive with zero side data). _brute_half
+        -- marks the half-magnitude phase of that cycle.
+        _brute_idx = 0,
+        _brute_half = false,
     }
 end
 
@@ -1483,10 +1518,15 @@ local function ProcessPlayer(player, ctx)
             local base_ttl = CFG.VULN_TTL[vtype] or 1
             local is_standing = spd < 8 and duck < 0.1 and on_ground == true
 
-            -- One-shot boost: standing enemy = fully exposed head hitbox.
+            -- One-shot boost: standing enemy = fully exposed head hitbox,
+            -- confirmed via trace rather than assumed from velocity/duck/ground
+            -- alone (CanSeeHead fails open, so this never costs a boost the old
+            -- heuristic would've granted -- it only withholds it on a confirmed
+            -- blocked line, e.g. standing behind a window frame or thin wall).
             -- +1 tick gives the aimbot more backtrack candidates to find
             -- a clean headshot position within the vulnerability window.
-            if is_standing and (vtype == VTYPE.LBY or vtype == VTYPE.UNK) then
+            if is_standing and (vtype == VTYPE.LBY or vtype == VTYPE.UNK)
+               and CanSeeHead(entity.get_local_player(), player) then
                 base_ttl = base_ttl + 1
             end
 
@@ -1528,6 +1568,7 @@ local function ProcessPlayer(player, ctx)
 
         local tracked_side   = rec.side
         local tracked_method = METH.RING
+        rec._brute_half       = false  -- set true below only on a true blind-guess tick
 
         if rec.vuln_ttl == 0 then
             -- No active vuln window — run the side detection chain
@@ -1616,8 +1657,15 @@ local function ProcessPlayer(player, ctx)
                               or (rec.side ~= 0 and rec.side)           -- raw ring side
                               or 0
                     if base == 0 then
-                        -- Absolute last resort: opposite of flip state
-                        base = rec.flip and -1 or 1
+                        -- Absolute last resort: no side data at all. Cycle a short
+                        -- candidate sequence (NIXWARE-style shot-cycle fallback:
+                        -- side A full, side A half, side B full, side B half)
+                        -- instead of freezing on one guess -- a sustained
+                        -- no-signal streak shouldn't spam the same wrong angle.
+                        rec._brute_idx = ((rec._brute_idx or 0) + 1) % 4
+                        base = (rec._brute_idx < 2) and 1 or -1
+                        if rec.flip then base = -base end
+                        rec._brute_half = (rec._brute_idx % 2) == 1
                     else
                         -- Apply flip to raw ring side (hit_side already encodes it)
                         if base == rec.side and rec.flip then base = -base end
@@ -1704,6 +1752,7 @@ local function ProcessPlayer(player, ctx)
             -- has no answer for). Hold our best tracked_side correction rather than
             -- releasing to a resolver that's already proven it can't handle this AA.
             local meta_val = CfgAngle(tracked_side, rec.state, rec.config_type, corr_cap)
+            if rec._brute_half then meta_val = meta_val * 0.5 end
             plist.set(player, "Force body yaw", true)
             plist.set(player, "Force body yaw value", meta_val)
             plist.set(player, "Correction active", true)
@@ -1951,6 +2000,7 @@ local function on_aim_miss(e)
                     rec.torso_hist = {}
                     rec._sup_streak = 0
                     rec._shift_streak = 0
+                    rec._brute_idx = 0
                 end
             end
         end
