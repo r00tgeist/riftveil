@@ -1,9 +1,18 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v3.0  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v3.1  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v3.1 – ESP flags cut from 7 to 2 (VLN, RES). 6LX/HIT/SUP/DTB/MYW
+--            removed -- all five were internal diagnostics (which data
+--            source fired, whether a struct read succeeded) spammed onto
+--            every enemy's ESP box regardless of whether it meant anything
+--            actionable. HIT's meaning was already a subset of RES; SUP/
+--            DTB/config context still show in the v3.0 panel for whichever
+--            enemy is your current threat, where they belong -- one flag
+--            per real decision point (shoot now / trust this angle),
+--            nothing that's just plumbing confirmation.
 --    v3.0 – HUD rebuilt as a single draggable panel (Solus-UI style)
 --            instead of stacked renderer.indicator rows. Position
 --            persists through two hidden ui.new_slider values (survives
@@ -2061,14 +2070,18 @@ local function on_aim_miss(e)
 end
 
 -- ══════════════════════════════════════════════════════════════════
---  ESP FLAGS  (v2.1 redesign)
---    VLN  crimson    — vulnerability window currently open
+--  ESP FLAGS  (v3.1 — cut from 7 to 2)
+--    VLN  crimson    — vulnerability window currently open (shoot now)
 --    RES  green      — resolver confident, correction applied
---    6LX  blue       — 6lex digit read active this player
---    HIT  lime       — hit-side memory confirmed (2+ head/neck hits)
---    SUP  gold       — suppressing shots this tick
---    DTB  amber      — defensive tickbase detected
---    MYW  violet     — live min/max_yaw bounds readable from animstate
+--
+--  6LX/HIT/SUP/DTB/MYW removed: none of them told you to DO anything
+--  differently, they were internal diagnostics (which data source fired,
+--  whether a struct read succeeded) leaking onto every enemy's ESP box at
+--  once. HIT's meaning is already a subset of RES (hit-mem is one of the
+--  methods RES lights up for). SUP/DTB/config/etc. still show in the
+--  panel for whichever enemy is your current threat; 6LX/MYW are verbose-
+--  log only now (ui_verb) since they were pure plumbing confirmation,
+--  not something a player acts on mid-round.
 -- ══════════════════════════════════════════════════════════════════
 local function ent_rec(ent)
     if not ui.get(ui_on) then return nil end
@@ -2084,54 +2097,13 @@ client.register_esp_flag("VLN", 230, 28, 28, function(ent)
 end)
 
 -- RES — resolver has a confident read and is overriding the built-in
+-- (covers hit-mem, 6lex, and meta-hold alike -- any method confident
+-- enough to be actively applied, not suppress and not a vuln window)
 client.register_esp_flag("RES", 55, 205, 70, function(ent)
     local ok, r = pcall(function()
         local rec = ent_rec(ent)
         return rec ~= nil and rec.resolved and rec.conf >= CFG.CONF_ESP
             and rec.vuln_ttl == 0 and rec.last_meth ~= METH.SUPPRESS
-    end); return ok and r or false
-end)
-
--- 6LX — live 6lex digit extraction returned a side this tick
-client.register_esp_flag("6LX", 55, 135, 255, function(ent)
-    local ok, r = pcall(function()
-        local rec = ent_rec(ent)
-        return rec ~= nil and rec.six_side ~= 0
-    end); return ok and r or false
-end)
-
--- HIT — hit-side memory has a confirmed side from head/neck hits this match
-client.register_esp_flag("HIT", 110, 250, 110, function(ent)
-    local ok, r = pcall(function()
-        local rec = ent_rec(ent)
-        return rec ~= nil and rec.hit_count >= 2 and rec.hit_side ~= 0
-            and rec.last_meth == METH.HIT_MEM
-    end); return ok and r or false
-end)
-
--- SUP — suppressing shots (waiting for a cleaner window)
-client.register_esp_flag("SUP", 225, 210, 40, function(ent)
-    local ok, r = pcall(function()
-        local rec = ent_rec(ent)
-        return rec ~= nil and rec.last_meth == METH.SUPPRESS and rec.vuln_ttl == 0
-    end); return ok and r or false
-end)
-
--- DTB — defensive tickbase: player's simtime running ahead of server
-client.register_esp_flag("DTB", 255, 180, 45, function(ent)
-    local ok, r = pcall(function()
-        local rec = ent_rec(ent); return rec ~= nil and rec.def_tickbase == true
-    end); return ok and r or false
-end)
-
--- MYW — live desync bounds (min_yaw/max_yaw) currently readable from animstate.
--- Confirms skeet has written real clamp values this tick — our live_cap is active.
-client.register_esp_flag("MYW", 160, 75, 255, function(ent)
-    if not ui.get(ui_on) then return false end
-    if not entity.is_enemy(ent) or not entity.is_alive(ent) then return false end
-    local ok, r = pcall(function()
-        local as = GetAS(ent); if not as then return false end
-        return isnum(as.min_yaw, -90, -0.5) and isnum(as.max_yaw, 0.5, 90)
     end); return ok and r or false
 end)
 
