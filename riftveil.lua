@@ -1,9 +1,40 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v5.9  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v6.0  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v6.0 – Full senior-review pass, line by line, top to bottom (not
+--            triggered by a specific log this time). Found a real,
+--            previously-undetected bug in IsHold: it reset `stable` to 0
+--            on a sign mismatch but kept scanning OLDER ring-buffer
+--            entries afterward instead of stopping there. Since a "held"
+--            AA pattern is supposed to mean an unbroken run of the same
+--            sign ending at the CURRENT tick, a mismatch at the most
+--            recent samples should disqualify it immediately -- but the
+--            old code could have a real flip 1-2 ticks ago, then a long
+--            coincidental run of matches further back in the same short
+--            window push `stable` back over CFG.HOLD_STABLE by the end of
+--            the loop. Concretely, with HOLD_STABLE=4 and recent-to-old
+--            signs [+, -, +,+,+,+,+]: the flip at offset 1 should mean
+--            "not holding," but the old logic finishes with stable=5 and
+--            reports AA.HOLD anyway. DetectAA then skips its normal flip-
+--            counting/cluster classification for that tick and returns a
+--            wrong AA type + side straight from the current sample --
+--            feeding wrong data into rec.aa_type, rec.conf, and the
+--            is_jitter/is_sym side-tracking checks downstream. Fixed to
+--            break out at the first mismatch instead of resetting and
+--            continuing, since anything before a break in the streak
+--            can't contribute to whether the sign is held right now.
+--            Reviewed and confirmed sound (no changes): RingBuffer index
+--            math, MeanSidePose/CountClusters/IsSkitter, TorsoCluster's
+--            circular-mean clustering, ChokedPkts/TrackDT/IsDefTick,
+--            LCTicks/WeDefensive, RecognizeCfg's hysteresis, PredictSide's
+--            median-gap math, CfgAngle/VelCap/LiveCap, DetectVuln's 6
+--            window branches, ProcessPlayer's save-phase (prev_* always
+--            written regardless of which early-break path was taken),
+--            FlushDB's weighting, on_aim_fire/hit/miss's event handling,
+--            the panel drag/layout code, and the SHIFT box geometry.
 --    v5.9 – Found the v5.8 corr_cap fix wasn't the only place it applied.
 --            tracked_side's unconditional side-tracking chain (used by the
 --            META_HOLD fallback) sets tracked_method = HIT_MEM off
@@ -583,7 +614,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "5.9"
+local RV_VERSION = "6.0"
 
 local ffi = require "ffi"
 
@@ -1468,16 +1499,25 @@ local function IsSkitter(hist)
     return m >= 4
 end
 
+-- BUG (found in senior review pass, previously undetected): the old version
+-- reset `stable` to 0 on a sign mismatch but kept scanning OLDER samples
+-- instead of stopping there. "Held" is supposed to mean an unbroken run of
+-- the same sign ending at the most recent tick -- but if an older, unrelated
+-- run of matches (past a real flip) was long enough, it could push `stable`
+-- back over CFG.HOLD_STABLE by the end of the loop, e.g. hist signs (newest
+-- first) [+, -, +,+,+,+,+] with HOLD_STABLE=4: the flip at offset 1 should
+-- disqualify "currently holding" immediately, but the old code kept
+-- counting past it and returned true anyway (final stable=5). Fixed to stop
+-- at the first mismatch, since anything before a break in the streak is
+-- irrelevant to whether the sign is CURRENTLY held.
 local function IsHold(hist)
     local cnt = RLen(hist); if cnt < CFG.HOLD_STABLE + 2 then return false end
     local last = RGet(hist, 0); if not last then return false end
     local fs, stable = Sign(last.p), 1  -- start at 1 counting the most recent sample
     for i = 1, math.min(cnt-1, CFG.HOLD_STABLE+2) do
         local e = RGet(hist, i)
-        if e then
-            if Sign(e.p) == fs then stable = stable + 1
-            else stable = 0 end
-        end
+        if not e or Sign(e.p) ~= fs then break end
+        stable = stable + 1
     end
     return stable >= CFG.HOLD_STABLE
 end
