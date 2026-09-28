@@ -1,9 +1,31 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v5.8  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v5.9  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v5.9 – Found the v5.8 corr_cap fix wasn't the only place it applied.
+--            tracked_side's unconditional side-tracking chain (used by the
+--            META_HOLD fallback) sets tracked_method = HIT_MEM off
+--            rec.hit_side whenever hit_count>=2, regardless of whether the
+--            "Hit Memory" checkbox is even on -- so META_HOLD could still
+--            clamp a confirmed hit_mem correction to literal 0 at high
+--            target speed through this second call site, even after [3]'s
+--            own call site was fixed. Now uses live_cap when
+--            tracked_method == HIT_MEM there too.
+--            Also traced KNOWN_CFGS' own numbers: luasense_beta's canonical
+--            average (26,41) sits inside symmetric's acceptance band
+--            (error 15 vs. threshold 16), luasense_std's average (30,38)
+--            sits inside symmetric's band too (error 8), and both sit
+--            inside each other's. All three known profiles mutually
+--            overlap in RecognizeCfg's matching space -- hysteresis
+--            (CFG_SWITCH_MARGIN=6) mostly holds a pick steady, but real
+--            per-match measurement noise can occasionally punch through
+--            the gap, which is consistent with (not fully explaining) the
+--            occasional config switches seen in logs for players near a
+--            boundary. Not changing the tolerance/margin numbers without
+--            real per-type accuracy data across multiple logs -- flagging
+--            it rather than guessing at a retune.
 --    v5.8 – Diagnosed a debug log complaint ("it feels horrible") down to
 --            two real bugs:
 --            (1) MAJOR: hit_mem overrides (the [3] branch, confirmed-side
@@ -561,7 +583,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "5.8"
+local RV_VERSION = "5.9"
 
 local ffi = require "ffi"
 
@@ -2616,7 +2638,16 @@ local function ProcessPlayer(player, ctx)
             -- ambani torpedo, aesthetic records — patterns the 2022-era built-in
             -- has no answer for). Hold our best tracked_side correction rather than
             -- releasing to a resolver that's already proven it can't handle this AA.
-            local meta_val = CfgAngle(tracked_side, rec.state, TrustedCfg(rec), corr_cap)
+            -- Same corr_cap-zeroing bug as the [3] hit_mem branch (see v5.8):
+            -- tracked_side can be sourced from METH.HIT_MEM here too (the
+            -- unconditional side-tracking chain above sets tracked_method =
+            -- HIT_MEM off rec.hit_side whenever hit_count>=2, regardless of
+            -- whether the "Hit Memory" checkbox is even on) -- so a fast-
+            -- moving target would still get its confirmed correction clamped
+            -- to literal 0 right here, via this second call site, even after
+            -- the [3] branch itself was fixed. Use live_cap for that case.
+            local meta_cap = (tracked_method == METH.HIT_MEM) and live_cap or corr_cap
+            local meta_val = CfgAngle(tracked_side, rec.state, TrustedCfg(rec), meta_cap)
             if rec._brute_half then meta_val = meta_val * 0.5 end
             plist.set(player, "Force body yaw", true)
             plist.set(player, "Force body yaw value", meta_val)
