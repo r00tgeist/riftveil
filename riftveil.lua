@@ -1,9 +1,51 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v6.3  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v6.4  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v6.4 – Wiring audit: verified every function's return values are
+--            actually consumed by its caller (not just that the file
+--            parses), and that every defined function is actually called
+--            from somewhere. Method: cross-referenced all 68 top-level
+--            `local function` definitions against every call site, and
+--            checked multi-return-value functions (DetectAA, LiveCap,
+--            GetLat, ExtrapolateOrigin, GetRec, DetectVuln, ...) for
+--            whether the caller captures as many values as the function
+--            actually returns.
+--            Found one real dead wire: DetectVuln returns 3 values
+--            (vtype, val, conf) in every branch, but its one call site
+--            in ProcessPlayer only captured 2 (`local vtype, vcorr =
+--            DetectVuln(...)`). Lua doesn't error on this -- extra return
+--            values are just silently discarded -- so nothing ever
+--            surfaced it. The dropped 3rd value was a whole per-detection
+--            confidence subsystem: graduated 0.72 (CTR, weakest heuristic)
+--            up to 0.97 (UNK with cluster + live-cap + settled-state
+--            cross-check all agreeing), computed fresh every tick, never
+--            logged, never read, with zero effect on any resolver
+--            decision. Fixed by capturing it (`local vtype, vcorr, vconf
+--            = DetectVuln(...)`), storing it on the new rec.vuln_conf
+--            field, and adding conf=%.2f to the verbose [vuln] debug
+--            line. Deliberately NOT wiring it into a new gating decision
+--            (e.g. requiring vconf above some threshold before opening a
+--            window) -- that would need real per-confidence-level
+--            accuracy data to pick a defensible cutoff from, which is a
+--            job for a future log, not a guess made now. This at least
+--            makes the signal visible for that analysis going forward.
+--            Every other multi-return call site checked out: DetectAA's
+--            4 values, LiveCap's 3, GetLat's 2, ExtrapolateOrigin's 3,
+--            GetRec's 2 are all captured and genuinely used downstream
+--            (traced pose_sum specifically since it looked like the most
+--            likely second dead output -- it's read by the DEF_TICK/
+--            RING_SPK side-tracking fallbacks). All 68 defined functions
+--            are reachable from an event callback or another function --
+--            none dangling. rec.vuln_pref (written on every confirmed
+--            vuln hit, persisted to DB, shown in rv_db) was the other
+--            field that looked like it might be write-only, but it reads
+--            as intentional cross-match telemetry ("which vuln type has
+--            worked on this player historically"), not a broken
+--            connection -- nothing in its own documentation or surrounding
+--            code implies it was ever meant to gate a live decision.
 --    v6.3 – MAJOR fix, found from a real debug log (not a review guess):
 --            5 of DetectVuln's 6 non-LBY branches (UNK/STP/PKA/DCK/LND/CTR)
 --            were returning a raw ABSOLUTE animstate yaw reading
@@ -725,7 +767,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "6.3"
+local RV_VERSION = "6.4"
 
 local ffi = require "ffi"
 
@@ -2158,6 +2200,13 @@ end
 --  .vuln_ttl         int         0..         Update
 --  .vuln_type        string/nil  VTYPE enum  DetectVuln
 --  .vuln_val         float       degrees     DetectVuln
+--  .vuln_conf        float       0..1        DetectVuln (per-detection
+--                                             confidence -- DetectVuln's
+--                                             3rd return value was being
+--                                             silently dropped by its call
+--                                             site until the wiring audit
+--                                             below; now stored here and
+--                                             logged, diagnostic only)
 --  .prev_pose        float/nil   –           Update (save phase)
 --  .prev_spd         float/nil   u/s         Update (save phase)
 --  .prev_duck        float       0..1        Update (save phase)
@@ -2237,7 +2286,7 @@ local function NewRec(player, s64)
         config_conf=db.config_type and 0.5 or 0,
         bt_hist={}, preferred_bt=db.bt_pref or 0,
         vuln_profile={}, vuln_pref=db.vuln_pref or nil,
-        vuln_ttl=0, vuln_type=nil, vuln_val=0,
+        vuln_ttl=0, vuln_type=nil, vuln_val=0, vuln_conf=0,
         prev_pose=nil, prev_spd=nil, prev_duck=nil, prev_onground=nil,
         cur_choke=0, was_choked=false, unk_miss_streak=0,
         kills=0, eidx=player,
@@ -2558,7 +2607,19 @@ local function ProcessPlayer(player, ctx)
         -- Vulnerability window
         if rec.vuln_ttl > 0 then rec.vuln_ttl = rec.vuln_ttl - 1 end
 
-        local vtype, vcorr = DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
+        -- WIRING BUG (found via a "check every function's outputs are
+        -- actually consumed" audit): DetectVuln returns a 3rd value --
+        -- a per-detection confidence, graduated 0.72..0.97 by the
+        -- SETTLED-STATE CROSS-CHECK / LIVE CAP BOOST / cluster-confidence
+        -- logic inside it -- that this call site was silently dropping
+        -- entirely (only vtype/vcorr were captured). Not a syntax error in
+        -- Lua (extra return values are just discarded), so nothing ever
+        -- surfaced it: an entire confidence subsystem computed every tick
+        -- with zero effect on behavior, not even logged. Now captured and
+        -- stored/logged below for visibility. Not using it to gate window-
+        -- opening decisions yet -- that would need real per-confidence-
+        -- level accuracy data to pick a threshold from, not a guess.
+        local vtype, vcorr, vconf = DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
         if vtype and not rec.vuln_profile[vtype] then
             rec.vuln_profile[vtype] = {seen=0, hit=0}
         end
@@ -2622,9 +2683,10 @@ local function ProcessPlayer(player, ctx)
             rec.vuln_ttl  = math.max(rec.vuln_ttl, base_ttl, lc_ttl)
             rec.vuln_type = vtype
             rec.vuln_val  = vcorr
+            rec.vuln_conf = vconf
             if ui.get(ui_verb) then
-                dbg("vuln", "type=%s val=%.1f player=%s ttl=%d%s",
-                    vtype, vcorr, entity.get_player_name(player) or "?",
+                dbg("vuln", "type=%s val=%.1f conf=%.2f player=%s ttl=%d%s",
+                    vtype, vcorr, vconf or 0, entity.get_player_name(player) or "?",
                     rec.vuln_ttl, is_standing and " [STAND]" or "")
             end
         end
