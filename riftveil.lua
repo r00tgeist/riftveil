@@ -1,9 +1,32 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v5.0  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v5.1  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v5.1 – Fixed FlushDB's cross-match hit_rate averaging: it weighted
+--            each match's resolver hit ratio (nhr, from hit_count/
+--            resolver_misses) by rec.kills, a completely different and
+--            much rarer sample base. Any match where you resolved someone
+--            correctly (hit_count>=2, the gate for even reaching this
+--            code) but never landed the actual kill on them -- teammate
+--            finished them, they died elsewhere after being hit -- had
+--            rec.kills==0, which zeroed that whole match's contribution
+--            to the running DB average despite having real data. Silently
+--            starved seeded_conf (NewRec reads db.hit_rate) for exactly
+--            that common case. Now weighted by the actual resolver sample
+--            size (hit_count+resolver_misses) via a new persisted
+--            db.samples field; kills is still tracked as its own running
+--            total, just no longer used as the averaging weight. rv_db
+--            now shows hr:%d%%(n=N) so the sample size behind that
+--            percentage is visible.
+--            Also investigated (per user request) whether ui elements
+--            support a :tooltip() method for in-menu guidance, the way
+--            two of the reference neverlose scripts reviewed today used
+--            it -- confirmed against docs.gamesense.gs/docs/api/ui that
+--            no such method exists on gamesense ui elements; that's a
+--            neverlose-only menu-object convention, not portable here.
+--            Did not add fake tooltips.
 --    v5.0 – Panel visual upgrade: replaced the flat hard-cornered body/
 --            title rectangles and straight 1px border lines with a
 --            rounded panel + soft drop shadow. Ported RoundedRect() from
@@ -385,7 +408,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "5.0"
+local RV_VERSION = "5.1"
 
 local ffi = require "ffi"
 
@@ -637,10 +660,10 @@ client.set_event_callback("console_input", function(text)
         local out = {"[RIFTVEIL] === PERMANENT DB ==="}
         for s64, e in pairs(DB) do
             out[#out+1] = string.format(
-                "  %s | cfg:%s | vuln:%s | bt:%s | hr:%d%% | kills:%d",
+                "  %s | cfg:%s | vuln:%s | bt:%s | hr:%d%%(n=%d) | kills:%d",
                 s64, e.config_type or "?", e.vuln_pref or "?",
                 tostring(e.bt_pref), math.floor((e.hit_rate or 0)*100),
-                e.kills or 0)
+                e.samples or 0, e.kills or 0)
         end
         local s = table.concat(out, "\n")
         client.log(s); log_write("CMD","db", s)
@@ -1815,17 +1838,31 @@ FlushDB = function()
     for s64, rec in pairs(REC) do
         if rec.hit_count >= 2 then
             local ex   = DB[s64] or {}
-            local nhr  = rec.hit_count / math.max(rec.hit_count + rec.resolver_misses, 1)
-            local ok   = ex.kills or 0
-            local tot  = ok + rec.kills
+            -- hit_rate is a running average across matches. It must be
+            -- weighted by the sample size that actually PRODUCED nhr
+            -- (hit_count+resolver_misses), not by rec.kills -- kills is a
+            -- much rarer, noisier signal that's frequently 0 even with
+            -- solid resolver data (resolved someone correctly several
+            -- times but a teammate got the kill, or they died elsewhere
+            -- after being hit). Weighting by kills meant any such match
+            -- contributed ZERO to the DB average despite the hit_count>=2
+            -- gate above proving real data existed -- silently starving
+            -- seeded_conf (NewRec reads db.hit_rate) for exactly that
+            -- common case. kills is still tracked below, just no longer
+            -- used as the averaging weight.
+            local this_n = rec.hit_count + rec.resolver_misses
+            local prev_n = ex.samples or 0
+            local tot_n  = prev_n + this_n
+            local nhr    = this_n > 0 and (rec.hit_count / this_n) or 0
             DB[s64] = {
                 config_type = rec.config_type or ex.config_type,
                 vuln_pref   = rec.vuln_pref   or ex.vuln_pref,
                 bt_pref     = rec.preferred_bt > 0 and rec.preferred_bt or ex.bt_pref,
-                hit_rate    = tot > 0
-                    and (nhr * rec.kills + (ex.hit_rate or 0) * ok) / tot
+                hit_rate    = tot_n > 0
+                    and (nhr * this_n + (ex.hit_rate or 0) * prev_n) / tot_n
                     or nhr,
-                kills       = tot,
+                samples     = tot_n,
+                kills       = (ex.kills or 0) + rec.kills,
             }
             info("db", "flush s64=%s cfg=%s vuln=%s bt=%d hr=%d%% kills=%d",
                  s64,
