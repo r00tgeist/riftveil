@@ -1,9 +1,35 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v6.6  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v6.7  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v6.7 – Explored 3 uploaded reference resolver/AA scripts for
+--            genuinely useful, verifiable techniques (not invented).
+--            Found the same formula independently in all three: a
+--            per-tick "true currently-achievable max desync" computed
+--            from stop_to_full_run/feet_spd_fwd/feet_spd_unk/duck_amount
+--            scaling max_yaw, instead of treating max_yaw as a flat
+--            constant regardless of movement state. One of the three
+--            scripts shares RIFTVEIL's own exact FFI struct layout --
+--            same 0x9960 base offset, same pad13[0x1CA] position for
+--            min_yaw/max_yaw -- strong corroboration the field mapping
+--            is correct. Checked RIFTVEIL's own struct: feet_spd_fwd,
+--            feet_spd_unk, and stop_to_full_run have been declared and
+--            read into rv_as every single tick since the FFI section was
+--            written, but were never referenced anywhere else in the
+--            file -- dead struct fields, same class of gap as the
+--            DetectVuln 3rd-return-value fix earlier this session.
+--            Added DynamicMaxYaw(as), wired into LiveCap: when the
+--            dynamic read succeeds and comes in tighter than the flat
+--            engine max_yaw, LiveCap's cap uses it instead. This can
+--            only REDUCE the cap toward what's actually achievable this
+--            exact tick, never widen it past the engine's own reported
+--            bound -- a strictly more conservative correction cap, not a
+--            riskier guess, and it touches every CfgAngle-capped
+--            correction in the file (corr_cap/live_cap feed LBY, 6lex
+--            fallback, hit_mem, suppress, meta_hold, and the yaw-jitter
+--            threshold) since they all read live_cap through LiveCap.
 --    v6.6 – Checked the real gamesense API (docs.gamesense.gs/docs/api/
 --            entity) for a capability RIFTVEIL wasn't using yet, rather
 --            than inventing anything unverified. Found entity.hitbox_
@@ -808,7 +834,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "6.6"
+local RV_VERSION = "6.7"
 
 local ffi = require "ffi"
 
@@ -1418,10 +1444,54 @@ local function isnum(v, lo, hi)
     return true
 end
 
+-- DynamicMaxYaw: the player's TRUE currently-achievable max desync this
+-- tick -- not just the flat engine bound (as.max_yaw), which is the
+-- theoretical ceiling regardless of current movement state. The real
+-- achievable desync shrinks as a player transitions from stopped to
+-- running and while ducking; this formula (a per-tick scale factor
+-- derived from stop_to_full_run/feet_spd_fwd/feet_spd_unk/duck_amount,
+-- applied to max_yaw) captures that instead of treating max_yaw as a
+-- flat constant all the time.
+--
+-- Found by exploring uploaded reference scripts and cross-checking
+-- against RIFTVEIL's own code, not invented: the same formula (down to
+-- the exact magic constants -0.3/-0.2) turned up independently in THREE
+-- separate real resolver/AA scripts. One of them shares RIFTVEIL's own
+-- exact FFI struct layout byte-for-byte -- same 0x9960 base offset, same
+-- pad13[0x1CA] position for min_yaw/max_yaw -- strong corroboration this
+-- mapping is correct, not a guess. feet_spd_fwd, feet_spd_unk, and
+-- stop_to_full_run are three fields RIFTVEIL's own rv_as struct has
+-- declared and read every tick since this file's FFI section was
+-- written, but never once referenced anywhere else in the file -- dead
+-- struct fields, same class of gap as the DetectVuln 3rd-return-value
+-- fix earlier in this session.
+local function DynamicMaxYaw(as)
+    if not as then return nil end
+    local duck, fwd, unk, stop, maxyaw =
+        as.duck_amount, as.feet_spd_fwd, as.feet_spd_unk, as.stop_to_full_run, as.max_yaw
+    if not (isnum(duck) and isnum(fwd) and isnum(unk) and isnum(stop)
+            and isnum(maxyaw, 0.5, 90)) then
+        return nil
+    end
+    fwd = Clamp(fwd, 0, 1)
+    unk = math.max(unk, 1)
+    local factor = (stop * -0.30000001 - 0.19999999) * fwd + 1
+    if duck > 0 then
+        factor = factor + duck * unk * (0.5 - factor)
+    end
+    local delta = maxyaw * factor
+    return (delta >= 0 and delta < 60) and delta or nil
+end
+
 -- LiveCap: reads actual per-player desync bounds from animstate.
 -- Confirmed accessible: skeet DLL analysis (Dec 27 2024 build) showed
 -- min_yaw / max_yaw fields in rv_as after pad13[0x1CA].
--- Returns (min_yaw, max_yaw, cap) where cap = max of their magnitudes.
+-- Returns (min_yaw, max_yaw, cap) where cap = max of their magnitudes,
+-- tightened to DynamicMaxYaw's per-tick estimate when that read succeeds
+-- and is smaller -- this can only REDUCE the cap toward what's actually
+-- achievable right now, never widen it past the engine's own reported
+-- bound, so it's a strictly more conservative correction cap, not a
+-- riskier guess.
 -- Falls back to CFG.DESYNC_CAP = 58 if the read is invalid or not yet
 -- populated (first tick on a new player).
 local function LiveCap(as)
@@ -1429,7 +1499,9 @@ local function LiveCap(as)
         local mn = as.min_yaw
         local mx = as.max_yaw
         if isnum(mn, -90, -0.5) and isnum(mx, 0.5, 90) then
-            return mn, mx, math.max(math.abs(mn), mx)
+            local dyn = DynamicMaxYaw(as)
+            local cap = (dyn and dyn < mx) and dyn or mx
+            return mn, mx, cap
         end
     end
     return -CFG.DESYNC_CAP, CFG.DESYNC_CAP, CFG.DESYNC_CAP
