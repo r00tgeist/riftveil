@@ -1,9 +1,24 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v3.1  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v3.2  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v3.2 – Fixed config-recognition thrashing found in a real 12min match
+--            log: one player flipped luasense_beta/std/symmetric 22 times
+--            because those profiles sit only 4-9deg apart and noisy per-
+--            tick pose sampling alone tipped RecognizeCfg's "best match"
+--            every 32-tick recheck. Added switch hysteresis (a rival must
+--            beat the current pick by CFG_SWITCH_MARGIN, not just edge it
+--            out) plus TrustedCfg() gating every CfgAngle call on
+--            config_conf >= CFG_THRESH -- CFG_THRESH's own comment always
+--            said this was required, but nothing enforced it, so every
+--            flip (config_conf reset to 0.30) fed straight into the
+--            applied correction angle, up to 6-11deg of angle churn per
+--            switch with zero new evidence behind it. Log also confirmed:
+--            68.8% overall hit rate (77/112) across 3 real opponents,
+--            DB persistence working correctly (writes once hit_count>=2),
+--            no meta_aggressive false positives.
 --    v3.1 – ESP flags cut from 7 to 2 (VLN, RES). 6LX/HIT/SUP/DTB/MYW
 --            removed -- all five were internal diagnostics (which data
 --            source fired, whether a struct read succeeded) spammed onto
@@ -397,6 +412,12 @@ local CFG = {
     CFG_THRESH   = 0.50,    -- config_conf minimum before applying known angles
     CFG_GAIN     = 0.15,    -- confidence gain per matching recognition
     CFG_TICKS    = 32,      -- rerun recognition every N simtime ticks
+    -- Real match log (v2.3, 12min): one player flipped luasense_beta/std/
+    -- symmetric 22 times because KNOWN_CFGS profiles sit only 4-9deg apart
+    -- and noisy per-tick pose sampling alone tipped the "best match" every
+    -- recheck. Require a rival to beat the current pick by this much
+    -- (combined L+R error) before RecognizeCfg abandons it.
+    CFG_SWITCH_MARGIN = 6.0,
 
     -- State confidence seeds (first tick for a new player)
     STATE_SEED = {
@@ -690,6 +711,18 @@ local function ClassifyState(player, as, spd)
     return STATE.STANDING
 end
 
+-- TrustedCfg: only hand a recognized config_type to CfgAngle once
+-- config_conf has actually crossed CFG_THRESH. CFG_THRESH's own comment
+-- always said it was "the minimum before applying known angles", but
+-- nothing enforced that -- CfgAngle callers used rec.config_type
+-- unconditionally, so every mid-recognition config flip (config_conf reset
+-- to 0.30 on switch) fed straight into the applied correction angle. Real
+-- match log: one player flipped configs 22 times in 12 minutes, each flip
+-- changing the standing-state angle by up to 6-11 degrees.
+local function TrustedCfg(rec)
+    return (rec.config_conf >= CFG.CFG_THRESH) and rec.config_type or nil
+end
+
 -- Return correction angle for a given side using config knowledge or fallback.
 -- Optional cap clamps the static guess to the velocity/live-desync bound
 -- (VelCap) so a fast-moving enemy doesn't get an overshoot correction.
@@ -910,14 +943,24 @@ end
 --  Runs every CFG.CFG_TICKS to match observed asymmetric pose
 --  distribution against KNOWN_CFGS profiles.
 -- ══════════════════════════════════════════════════════════════════
-local function RecognizeCfg(rec)
+local function RecognizeCfg(rec, current_type)
     if RLen(rec.hist) < 12 then return nil end
     local al, ar = MeanSidePose(rec.hist)
     if al < 5 or ar < 5 then return nil end  -- need data on both sides
     local best, best_err = nil, 999
+    local cur_err, cur_ok = nil, false
     for name, p in pairs(KNOWN_CFGS) do
         local e = math.abs(al - p.avg_left) + math.abs(ar - p.avg_right)
+        if name == current_type then
+            cur_err, cur_ok = e, e < p.tol * 2
+        end
         if e < p.tol * 2 and e < best_err then best_err = e; best = name end
+    end
+    -- Hysteresis: a still-plausible current pick isn't abandoned for a
+    -- rival unless it wins by a real margin -- see CFG_SWITCH_MARGIN.
+    if cur_ok and best ~= current_type
+       and (cur_err - best_err) < CFG.CFG_SWITCH_MARGIN then
+        return current_type
     end
     return best
 end
@@ -1104,7 +1147,7 @@ local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap)
         -- no dependency on eye_y which is still the fake angle at snap time.
         local real_side = -Sign(rec.prev_pose)
         if real_side == 0 then return nil, 0, 0 end
-        return VTYPE.LBY, CfgAngle(real_side, rec.state, rec.config_type, corr_cap), 0.95
+        return VTYPE.LBY, CfgAngle(real_side, rec.state, TrustedCfg(rec), corr_cap), 0.95
     end
 
     -- [UNK] unchoke tick: first real packet after a choke burst
@@ -1545,7 +1588,7 @@ local function ProcessPlayer(player, ctx)
 
         -- Config recognition (throttled)
         if rec.config_conf < 0.8 and (st % CFG.CFG_TICKS) == 0 then
-            local rcfg = RecognizeCfg(rec)
+            local rcfg = RecognizeCfg(rec, rec.config_type)
             if rcfg then
                 if rcfg == rec.config_type then
                     rec.config_conf = math.min(rec.config_conf + CFG.CFG_GAIN, 1.0)
@@ -1752,13 +1795,13 @@ local function ProcessPlayer(player, ctx)
             should_override = true
             override_val    = six_desync > 0
                               and (six_side * six_desync)
-                              or CfgAngle(six_side, rec.state, rec.config_type, corr_cap)
+                              or CfgAngle(six_side, rec.state, TrustedCfg(rec), corr_cap)
             override_meth   = METH.SIX_LEX
 
         -- [3] Hit-side memory: confirmed hit this match
         elseif ui.get(ui_hitmem) and rec.hit_count >= 2 and rec.hit_side ~= 0 then
             should_override = true
-            override_val    = CfgAngle(rec.hit_side, rec.state, rec.config_type, corr_cap)
+            override_val    = CfgAngle(rec.hit_side, rec.state, TrustedCfg(rec), corr_cap)
             override_meth   = METH.HIT_MEM
 
         -- [4] Suppress [EXP]: force wrong angle to gate aimbot hit-chance.
@@ -1781,7 +1824,7 @@ local function ProcessPlayer(player, ctx)
                 should_override = true
                 local bs = tracked_side ~= 0 and tracked_side or dom_side
                 if bs == 0 then bs = 1 end
-                override_val  = -CfgAngle(bs, rec.state, rec.config_type, corr_cap)
+                override_val  = -CfgAngle(bs, rec.state, TrustedCfg(rec), corr_cap)
                 override_meth = METH.SUPPRESS
             end
         end
@@ -1804,7 +1847,7 @@ local function ProcessPlayer(player, ctx)
             -- ambani torpedo, aesthetic records — patterns the 2022-era built-in
             -- has no answer for). Hold our best tracked_side correction rather than
             -- releasing to a resolver that's already proven it can't handle this AA.
-            local meta_val = CfgAngle(tracked_side, rec.state, rec.config_type, corr_cap)
+            local meta_val = CfgAngle(tracked_side, rec.state, TrustedCfg(rec), corr_cap)
             if rec._brute_half then meta_val = meta_val * 0.5 end
             plist.set(player, "Force body yaw", true)
             plist.set(player, "Force body yaw value", meta_val)
