@@ -1,9 +1,28 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v3.9  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v4.0  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v4.0 – Two resolver-adjacent additions from reviewing vandal.lua and
+--            re-reading lagcomp_box.lua more closely:
+--            (1) plist "High priority" is now set true whenever we have
+--            an active override and false when releasing to builtin/
+--            clearing -- confirmed via a real resolver's own usage
+--            ("prevent missing LC" per its comment), not in the official
+--            docs, so treated as a hint rather than core functionality
+--            (set last in each block so a bad field name can't stop the
+--            actual Force body yaw / Correction active calls before it).
+--            (2) The SHIFT flash from v3.9 now also draws a full 3D
+--            wireframe box at the extrapolated real position (velocity +
+--            gravity + trace_line projection, ported from lagcomp_box.lua)
+--            with a tether line back to the reported origin. Rebuilt the
+--            box's corner/edge math from scratch rather than copying that
+--            file's edge list directly -- it mixes 0- and 1-based Lua
+--            table indices, silently dropping 3 of its intended 12 edges.
+--            Extrapolation is purely cosmetic and pcall-wrapped throughout
+--            with a same-tick fallback; it cannot affect any resolver
+--            decision, only where the box is drawn.
 --    v3.9 – Menu polish pass: section headers restyled (◆/▸ instead of
 --            plain "--" dividers), same items, no new bloat. Added a
 --            customizable panel accent color picker -- only tints the
@@ -224,7 +243,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "3.9"
+local RV_VERSION = "4.0"
 
 local ffi = require "ffi"
 
@@ -1249,6 +1268,42 @@ local function CanSeeHead(me, target)
 end
 
 -- ══════════════════════════════════════════════════════════════════
+--  ORIGIN EXTRAPOLATION  (SHIFT box only -- purely cosmetic, never feeds
+--  resolver decisions: a shift already gates trust via _shift_streak
+--  regardless of what this draws)
+--  Ported from a standalone "lag comp breaker" ESP tool: projects the
+--  reported origin forward by `ticks` using current velocity plus a rough
+--  gravity model, stopping at the first solid collision. Wrapped in pcall
+--  throughout and falls back to the plain origin on any failure (missing
+--  cvar, bad trace) so a bug here can never affect anything but the box's
+--  position.
+-- ══════════════════════════════════════════════════════════════════
+local function ExtrapolateOrigin(player, ox, oy, oz, ticks)
+    if not (isnum(ox) and isnum(oy) and isnum(oz)) or ticks <= 0 then return ox, oy, oz end
+    local ok, px, py, pz = pcall(function()
+        local ti = globals.tickinterval()
+        local vx, vy, vz = entity.get_prop(player, "m_vecVelocity")
+        vx, vy, vz = vx or 0, vy or 0, vz or 0
+
+        local sv_g, sv_j = 800 * ti, 301 * ti  -- CS:GO defaults, used if the cvars are unavailable
+        pcall(function() sv_g = cvar.sv_gravity:get_float() * ti end)
+        pcall(function() sv_j = cvar.sv_jump_impulse:get_float() * ti end)
+        local gravity = vz > 0 and -sv_g or sv_j
+
+        local cx, cy, cz = ox, oy, oz
+        for _ = 1, math.min(ticks, 32) do
+            local nx, ny, nz = cx + vx*ti, cy + vy*ti, cz + (vz + gravity)*ti
+            local frac = client.trace_line(-1, cx, cy, cz, nx, ny, nz)
+            if isnum(frac) and frac <= 0.99 then return cx, cy, cz end
+            cx, cy, cz = nx, ny, nz
+        end
+        return cx, cy, cz
+    end)
+    if not ok then return ox, oy, oz end
+    return px, py, pz
+end
+
+-- ══════════════════════════════════════════════════════════════════
 --  VULNERABILITY DETECTOR
 --  Returns: vtype, correction_angle, confidence  OR  nil, 0, 0
 --  rec.prev_* fields must be set from the previous tick.
@@ -1504,8 +1559,10 @@ local function NewRec(player, s64)
         -- Also set directly (to 3) by a same-tick origin teleport >64 units on a
         -- clean update -- see the origin-jump check in ProcessPlayer.
         _shift_streak = 0,
-        prev_origin_x = nil, prev_origin_y = nil,  -- for the origin-jump shift check
+        prev_origin_x = nil, prev_origin_y = nil, prev_origin_z = nil,
+        prev_origin_tick = nil,  -- for the origin-jump shift check + box extrapolation
         _shift_flash = 0,  -- 0..1, decayed in DrawOverlay; world-space "SHIFT" tag alpha
+        _shift_box = nil,  -- {x,y,z} extrapolated origin, drawn as a wireframe while _shift_flash > 0
         -- Blind-guess brute cycle: index into the last-resort NIXWARE-style
         -- shot-cycle fallback (meta_aggressive with zero side data). _brute_half
         -- marks the half-magnitude phase of that cycle.
@@ -1529,6 +1586,7 @@ local function ClearEnt(player)
     plist.set(player, "Force body yaw", false)
     plist.set(player, "Force body yaw value", 0)
     plist.set(player, "Correction active", false)
+    plist.set(player, "High priority", false)
     local s64 = EIDX_S64[player]
     if s64 and REC[s64] then
         REC[s64].active = false; REC[s64].resolved = false
@@ -1604,14 +1662,16 @@ local function ProcessPlayer(player, ctx)
         local as = GetAS(player)
         if not as then
             rec.prev_pose = nil  -- prevent stale LBY trigger next tick
-            rec.prev_origin_x, rec.prev_origin_y = nil, nil  -- gap ahead; don't compare across it
+            rec.prev_origin_x, rec.prev_origin_y, rec.prev_origin_z = nil, nil, nil  -- gap ahead; don't compare across it
+            rec.prev_origin_tick = nil
             break
         end
 
         if choke > 2 then
             ClearEnt(player)
             rec.prev_pose = nil
-            rec.prev_origin_x, rec.prev_origin_y = nil, nil
+            rec.prev_origin_x, rec.prev_origin_y, rec.prev_origin_z = nil, nil, nil
+            rec.prev_origin_tick = nil
             break
         end
 
@@ -1681,18 +1741,23 @@ local function ProcessPlayer(player, ctx)
         -- standalone "lag comp breaker" ESP tool that draws a 3D box on it.
         -- Stronger and more immediate than the indirect tm[]-gap proxy
         -- below, so it sets _shift_streak straight to the distrust floor
-        -- instead of accumulating gradually. _shift_flash drives a brief
-        -- world-space "SHIFT" tag in DrawOverlay (see that ESP tool above).
-        local ox, oy = entity.get_origin(player)
+        -- instead of accumulating gradually. _shift_flash/_shift_box drive
+        -- a brief world-space "SHIFT" tag + box in DrawOverlay, adapted
+        -- from that same ESP tool's extrapolation technique.
+        local ox, oy, oz = entity.get_origin(player)
         if choke == 0 and isnum(ox) and isnum(oy)
            and rec.prev_origin_x and rec.prev_origin_y then
             local dx, dy = ox - rec.prev_origin_x, oy - rec.prev_origin_y
             if (dx*dx + dy*dy) > 4096 then
                 rec._shift_streak = math.max(rec._shift_streak or 0, 3)
                 rec._shift_flash  = 1.0
+                local ticks = Clamp((rec.prev_origin_tick and (st - rec.prev_origin_tick)) or 1, 1, 32)
+                local ex, ey, ez = ExtrapolateOrigin(player, ox, oy, oz, ticks)
+                rec._shift_box = {ex, ey, ez}
             end
         end
-        rec.prev_origin_x, rec.prev_origin_y = ox, oy
+        rec.prev_origin_x, rec.prev_origin_y, rec.prev_origin_z = ox, oy, oz
+        rec.prev_origin_tick = st
 
         RPush(rec.hist, {p=pose, e=eye_y, t=st})
         rec.tm[st]      = rec.tm[st] or {p=pose, e=eye_y, t=st}
@@ -1988,6 +2053,13 @@ local function ProcessPlayer(player, ctx)
             plist.set(player, "Force body yaw", true)
             plist.set(player, "Force body yaw value", override_val)
             plist.set(player, "Correction active", true)
+            -- High priority: confirmed via a real resolver's usage (not in
+            -- the official docs) -- hints the LC/backtrack system not to
+            -- deprioritize this target's validation window while we're
+            -- actively correcting them ("prevent missing LC" per that
+            -- script's own comment). Set last so a bad/renamed field
+            -- can't stop the actual correction above from applying.
+            plist.set(player, "High priority", true)
             rec.active = true; rec.resolved = true
             rec.last_val = override_val; rec.last_meth = override_meth
             -- Track suppress streak for the streak-cap logic above
@@ -2007,6 +2079,7 @@ local function ProcessPlayer(player, ctx)
             plist.set(player, "Force body yaw", true)
             plist.set(player, "Force body yaw value", meta_val)
             plist.set(player, "Correction active", true)
+            plist.set(player, "High priority", true)
             rec.active = true; rec.resolved = true
             rec.last_val = meta_val; rec.last_meth = METH.META_HOLD
             rec._sup_streak = 0
@@ -2015,6 +2088,7 @@ local function ProcessPlayer(player, ctx)
             plist.set(player, "Force body yaw", false)
             plist.set(player, "Force body yaw value", 0)
             plist.set(player, "Correction active", false)
+            plist.set(player, "High priority", false)
             rec.active = false; rec.resolved = false
             rec.last_val = 0; rec.last_meth = "builtin"
             rec._sup_streak = 0
@@ -2585,14 +2659,21 @@ local function DrawOverlay()
         ly = ly + PANEL_ROW_H
     end
 
-    -- ── World-space "SHIFT" flash ──────────────────────────────────────
+    -- ── World-space "SHIFT" flash + box ─────────────────────────────────
     -- Fires from the origin-jump check in ProcessPlayer -- a brief, fading
-    -- tag over ANY live enemy whose backtrack record just broke, not just
-    -- the current threat, since a shift is a rare, meaningful moment worth
-    -- surfacing regardless of who's aimed at. Inspired by a standalone
-    -- "lag comp breaker" ESP tool that draws a full 3D box for the same
-    -- event; kept to a simple fading world tag here to match RIFTVEIL's
-    -- own minimal visual language instead of adding a second style of HUD.
+    -- tag + wireframe box over ANY live enemy whose backtrack record just
+    -- broke, not just the current threat, since a shift is a rare,
+    -- meaningful moment worth surfacing regardless of who's aimed at.
+    -- Inspired by a standalone "lag comp breaker" ESP tool's 3D box +
+    -- tether-line style; the box corners/edges here are rebuilt from
+    -- scratch with correct 1-indexed Lua array math (that reference file's
+    -- own edge list mixes 0- and 1-based indices, silently dropping 3 of
+    -- its 12 intended edges -- not something to carry over).
+    local BOX_EDGES = {
+        {1,2},{2,4},{4,3},{3,1},   -- bottom face
+        {5,6},{6,8},{8,7},{7,5},   -- top face
+        {1,5},{2,6},{3,7},{4,8},   -- verticals
+    }
     local decay = globals.frametime() * 2  -- fades out over ~0.5s
     for _, p in ipairs(LIVE_ENEMIES) do
         local s2 = EIDX_S64[p]
@@ -2601,11 +2682,46 @@ local function DrawOverlay()
             r2._shift_flash = math.max(0, r2._shift_flash - decay)
             if r2._shift_flash > 0 then
                 local ox2, oy2, oz2 = entity.get_origin(p)
+                local a = math.floor(r2._shift_flash * 255)
+                local sx, sy
                 if isnum(ox2) and isnum(oy2) and isnum(oz2) then
-                    local sx, sy = renderer.world_to_screen(ox2, oy2, oz2 + 78)
+                    sx, sy = renderer.world_to_screen(ox2, oy2, oz2 + 78)
                     if sx then
-                        renderer.text(sx, sy, 255, 140, 60,
-                            math.floor(r2._shift_flash * 255), "c", 0, "SHIFT")
+                        renderer.text(sx, sy, 255, 140, 60, a, "c", 0, "SHIFT")
+                    end
+                end
+
+                local box = r2._shift_box
+                if box then
+                    local mnx, mny, mnz = entity.get_prop(p, "m_vecMins")
+                    local mxx, mxy, mxz = entity.get_prop(p, "m_vecMaxs")
+                    if isnum(mnx) and isnum(mxx) then
+                        local bx, by, bz = box[1], box[2], box[3]
+                        local corners = {
+                            {bx+mnx, by+mny, bz+mnz}, {bx+mxx, by+mny, bz+mnz},
+                            {bx+mnx, by+mxy, bz+mnz}, {bx+mxx, by+mxy, bz+mnz},
+                            {bx+mnx, by+mny, bz+mxz}, {bx+mxx, by+mny, bz+mxz},
+                            {bx+mnx, by+mxy, bz+mxz}, {bx+mxx, by+mxy, bz+mxz},
+                        }
+                        local scr = {}
+                        for ci = 1, 8 do
+                            local cx, cy, cz = corners[ci][1], corners[ci][2], corners[ci][3]
+                            local ssx, ssy = renderer.world_to_screen(cx, cy, cz)
+                            if ssx then scr[ci] = {ssx, ssy} end
+                        end
+                        local ba = math.floor(a * 0.8)
+                        for _, e in ipairs(BOX_EDGES) do
+                            local p1, p2 = scr[e[1]], scr[e[2]]
+                            if p1 and p2 then
+                                renderer.line(p1[1], p1[2], p2[1], p2[2], 255, 140, 60, ba)
+                            end
+                        end
+                        -- Tether from the actually-reported origin to the box's
+                        -- near-bottom corner, so it reads as "real position is
+                        -- over there," not just an unrelated floating box.
+                        if sx and scr[1] then
+                            renderer.line(sx, sy, scr[1][1], scr[1][2], 255, 140, 60, ba)
+                        end
                     end
                 end
             end
