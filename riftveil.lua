@@ -1,9 +1,35 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v5.4  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v5.5  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v5.5 – Menu + bug review pass.
+--            (1) Renamed menu labels away from internal codenames a
+--            first-time user has no way to decode: "6lex extraction" ->
+--            "Desync Angle Detection", "Vulnerability windows" ->
+--            "Vulnerability Detection", "Hit-side memory" -> "Hit
+--            Memory", "Period prediction" -> "Jitter Prediction", "Tight
+--            interp" -> "Tight Interpolation", "Indicators" -> "ESP
+--            Indicators", "Verbose log" -> "Verbose Logging", "Panel
+--            accent" -> "Panel Accent Color". Only the displayed strings
+--            changed -- the underlying ui_* variable names (never shown
+--            to the user) are untouched, so no logic moved.
+--            (2) Found and fixed a real dead-toggle bug while reviewing:
+--            [EXP] Asymmetric Angles (ui_asym) was created, added to the
+--            SAFE/EXP visibility list, and had a comment right next to
+--            CfgAngle claiming it "feeds into CfgAngle via ASYM_FALLBACK
+--            vs CFG_COUNTER selection" -- but CfgAngle never actually
+--            checked it. Toggling that checkbox did nothing at all. Now
+--            wired as documented: ON keeps the existing per-side L/R
+--            fallback table, OFF averages it into one symmetric magnitude
+--            for both sides -- only affects players with no confidently
+--            recognized config (TrustedCfg fails), never touches
+--            CFG_COUNTER's per-config tables.
+--            Also reviewed (no changes needed, already correct):
+--            RecognizeCfg's switch hysteresis, PredictSide's jitter-period
+--            math, the DCK cooldown set/decrement lifecycle, and the
+--            STP/PKA/LND/CTR vuln branches.
 --    v5.4 – CRITICAL fix to the v5.2 vuln-type trust gate: vuln_profile's
 --            "seen" counter was incremented every time DetectVuln logged a
 --            detection, not once per actual shot taken. Checked against a
@@ -462,7 +488,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "5.4"
+local RV_VERSION = "5.5"
 
 local ffi = require "ffi"
 
@@ -551,27 +577,32 @@ local _h0      = ui.new_label("LUA","B","\xe2\x97\x86 RIFTVEIL")
 local ui_on    = ui.new_checkbox("LUA","B","  Enable")
 
 -- SAFE — these only override when signal is definitive
+-- Display names were internal codenames until now (e.g. "6lex extraction"
+-- means nothing to someone opening this menu cold -- it's the animation-
+-- layer digit-read technique's internal nickname). Renamed to describe
+-- what each one actually does; the underlying ui_* variable names are
+-- unchanged (purely internal, never shown), so no logic moved.
 local _h1      = ui.new_label("LUA","B","\xe2\x96\xb8 SAFE")
-local ui_6lex  = ui.new_checkbox("LUA","B","  [SAFE] 6lex extraction")
-local ui_vuln  = ui.new_checkbox("LUA","B","  [SAFE] Vulnerability windows")
-local ui_hitmem= ui.new_checkbox("LUA","B","  [SAFE] Hit-side memory")
+local ui_6lex  = ui.new_checkbox("LUA","B","  [SAFE] Desync Angle Detection")
+local ui_vuln  = ui.new_checkbox("LUA","B","  [SAFE] Vulnerability Detection")
+local ui_hitmem= ui.new_checkbox("LUA","B","  [SAFE] Hit Memory")
 
 -- EXPERIMENTAL — disable if things feel worse
 local _h2      = ui.new_label("LUA","B","\xe2\x96\xb8 EXPERIMENTAL")
-local ui_per   = ui.new_checkbox("LUA","B","  [EXP] Period prediction")
-local ui_asym  = ui.new_checkbox("LUA","B","  [EXP] Asymmetric angles")
-local ui_sup   = ui.new_checkbox("LUA","B","  [EXP] Suppress shots")
+local ui_per   = ui.new_checkbox("LUA","B","  [EXP] Jitter Prediction")
+local ui_asym  = ui.new_checkbox("LUA","B","  [EXP] Asymmetric Angles")
+local ui_sup   = ui.new_checkbox("LUA","B","  [EXP] Suppress Shots")
 
 -- INTERFACE
 local _h3      = ui.new_label("LUA","B","\xe2\x96\xb8 INTERFACE")
-local ui_tight = ui.new_checkbox("LUA","B","  Tight interp")
-local ui_esp   = ui.new_checkbox("LUA","B","  Indicators")
-local ui_verb  = ui.new_checkbox("LUA","B","  Verbose log")
+local ui_tight = ui.new_checkbox("LUA","B","  Tight Interpolation")
+local ui_esp   = ui.new_checkbox("LUA","B","  ESP Indicators")
+local ui_verb  = ui.new_checkbox("LUA","B","  Verbose Logging")
 -- Accent picker: only tints the panel's idle/neutral chrome (header text,
 -- idle top-strip). Never touches the vuln/resolved/building colors in
 -- DrawOverlay -- those carry meaning (red/green/amber = state), not taste,
 -- so they stay fixed regardless of this setting.
-local ui_accent = ui.new_color_picker("LUA","B","  Panel accent", 90, 150, 255, 255)
+local ui_accent = ui.new_color_picker("LUA","B","  Panel Accent Color", 90, 150, 255, 255)
 
 local _h4      = ui.new_label("LUA","B","\xe2\x96\xb8 CONTROLS")
 
@@ -1163,8 +1194,21 @@ local function CfgAngle(side, state, config_type, cap)
     if tbl then
         raw = side > 0 and tbl.R or -tbl.L
     else
+        -- ui_asym gate: was documented in a comment here ("ui_asym toggle
+        -- feeds into CfgAngle via ASYM_FALLBACK vs CFG_COUNTER selection")
+        -- but never actually checked -- the [EXP] Asymmetric Angles
+        -- checkbox did nothing at all. Wired up now: ON uses the per-side
+        -- L/R fallback table as before; OFF averages it into one symmetric
+        -- magnitude for both sides, matching what the toggle's own name
+        -- and menu grouping ("disable if things feel worse") imply it was
+        -- always meant to do.
         local a = ASYM_FALLBACK[state] or ASYM_FALLBACK[STATE.STANDING]
-        raw = side > 0 and a[2] or -a[1]
+        if ui.get(ui_asym) then
+            raw = side > 0 and a[2] or -a[1]
+        else
+            local sym = (a[1] + a[2]) / 2
+            raw = side > 0 and sym or -sym
+        end
     end
     return cap and Clamp(raw, -cap, cap) or raw
 end
