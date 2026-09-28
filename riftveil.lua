@@ -1,9 +1,30 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v5.1  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v5.2  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v5.2 – Per-player, per-vuln-TYPE trust gate (VulnTrusted). vuln_profile
+--            (seen/hit per VTYPE) was exposed as a read-only rv_stats/rv_db
+--            diagnostic in v4.7 specifically because there wasn't a real
+--            per-type hit ratio to calibrate a live gate against yet --
+--            guessing a threshold then risked suppressing a type that was
+--            actually fine. Now wired up, same idea as the 6lex agree/
+--            disagree calibration (v4.1) applied to this data: a type
+--            needs >=6 real detections (VULN_TRUST_MIN_N) before it can
+--            ever be distrusted, and below a 15% hit ratio
+--            (VULN_TRUST_MIN_RATIO) at that point, RIFTVEIL stops opening
+--            the vuln window for that specific type on that specific
+--            player and falls through to 6lex/hit_mem/suppress instead.
+--            Not a permanent lockout -- probed every 5th detection
+--            (VULN_PROBE_EVERY) so it can recover if their behavior
+--            changes mid-match (config switch, etc.), mirroring the
+--            existing suppress-streak-cap self-correction pattern rather
+--            than inventing a new one. seen/hit counters keep updating
+--            even while distrusted so the probe has real data to re-judge
+--            against. All three thresholds are new CFG constants, and the
+--            gate lives entirely inside the existing "[SAFE]
+--            Vulnerability windows" checkbox -- no new UI control added.
 --    v5.1 – Fixed FlushDB's cross-match hit_rate averaging: it weighted
 --            each match's resolver hit ratio (nhr, from hit_count/
 --            resolver_misses) by rec.kills, a completely different and
@@ -408,7 +429,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "5.1"
+local RV_VERSION = "5.2"
 
 local ffi = require "ffi"
 
@@ -717,6 +738,9 @@ local CFG = {
     CONF_DECAY   = 0.88,    -- per-tick decay multiplier when quiet
     CONF_ESP     = 0.38,    -- minimum conf to show "resolved" flag/indicator
     CONF_LOCK    = 0.65,    -- minimum to write to permanent DB
+    VULN_TRUST_MIN_N     = 6,    -- min vuln_profile.seen before a type can be distrusted
+    VULN_TRUST_MIN_RATIO = 0.15, -- below this hit/seen ratio (with enough samples), distrust
+    VULN_PROBE_EVERY     = 5,    -- while distrusted, let 1 in N through to keep gathering evidence
 
     -- Detection
     CLUSTER_GAP  = 15,      -- pose delta to split into separate cluster
@@ -1067,6 +1091,34 @@ end
 -- changing the standing-state angle by up to 6-11 degrees.
 local function TrustedCfg(rec)
     return (rec.config_conf >= CFG.CFG_THRESH) and rec.config_type or nil
+end
+
+-- Per-player, per-vuln-TYPE trust gate. vuln_profile (seen/hit per VTYPE)
+-- was exposed as a read-only rv_stats/rv_db diagnostic in v4.7 specifically
+-- because there wasn't yet a real per-type hit ratio to calibrate a live
+-- gate against -- guessing a threshold then would've risked suppressing a
+-- type that was actually fine. Same idea as the 6lex agree/disagree
+-- calibration (v4.1), applied to this data now that it exists.
+--
+-- Requires a real minimum sample size before ever distrusting a type
+-- (default-trust below that -- identical to pre-v5.2 behavior, so a
+-- player with little data is never affected). A distrusted type isn't
+-- locked out permanently -- it's probed every VULN_PROBE_EVERY detections
+-- so it can recover if the player's actual behavior changes (a config
+-- switch mid-match, for instance). This mirrors the existing suppress-
+-- streak-cap pattern elsewhere in the file ("after N ticks, pause and
+-- let one through") rather than inventing a new self-correction idea.
+local function VulnTrusted(rec, vtype)
+    local vp = rec.vuln_profile[vtype]
+    if not vp or vp.seen < CFG.VULN_TRUST_MIN_N then return true end
+    if (vp.hit / vp.seen) >= CFG.VULN_TRUST_MIN_RATIO then return true end
+    rec.vuln_probe = rec.vuln_probe or {}
+    rec.vuln_probe[vtype] = (rec.vuln_probe[vtype] or 0) + 1
+    if rec.vuln_probe[vtype] >= CFG.VULN_PROBE_EVERY then
+        rec.vuln_probe[vtype] = 0
+        return true
+    end
+    return false
 end
 
 -- Return correction angle for a given side using config knowledge or fallback.
@@ -2092,6 +2144,16 @@ local function ProcessPlayer(player, ctx)
 
         local vtype, vcorr = DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
         if vtype then
+            -- seen counts every genuine detection regardless of trust state,
+            -- so the ratio VulnTrusted reads keeps updating even while this
+            -- type is currently being skipped -- required for the probe
+            -- below to ever let it recover.
+            if not rec.vuln_profile[vtype] then
+                rec.vuln_profile[vtype] = {seen=0, hit=0}
+            end
+            rec.vuln_profile[vtype].seen = rec.vuln_profile[vtype].seen + 1
+        end
+        if vtype and VulnTrusted(rec, vtype) then
             local lc_ttl = math.floor(CFG.LC_WINDOW_S / ctx.ti) - 1
             local base_ttl = CFG.VULN_TTL[vtype] or 1
             local is_standing = spd < 8 and duck < 0.1 and on_ground == true
@@ -2124,10 +2186,6 @@ local function ProcessPlayer(player, ctx)
             rec.vuln_ttl  = math.max(base_ttl, lc_ttl)
             rec.vuln_type = vtype
             rec.vuln_val  = vcorr
-            if not rec.vuln_profile[vtype] then
-                rec.vuln_profile[vtype] = {seen=0, hit=0}
-            end
-            rec.vuln_profile[vtype].seen = rec.vuln_profile[vtype].seen + 1
             if ui.get(ui_verb) then
                 dbg("vuln", "type=%s val=%.1f player=%s ttl=%d%s",
                     vtype, vcorr, entity.get_player_name(player) or "?",
