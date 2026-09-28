@@ -1,9 +1,24 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v4.6  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v4.7  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v4.7 – Surfaced vuln_profile (seen/hit per vulnerability TYPE, e.g.
+--            lby/unk/stp/dck) in rv_stats as a new vuln:type:hit/seen
+--            field. This data has been silently tracked since the vuln
+--            system shipped but was write-only -- nothing ever read it.
+--            Prompted by a real debug log showing repeated vuln_lby
+--            misses for multiple players at high reported hit-chance;
+--            didn't wire a live trust gate off that alone (not enough
+--            samples in one log to pick a real threshold without
+--            guessing, and vuln corrections are deterministic by design --
+--            gating them wrong risks the same corruption a bad flip
+--            would cause). This is the diagnostic step first: next debug
+--            log + an rv_stats call will show real per-type hit ratios
+--            per player, which is what an eventual per-player vuln-type
+--            trust gate (mirroring the 6lex agree/disagree calibration)
+--            should be calibrated against, not guesses.
 --    v4.6 – Force Shot indicator visual fixes: was small unboxed default-
 --            size text sitting dead-center on top of the crosshair/enemy
 --            model. Moved to 140px above center, added a dark backing box
@@ -338,7 +353,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "4.6"
+local RV_VERSION = "4.7"
 
 local ffi = require "ffi"
 
@@ -567,15 +582,33 @@ client.set_event_callback("console_input", function(text)
                         string.format("%s:%+d", st, rec.hit_side_by_state[st])
                 end
             end
+            -- Per-vuln-type accuracy: vuln_profile has been tracked
+            -- (seen/hit per VTYPE) since the vuln-window system shipped,
+            -- but was never actually surfaced anywhere -- write-only data.
+            -- Exposing it here first as a diagnostic before wiring it into
+            -- any live gating decision (like the 6lex trust calibration
+            -- did for that signal): need to see real per-type hit ratios
+            -- across matches before picking a trust threshold, rather than
+            -- guessing one and risking suppressing a type that's actually
+            -- fine.
+            local vp_parts = {}
+            for vt, s in pairs(rec.vuln_profile or {}) do
+                if (s.seen or 0) > 0 then
+                    vp_parts[#vp_parts+1] = string.format("%s:%d/%d", vt, s.hit or 0, s.seen)
+                end
+            end
+            table.sort(vp_parts)
+
             out[#out+1] = string.format(
-                "  %s | %s | conf:%d%% | %d/%d (%d%%) | head:%d rmiss:%d | 6lex:%d/%d | bt:%d | cfg:%s | cond[%d]:%s",
+                "  %s | %s | conf:%d%% | %d/%d (%d%%) | head:%d rmiss:%d | 6lex:%d/%d | bt:%d | cfg:%s | cond[%d]:%s | vuln:%s",
                 entity.get_player_name(rec.eidx or 0) or s64,
                 rec.aa_type, math.floor(rec.conf*100),
                 rec.total_hits or 0, tot, hr,
                 rec.hit_count, rec.resolver_misses,
                 rec.six_agree or 0, (rec.six_agree or 0) + (rec.six_disagree or 0),
                 rec.preferred_bt, rec.config_type or "?",
-                cond_n, cond_n > 0 and table.concat(cond_parts, ",") or "-")
+                cond_n, cond_n > 0 and table.concat(cond_parts, ",") or "-",
+                #vp_parts > 0 and table.concat(vp_parts, ",") or "-")
         end
         out[#out+1] = string.format("  log lines: %d", log_total)
         local s = table.concat(out, "\n")
