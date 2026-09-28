@@ -1,9 +1,20 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v5.2  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v5.3  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v5.3 – Fixed the SHIFT box's tether line: it targeted scr[1], one
+--            arbitrary box corner (bottom, min-x, min-y), instead of the
+--            box's center. That corner sits on the far side of the box
+--            from the camera at plenty of viewing angles, so the tether
+--            looked like it stabbed into a random edge instead of
+--            pointing at the box -- reported as "horrible"/asymmetric.
+--            The box's own 12-edge geometry was already correct (checked
+--            the corner math against m_vecMins/m_vecMaxs -- forms a
+--            proper symmetric rectangular prism); only the tether target
+--            was wrong. Now targets the box's actual center, which stays
+--            a consistent anchor regardless of viewing angle.
 --    v5.2 – Per-player, per-vuln-TYPE trust gate (VulnTrusted). vuln_profile
 --            (seen/hit per VTYPE) was exposed as a read-only rv_stats/rv_db
 --            diagnostic in v4.7 specifically because there wasn't a real
@@ -429,7 +440,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "5.2"
+local RV_VERSION = "5.3"
 
 local ffi = require "ffi"
 
@@ -3125,10 +3136,18 @@ local function DrawOverlay()
                             end
                         end
                         -- Tether from the actually-reported origin to the box's
-                        -- near-bottom corner, so it reads as "real position is
-                        -- over there," not just an unrelated floating box.
-                        if sx and scr[1] then
-                            renderer.line(sx, sy, scr[1][1], scr[1][2], 255, 140, 60, ba)
+                        -- CENTER, not an arbitrary corner -- scr[1] (bottom,
+                        -- min-x, min-y) is on the far side of the box from the
+                        -- camera at plenty of viewing angles, so the tether
+                        -- looked like it stabbed into a random edge instead of
+                        -- pointing at the box. The center is always a
+                        -- consistent, symmetric anchor regardless of angle.
+                        local ccx = bx + (mnx + mxx) / 2
+                        local ccy = by + (mny + mxy) / 2
+                        local ccz = bz + (mnz + mxz) / 2
+                        local tsx, tsy = renderer.world_to_screen(ccx, ccy, ccz)
+                        if sx and tsx then
+                            renderer.line(sx, sy, tsx, tsy, 255, 140, 60, ba)
                         end
                     end
                 end
