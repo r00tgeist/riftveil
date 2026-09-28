@@ -1,9 +1,39 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v5.6  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v5.7  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v5.7 – Bug review pass #3. Found and fixed four more:
+--            (1) MAJOR: on_aim_hit's is_head check used hitgroup==2 for
+--            "neck", but the file's OWN HG lookup table a few hundred
+--            lines up proves hitgroup 2 is CHEST (generic=0, head=1,
+--            chest=2, stomach=3, left arm=4, right arm=5, left leg=6,
+--            right leg=7, neck=8, gear=10) -- an internal contradiction
+--            within the same file, not a guess against outside docs.
+--            Every chest hit -- likely the single most common hitgroup in
+--            real fights -- has been feeding hit_side/hit_side_by_state/
+--            six_agree/six_disagree as if it were a confirmed head/neck
+--            hit, exactly the body-shot pollution the surrounding comment
+--            says it guards against. Fixed to hitgroup==1 or ==8.
+--            (2) Panel drag snapped on the first frame of every drag: the
+--            delta baseline (drag.mx/my) wasn't reset to the click
+--            position when a grab started, so the first frame applied
+--            whatever incidental mouse movement had happened since the
+--            last unrelated frame. Now reset at grab-start.
+--            (3) on_aim_miss's dmg_rejected path discarded a shot that
+--            m_totalHitsOnServer PROVES actually landed, crediting it
+--            nowhere at all. Now credited to total_hits (hitgroup is
+--            unknown for this event type, so hit_side/vuln_profile.hit/
+--            six_agree -- which specifically require confirmed head/neck
+--            hitgroup -- are correctly left uncredited).
+--            (4) rec.kills (and DB[s64].kills) has counted every confirmed
+--            hit, any hitgroup, since on_aim_hit was written -- never
+--            gated on the target dying. Left the field name alone (a
+--            rename would silently orphan everyone's already-saved DB
+--            entries under the old key) but fixed the misleading rv_db/
+--            debug-log display from "kills" to "hits", and documented
+--            what the seeded_conf gate's "db.kills >= 3" actually requires.
 --    v5.6 – Fixed the suppress streak-cap's pause window, which never
 --            actually functioned. The single-counter design reset
 --            _sup_streak to 0 in the non-suppress fallback branches the
@@ -503,7 +533,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "5.6"
+local RV_VERSION = "5.7"
 
 local ffi = require "ffi"
 
@@ -760,7 +790,7 @@ client.set_event_callback("console_input", function(text)
         local out = {"[RIFTVEIL] === PERMANENT DB ==="}
         for s64, e in pairs(DB) do
             out[#out+1] = string.format(
-                "  %s | cfg:%s | vuln:%s | bt:%s | hr:%d%%(n=%d) | kills:%d",
+                "  %s | cfg:%s | vuln:%s | bt:%s | hr:%d%%(n=%d) | hits:%d",
                 s64, e.config_type or "?", e.vuln_pref or "?",
                 tostring(e.bt_pref), math.floor((e.hit_rate or 0)*100),
                 e.samples or 0, e.kills or 0)
@@ -1847,7 +1877,10 @@ end
 --  .prev_onground    bool/nil    –           Update (save phase)
 --  .cur_choke        int         0..14       Update
 --  .was_choked       bool        –           Update
---  .kills            int         0..         on_aim_hit
+--  .kills            int         0..         on_aim_hit (misnomer: counts
+--                                             every confirmed hit, any
+--                                             hitgroup -- not eliminations;
+--                                             see note in on_aim_hit)
 --  .eidx             int         entity idx  GetRec
 --  .active           bool        –           Update (apply phase)
 --  .resolved         bool        –           Update (apply phase)
@@ -1868,10 +1901,13 @@ end
 
 local function NewRec(player, s64)
     local db = DB[s64] or {}
-    -- DB-seeded confidence: a proven prior against this steam64 (3+ kills,
-    -- decent hit rate) skips the cold-start ramp so short 2v2 engagements
-    -- don't end before CONF_MIN is even reached. Capped well below
-    -- CONF_LOCK -- a prior is a hint, not this round's evidence.
+    -- DB-seeded confidence: a proven prior against this steam64 (3+ confirmed
+    -- HITS -- despite the field's name, .kills has counted every confirmed
+    -- bullet hit since on_aim_hit was written, not actual eliminations; see
+    -- the field-name note in on_aim_hit -- with a decent hit rate) skips the
+    -- cold-start ramp so short 2v2 engagements don't end before CONF_MIN is
+    -- even reached. Capped well below CONF_LOCK -- a prior is a hint, not
+    -- this round's evidence.
     local seeded_conf = 0
     if (db.kills or 0) >= 3 and (db.hit_rate or 0) > 0.5 then
         seeded_conf = math.min(db.hit_rate * 0.5, 0.35)
@@ -2009,7 +2045,7 @@ FlushDB = function()
                 samples     = tot_n,
                 kills       = (ex.kills or 0) + rec.kills,
             }
-            info("db", "flush s64=%s cfg=%s vuln=%s bt=%d hr=%d%% kills=%d",
+            info("db", "flush s64=%s cfg=%s vuln=%s bt=%d hr=%d%% hits=%d",
                  s64,
                  DB[s64].config_type or "?", DB[s64].vuln_pref or "?",
                  DB[s64].bt_pref or 0,
@@ -2687,6 +2723,16 @@ local function on_aim_hit(e)
         rec.total_hits       = rec.total_hits + 1
         rec.resolver_misses = 0
         rec.conf            = math.min(rec.conf + 0.06, 1.0)
+        -- FIELD NAME NOTE: despite being called "kills" everywhere (rec,
+        -- DB[s64], rv_stats/rv_db output), this counts every confirmed
+        -- bullet HIT, any hitgroup/damage -- it's never gated on the target
+        -- actually dying. Left unrenamed here and in the persisted DB
+        -- schema: a real rename would silently orphan the "kills" field in
+        -- everyone's already-saved database (old saves have data under
+        -- that key; new code reading a renamed key would see nil). rv_stats/
+        -- rv_db's displayed label was fixed to say "hits" instead, and the
+        -- seeded_conf gate above documents what the underlying number
+        -- actually requires.
         rec.kills           = rec.kills + 1
         -- Any RIFTVEIL-sourced hit (not built-in) proves our correction works
         -- on this player — reset the builtin failure streak so meta_aggressive
@@ -2699,8 +2745,16 @@ local function on_aim_hit(e)
         -- Only count head and neck hits as confirmed side for hit_mem.
         -- Body shots (stomach, chest, limbs) have large hitboxes accessible
         -- from many angles — they don't confirm the head correction angle.
-        -- hitgroup 1 = head, hitgroup 2 = neck
-        local is_head = e.hitgroup == 1 or e.hitgroup == 2
+        -- hitgroup 1 = head, hitgroup 8 = neck (NOT 2 -- 2 is chest; see the
+        -- file's own HG lookup table a few hundred lines up: generic=0,
+        -- head=1, chest=2, stomach=3, left arm=4, right arm=5, left leg=6,
+        -- right leg=7, neck=8, gear=10). The old check (hitgroup==1 or ==2)
+        -- was checking head-or-CHEST, meaning every chest hit -- probably
+        -- the single most common hitgroup in real fights -- fed into
+        -- hit_side/hit_side_by_state/six_agree/six_disagree as if it were a
+        -- confirmed head/neck hit, exactly the body-shot pollution this
+        -- comment says it's guarding against.
+        local is_head = e.hitgroup == 1 or e.hitgroup == 8
         if d.side ~= 0 and is_head then
             rec.hit_side  = d.flip and -d.side or d.side
             rec.hit_count = rec.hit_count + 1
@@ -2778,10 +2832,28 @@ local function on_aim_miss(e)
         and (d.srv_hits or 0) ~= (entity.get_prop(me, "m_totalHitsOnServer") or 0)
 
     if is_timeout or is_dmg_rejected then
+        -- dmg_rejected specifically means m_totalHitsOnServer PROVES this
+        -- shot actually landed -- that's not just "not evidence we were
+        -- wrong" as the comment above says, it's positive evidence we were
+        -- RIGHT, and it was being thrown away entirely (didn't count
+        -- toward total_hits, hit_count, nothing). Credit total_hits now
+        -- since that's confirmed regardless of hitgroup. Can't safely
+        -- credit hit_side/vuln_profile.hit/six_agree here though -- unlike
+        -- on_aim_hit, this event carries no hitgroup, and those three
+        -- specifically require confirmed head/neck hits by design; crediting
+        -- them off an unknown-hitgroup event risks polluting that
+        -- calibration with body-shot data mislabeled as a head confirmation.
+        -- is_timeout stays fully discarded -- genuinely ambiguous/stale,
+        -- no confirmed outcome either way.
+        if is_dmg_rejected then
+            local rec = d.s64 and REC[d.s64]
+            if rec then rec.total_hits = rec.total_hits + 1 end
+        end
         if ui.get(ui_verb) then
-            dbg("miss", "player=%s discarded (%s) meth=%s val=%.0f -- not counted",
+            dbg("miss", "player=%s discarded (%s) meth=%s val=%.0f -- %s",
                 entity.get_player_name(e.target) or "?",
-                is_timeout and "timeout" or "dmg_rejected", d.meth, d.val)
+                is_timeout and "timeout" or "dmg_rejected", d.meth, d.val,
+                is_dmg_rejected and "credited as total_hits" or "not counted")
         end
         SHOTS[e.id] = nil
         return
@@ -3000,6 +3072,14 @@ local function UpdateDrag(px, py, pw, ph)
     local held      = menu_open and client.key_state(0x01) == true
     if held and not drag.held then
         drag.grabbed = mx >= px and mx <= px + pw and my >= py and my <= py + ph
+        -- Reset the delta baseline to THIS frame's mouse position the
+        -- instant a grab starts. Without this, drag.mx/my still held
+        -- whatever position was recorded on the last unrelated frame
+        -- (mouse released, hovering elsewhere) -- so the very first frame
+        -- of every drag applied a "jump" equal to incidental mouse
+        -- movement since then, snapping the panel before smooth dragging
+        -- took over on subsequent frames.
+        if drag.grabbed then drag.mx, drag.my = mx, my end
     elseif not held then
         drag.grabbed = false
     end
