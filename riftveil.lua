@@ -1,9 +1,34 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v4.3  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v4.4  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v4.4 – Per-CONDITION hit-side memory. hit_side/hit_count were a
+--            single global value per player, overwritten on every confirmed
+--            head/neck hit regardless of movement state. Confirmed via
+--            vandal.lua's own local-AA menu that this is wrong: it defines
+--            8 fully independent per-state desync configs (default/
+--            standing/moving/in air/slowwalking/crouching/crouch moving/
+--            crouch in air), each with its own yaw/side -- meaning a real
+--            enemy AA can legitimately desync a different side depending
+--            purely on whether they're standing vs. moving vs. crouching.
+--            A single global hit_side gets clobbered the instant the enemy
+--            changes state, causing hit_mem to misfire in whichever state
+--            it wasn't last learned in. Added hit_side_by_state/
+--            hit_count_by_state, keyed by the same STATE.* strings
+--            ClassifyState already produces (rec.state) -- no new state
+--            machine needed. on_aim_hit now records the confirmed side
+--            under the state active at fire time (SHOTS[].state, new);
+--            the [3] hit-mem override branch prefers the current state's
+--            own memory once it has >=2 confirmed hits, falling back to
+--            the old global scalar for states with no data yet. A hit_mem
+--            MISS now invalidates only that specific state's entry (the
+--            enemy demonstrably desyncs differently there) instead of
+--            leaving stale wrong data in place, while leaving proven-good
+--            memory for other states untouched. Also cleared on soft
+--            reset alongside the global fields. Visible via rv_stats'
+--            new cond[N]:state:+/-1,... field.
 --    v4.3 – console_input now returns true after handling any rv_* command
 --            (rv_stats/rv_db/rv_clear/rv_reset/rv_wipe). Per
 --            docs.gamesense.gs/docs/events/console_input, returning true
@@ -285,7 +310,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "4.3"
+local RV_VERSION = "4.4"
 
 local ffi = require "ffi"
 
@@ -489,14 +514,27 @@ client.set_event_callback("console_input", function(text)
         for s64, rec in pairs(REC) do
             local tot = (rec.total_hits or 0) + (rec.total_misses or 0)
             local hr  = tot > 0 and math.floor(rec.total_hits / tot * 100) or 0
+            -- Per-condition memory: how many movement states have >=2
+            -- confirmed hits of their own, and what side each learned --
+            -- shows whether the enemy is actually desyncing differently
+            -- per state (different signs) or just needed a few states to warm up.
+            local cond_n, cond_parts = 0, {}
+            for st, cnt in pairs(rec.hit_count_by_state or {}) do
+                if cnt >= 2 and (rec.hit_side_by_state[st] or 0) ~= 0 then
+                    cond_n = cond_n + 1
+                    cond_parts[#cond_parts+1] =
+                        string.format("%s:%+d", st, rec.hit_side_by_state[st])
+                end
+            end
             out[#out+1] = string.format(
-                "  %s | %s | conf:%d%% | %d/%d (%d%%) | head:%d rmiss:%d | 6lex:%d/%d | bt:%d | cfg:%s",
+                "  %s | %s | conf:%d%% | %d/%d (%d%%) | head:%d rmiss:%d | 6lex:%d/%d | bt:%d | cfg:%s | cond[%d]:%s",
                 entity.get_player_name(rec.eidx or 0) or s64,
                 rec.aa_type, math.floor(rec.conf*100),
                 rec.total_hits or 0, tot, hr,
                 rec.hit_count, rec.resolver_misses,
                 rec.six_agree or 0, (rec.six_agree or 0) + (rec.six_disagree or 0),
-                rec.preferred_bt, rec.config_type or "?")
+                rec.preferred_bt, rec.config_type or "?",
+                cond_n, cond_n > 0 and table.concat(cond_parts, ",") or "-")
         end
         out[#out+1] = string.format("  log lines: %d", log_total)
         local s = table.concat(out, "\n")
@@ -1572,6 +1610,21 @@ local function NewRec(player, s64)
         side=0, period=0, conf=seeded_conf,
         aa_type=AA.UNKNOWN, flip=false, lt=-1,
         hit_side=0, hit_count=0, resolver_misses=0,
+        -- Per-CONDITION hit memory: hit_side/hit_count above are a single
+        -- global value, but real AA configs (confirmed in vandal.lua's own
+        -- local-AA menu -- 8 independent per-state desync configs: default/
+        -- standing/moving/in air/slowwalking/crouching/crouch moving/crouch
+        -- in air, each with its own yaw/side) switch which side they desync
+        -- on purely based on movement state. A single hit_side gets
+        -- overwritten every time the enemy changes state, so memory learned
+        -- while they were standing actively causes misses the moment they
+        -- start moving. Keyed by the exact same STATE.* strings ClassifyState
+        -- already produces (rec.state), so no new state machine is needed --
+        -- see on_aim_hit (write), on_aim_miss (per-state invalidation on a
+        -- hit_mem miss), and the [3] override branch below (read, falls back
+        -- to the global hit_side/hit_count above when this state has no data
+        -- yet).
+        hit_side_by_state={}, hit_count_by_state={},
         -- Per-player 6lex trust calibration (inspired by vandal.lua's
         -- per-opponent learning, but validated against confirmed head/neck
         -- hits instead of misses -- a hit proves which side was actually
@@ -2081,7 +2134,19 @@ local function ProcessPlayer(player, ctx)
                               or CfgAngle(six_side, rec.state, TrustedCfg(rec), corr_cap)
             override_meth   = METH.SIX_LEX
 
-        -- [3] Hit-side memory: confirmed hit this match
+        -- [3] Hit-side memory: confirmed hit this match. Per-CONDITION
+        -- memory (this exact movement state) takes priority over the
+        -- global scalar -- an enemy desyncing a different side while
+        -- standing vs. moving means the state-specific record is strictly
+        -- more accurate whenever it exists; the global one is only a
+        -- fallback for states we haven't confirmed a hit in yet this match.
+        elseif ui.get(ui_hitmem) and rec.state
+               and (rec.hit_count_by_state[rec.state] or 0) >= 2
+               and (rec.hit_side_by_state[rec.state] or 0) ~= 0 then
+            should_override = true
+            override_val    = CfgAngle(rec.hit_side_by_state[rec.state], rec.state, TrustedCfg(rec), corr_cap)
+            override_meth   = METH.HIT_MEM
+
         elseif ui.get(ui_hitmem) and rec.hit_count >= 2 and rec.hit_side ~= 0 then
             should_override = true
             override_val    = CfgAngle(rec.hit_side, rec.state, TrustedCfg(rec), corr_cap)
@@ -2257,6 +2322,7 @@ local function on_aim_fire(e)
         flip    = r and r.flip      or false,   -- store flip state at fire time
         conf    = r and r.conf      or 0,
         aa      = r and r.aa_type   or AA.UNKNOWN,
+        state   = r and r.state     or nil,  -- movement state at fire time, for per-condition hit_mem
         -- e.backtrack is a TIME value (seconds), not a tick count -- must
         -- go through TT() before comparing against the 1..16 tick range
         -- used everywhere else (bt_hist/preferred_bt/log output).
@@ -2301,6 +2367,16 @@ local function on_aim_hit(e)
         if d.side ~= 0 and is_head then
             rec.hit_side  = d.flip and -d.side or d.side
             rec.hit_count = rec.hit_count + 1
+            -- Per-condition memory: same confirmed side, filed under the
+            -- movement state that was active when the shot was fired (see
+            -- hit_side_by_state comment in NewRec). Independent of the
+            -- global hit_side above -- a hit while standing shouldn't
+            -- overwrite what was learned while moving, and vice versa.
+            if d.state then
+                rec.hit_side_by_state[d.state]  = rec.hit_side
+                rec.hit_count_by_state[d.state] =
+                    (rec.hit_count_by_state[d.state] or 0) + 1
+            end
             -- 6lex trust calibration: this confirmed head/neck hit IS the
             -- real side (same ground truth hit_mem just used above) --
             -- compare it against whatever 6lex claimed at fire time, if it
@@ -2422,6 +2498,17 @@ local function on_aim_miss(e)
                 end
             elseif d.meth == METH.HIT_MEM then
                 should_flip = false   -- confirmed side, don't flip it away
+                -- This specific movement state's memory just proved wrong
+                -- (the enemy likely desyncs differently in this state than
+                -- whatever state it was learned in) -- clear only that
+                -- state's entry so it relearns, without touching the global
+                -- hit_side/other states' entries, which are still unproven
+                -- wrong. A no-op if this miss actually came from the global
+                -- fallback (state had no per-state data yet).
+                if d.state then
+                    rec.hit_side_by_state[d.state]  = 0
+                    rec.hit_count_by_state[d.state] = 0
+                end
             elseif (d.conf or 0) > 0.65 then
                 should_flip = false   -- high confidence = prediction error, not wrong side
             end
@@ -2454,6 +2541,7 @@ local function on_aim_miss(e)
                          entity.get_player_name(e.target) or "?")
                     rec.conf = 0.22; rec.resolver_misses = 0
                     rec.flip = false; rec.hit_side = 0; rec.hit_count = 0
+                    rec.hit_side_by_state = {}; rec.hit_count_by_state = {}
                     -- Clear torso history so old cluster readings don't persist.
                     -- A soft reset means our corrections were wrong — the player likely
                     -- switched configs. Stale cluster = wrong correction for new config.
