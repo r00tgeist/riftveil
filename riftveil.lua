@@ -1,9 +1,17 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v4.5  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v4.6  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v4.6 – Force Shot indicator visual fixes: was small unboxed default-
+--            size text sitting dead-center on top of the crosshair/enemy
+--            model. Moved to 140px above center, added a dark backing box
+--            + thin colored accent line (same visual language as the main
+--            panel), and switched the text to bold+enlarged+centered
+--            ("+bc" flags, per docs.gamesense.gs/docs/api/renderer/text --
+--            "+" enlarges, "b" bolds, "c" centers).
+--
 --    v4.5 – Force Shot indicator (first ragebot-adjacent addition, kept
 --            fully separate from the resolver pipeline). Investigated a
 --            real "Force Shot" from a neverlose script for this: it turned
@@ -330,7 +338,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "4.5"
+local RV_VERSION = "4.6"
 
 local ffi = require "ffi"
 
@@ -2750,18 +2758,27 @@ local function DrawOverlay()
         rec = s64 and REC[s64]
     end
 
-    -- FORCE SHOT indicator: screen-center prompt when RIFTVEIL's own
-    -- resolver read on the current threat is confident enough to commit
-    -- to a shot. A deterministic vuln window always qualifies; otherwise
-    -- needs FORCESHOT_CONF (stricter than the ESP "resolved" threshold).
+    -- FORCE SHOT indicator: prompt when RIFTVEIL's own resolver read on
+    -- the current threat is confident enough to commit to a shot. A
+    -- deterministic vuln window always qualifies; otherwise needs
+    -- FORCESHOT_CONF (stricter than the ESP "resolved" threshold).
     -- Purely informational -- never touches any rage/hit-chance setting.
+    -- Sits well above screen center (crosshair sits at sh/2) with a
+    -- backing box and bold enlarged text -- small unboxed default-size
+    -- text at dead-center was unreadable and sat right on top of the
+    -- crosshair/enemy model.
     if ui.get(ui_forceshot) and rec then
         local force_ready = rec.vuln_ttl > 0
             or (rec.resolved and rec.conf >= CFG.FORCESHOT_CONF)
         if force_ready then
             local fr, fg, fb, fa = ui.get(ui_forceshot_color)
+            fa = fa or 255
             local sw, sh = client.screen_size()
-            renderer.text(sw / 2, sh / 2 + 40, fr, fg, fb, fa or 255, "c", 0, "FORCE SHOT")
+            local cx, cy = sw / 2, sh / 2 - 140
+            local box_w, box_h = 176, 34
+            renderer.rectangle(cx - box_w / 2, cy - box_h / 2, box_w, box_h, 14, 14, 18, 200)
+            renderer.gradient(cx - box_w / 2, cy - box_h / 2, box_w, 2, fr, fg, fb, 235, fr, fg, fb, 235, false)
+            renderer.text(cx, cy - 6, fr, fg, fb, fa, "+bc", 0, "FORCE SHOT")
         end
     end
 
