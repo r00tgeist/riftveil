@@ -1,9 +1,17 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v3.6  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v3.7  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v3.7 – Added a real full-DB-wipe (button "Wipe ALL saved DB" +
+--            console command rv_wipe). "Reset match + DB" can only clear
+--            DB[s64] for players CURRENTLY loaded into REC that session --
+--            it has no way to touch a profile for an opponent not seen
+--            yet this session. That reads as "old players keep coming
+--            back after I reset" when it's really DB persistence working
+--            exactly as designed, just outside that button's scope. This
+--            new control empties the entire permanent database instead.
 --    v3.6 – Renamed "Flush DB" to "Save match to DB" and "Reset match" to
 --            "Reset match + DB" -- the old names caused real confusion:
 --            "Flush DB" reads like a clear/reset action but has always
@@ -196,7 +204,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "3.6"
+local RV_VERSION = "3.7"
 
 local ffi = require "ffi"
 
@@ -319,6 +327,19 @@ local _btn_reset = ui.new_button("LUA","B","  Reset match + DB", function()
     client.log(string.format("[RIFTVEIL] reset %d profiles", n))
     info("reset", "manual reset, %d profiles cleared", n)
 end)
+-- "Reset match + DB" above can only clear DB[s64] for players CURRENTLY in
+-- REC -- it has no way to touch a profile from an opponent not loaded into
+-- this session yet. That looks like "old players keep coming back after I
+-- reset" when it's really just DB persistence working outside that
+-- button's scope. This is the actual full wipe.
+local _btn_wipe = ui.new_button("LUA","B","  Wipe ALL saved DB", function()
+    local n = 0; for _ in pairs(DB) do n = n + 1 end
+    DB = {}
+    database.write(DB_KEY, DB)
+    REC = {}; DT_HIST = {}; SHOTS = {}; EIDX_S64 = {}
+    client.log(string.format("[RIFTVEIL] wiped entire DB (%d entries)", n))
+    info("reset", "full DB wipe, %d entries cleared", n)
+end)
 local _btn_clr = ui.new_button("LUA","B","  Clear log", function()
     writefile(LOG_FILE, "")
     log_buf = {}; log_total = 0
@@ -329,7 +350,7 @@ local SUB_ITEMS = {
     _h1, ui_6lex, ui_vuln, ui_hitmem,
     _h2, ui_per, ui_asym, ui_sup,
     _h3, ui_tight, ui_esp, ui_verb,
-    _h4, _btn_flush, _btn_reset, _btn_clr,
+    _h4, _btn_flush, _btn_reset, _btn_wipe, _btn_clr,
 }
 local function RefreshVis()
     local on = ui.get(ui_on)
@@ -362,7 +383,8 @@ end)
 --    rv_stats   match stats per player
 --    rv_db      permanent DB contents
 --    rv_clear   wipe log file
---    rv_reset   hard reset match + DB entries for current enemies
+--    rv_reset   hard reset match + DB entries for CURRENT enemies only
+--    rv_wipe    wipe the ENTIRE permanent DB, every steam64 ever saved
 -- ══════════════════════════════════════════════════════════════════
 client.set_event_callback("console_input", function(text)
     local cmd = (text:match("^%s*(%S+)") or ""):lower()
@@ -406,6 +428,14 @@ client.set_event_callback("console_input", function(text)
         REC = {}; DT_HIST = {}; SHOTS = {}; EIDX_S64 = {}
         client.log(string.format("[RIFTVEIL] reset %d profiles", n))
         info("reset", "%d profiles cleared", n)
+
+    elseif cmd == "rv_wipe" then
+        local n = 0; for _ in pairs(DB) do n = n + 1 end
+        DB = {}
+        database.write(DB_KEY, DB)
+        REC = {}; DT_HIST = {}; SHOTS = {}; EIDX_S64 = {}
+        client.log(string.format("[RIFTVEIL] wiped entire DB (%d entries)", n))
+        info("reset", "full DB wipe, %d entries cleared", n)
     end
 end)
 
@@ -2555,5 +2585,5 @@ client.set_event_callback("level_init",  EndMatch)
 client.set_event_callback("shutdown",    FullShutdown)
 client.set_event_callback("disconnect",  FullShutdown)
 
-info("init", "RIFTVEIL v" .. RV_VERSION .. " loaded -- commands: rv_stats  rv_db  rv_clear  rv_reset")
+info("init", "RIFTVEIL v" .. RV_VERSION .. " loaded -- commands: rv_stats  rv_db  rv_clear  rv_reset  rv_wipe")
 flush_log()
