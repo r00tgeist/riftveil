@@ -1,9 +1,21 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v3.8  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v3.9  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v3.9 – Menu polish pass: section headers restyled (◆/▸ instead of
+--            plain "--" dividers), same items, no new bloat. Added a
+--            customizable panel accent color picker -- only tints the
+--            idle/neutral chrome (header text, idle top-strip); the vuln/
+--            resolved/building colors in the panel stay fixed since they
+--            carry meaning, not taste. Added a world-space "SHIFT" flash:
+--            a brief fading tag over any live enemy whose origin-jump
+--            check just fired, inspired by a standalone "lag comp
+--            breaker" ESP tool (same w2s/trace_line technique, same
+--            frametime-based decay) but kept to a simple text tag to
+--            match RIFTVEIL's own minimal visual language rather than
+--            importing a second HUD style wholesale.
 --    v3.8 – DB saves were only automatic on match-end/level_init/shutdown/
 --            disconnect -- a crash, force-quit, or a bad server disconnect
 --            between those events meant that session's progress against an
@@ -212,7 +224,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "3.8"
+local RV_VERSION = "3.9"
 
 local ffi = require "ffi"
 
@@ -297,28 +309,33 @@ local ORIG_IPOLATE = cvar.cl_interpolate:get_int()
 --  [SAFE] = tested, additive, won't break the built-in
 --  [EXP]  = experimental, disable if resolver feels worse
 -- ══════════════════════════════════════════════════════════════════
-local _h0      = ui.new_label("LUA","B","[*] RIFTVEIL")
+local _h0      = ui.new_label("LUA","B","\xe2\x97\x86 RIFTVEIL")
 local ui_on    = ui.new_checkbox("LUA","B","  Enable")
 
 -- SAFE — these only override when signal is definitive
-local _h1      = ui.new_label("LUA","B","-- safe overrides")
+local _h1      = ui.new_label("LUA","B","\xe2\x96\xb8 SAFE")
 local ui_6lex  = ui.new_checkbox("LUA","B","  [SAFE] 6lex extraction")
 local ui_vuln  = ui.new_checkbox("LUA","B","  [SAFE] Vulnerability windows")
 local ui_hitmem= ui.new_checkbox("LUA","B","  [SAFE] Hit-side memory")
 
 -- EXPERIMENTAL — disable if things feel worse
-local _h2      = ui.new_label("LUA","B","-- experimental")
+local _h2      = ui.new_label("LUA","B","\xe2\x96\xb8 EXPERIMENTAL")
 local ui_per   = ui.new_checkbox("LUA","B","  [EXP] Period prediction")
 local ui_asym  = ui.new_checkbox("LUA","B","  [EXP] Asymmetric angles")
 local ui_sup   = ui.new_checkbox("LUA","B","  [EXP] Suppress shots")
 
 -- INTERFACE
-local _h3      = ui.new_label("LUA","B","-- interface")
+local _h3      = ui.new_label("LUA","B","\xe2\x96\xb8 INTERFACE")
 local ui_tight = ui.new_checkbox("LUA","B","  Tight interp")
 local ui_esp   = ui.new_checkbox("LUA","B","  Indicators")
 local ui_verb  = ui.new_checkbox("LUA","B","  Verbose log")
+-- Accent picker: only tints the panel's idle/neutral chrome (header text,
+-- idle top-strip). Never touches the vuln/resolved/building colors in
+-- DrawOverlay -- those carry meaning (red/green/amber = state), not taste,
+-- so they stay fixed regardless of this setting.
+local ui_accent = ui.new_color_picker("LUA","B","  Panel accent", 90, 150, 255, 255)
 
-local _h4      = ui.new_label("LUA","B","-- controls")
+local _h4      = ui.new_label("LUA","B","\xe2\x96\xb8 CONTROLS")
 
 -- Forward-declare FlushDB so button callbacks can reference it
 local FlushDB
@@ -362,7 +379,7 @@ end)
 local SUB_ITEMS = {
     _h1, ui_6lex, ui_vuln, ui_hitmem,
     _h2, ui_per, ui_asym, ui_sup,
-    _h3, ui_tight, ui_esp, ui_verb,
+    _h3, ui_tight, ui_esp, ui_verb, ui_accent,
     _h4, _btn_flush, _btn_reset, _btn_wipe, _btn_clr,
 }
 local function RefreshVis()
@@ -1488,6 +1505,7 @@ local function NewRec(player, s64)
         -- clean update -- see the origin-jump check in ProcessPlayer.
         _shift_streak = 0,
         prev_origin_x = nil, prev_origin_y = nil,  -- for the origin-jump shift check
+        _shift_flash = 0,  -- 0..1, decayed in DrawOverlay; world-space "SHIFT" tag alpha
         -- Blind-guess brute cycle: index into the last-resort NIXWARE-style
         -- shot-cycle fallback (meta_aggressive with zero side data). _brute_half
         -- marks the half-magnitude phase of that cycle.
@@ -1657,17 +1675,21 @@ local function ProcessPlayer(player, ctx)
 
         -- ORIGIN-JUMP SHIFT CHECK: a >64-unit origin teleport on a clean
         -- (choke==0) tick is a direct shifting/broken-backtrack-record
-        -- signal -- confirmed independently in two real resolver
-        -- implementations, both using this exact 4096 sq-unit (64-unit)
-        -- threshold. Stronger and more immediate than the indirect tm[]-gap
-        -- proxy below, so it sets _shift_streak straight to the distrust
-        -- floor instead of accumulating gradually.
+        -- signal -- confirmed independently in THREE real scripts now, all
+        -- using this exact 4096 sq-unit (64-unit) threshold: a public CS:GO
+        -- lagrecord library, a full HvH cheat's own broke_lc check, and a
+        -- standalone "lag comp breaker" ESP tool that draws a 3D box on it.
+        -- Stronger and more immediate than the indirect tm[]-gap proxy
+        -- below, so it sets _shift_streak straight to the distrust floor
+        -- instead of accumulating gradually. _shift_flash drives a brief
+        -- world-space "SHIFT" tag in DrawOverlay (see that ESP tool above).
         local ox, oy = entity.get_origin(player)
         if choke == 0 and isnum(ox) and isnum(oy)
            and rec.prev_origin_x and rec.prev_origin_y then
             local dx, dy = ox - rec.prev_origin_x, oy - rec.prev_origin_y
             if (dx*dx + dy*dy) > 4096 then
                 rec._shift_streak = math.max(rec._shift_streak or 0, 3)
+                rec._shift_flash  = 1.0
             end
         end
         rec.prev_origin_x, rec.prev_origin_y = ox, oy
@@ -2455,7 +2477,10 @@ local function DrawOverlay()
     -- so the panel's overall color reads the resolver state even before
     -- you read a single word of text.
     local lines = {}
-    local accent_r, accent_g, accent_b = 90, 150, 255  -- idle default: cool blue
+    -- Idle default reads from ui_accent (user-customizable) -- the vuln/
+    -- resolved/building branches below still override it with their own
+    -- fixed, meaningful colors regardless of this setting.
+    local accent_r, accent_g, accent_b = ui.get(ui_accent)
 
     if rec then
         local cf   = rec.conf
@@ -2545,7 +2570,12 @@ local function DrawOverlay()
     renderer.line(px+pw-1, py, px+pw-1, py + ph, 48, 48, 54, 190)
     renderer.line(px, py+ph-1, px+pw, py+ph-1,   48, 48, 54, 190)
 
-    renderer.text(px + PANEL_PAD, py + 3, 205, 208, 218, 255, "", 0, "RV")
+    -- "RV" tinted 55% toward the accent color, blended with light gray so
+    -- it stays legible even if the user picks a dark accent.
+    local title_r = math.floor(accent_r * 0.55 + 205 * 0.45)
+    local title_g = math.floor(accent_g * 0.55 + 208 * 0.45)
+    local title_b = math.floor(accent_b * 0.55 + 218 * 0.45)
+    renderer.text(px + PANEL_PAD, py + 3, title_r, title_g, title_b, 255, "", 0, "RV")
     local hdr_w = renderer.measure_text(nil, header)
     renderer.text(px + pw - hdr_w - PANEL_PAD, py + 3, 150, 150, 162, 220, "", 0, header)
 
@@ -2553,6 +2583,33 @@ local function DrawOverlay()
     for _, ln in ipairs(lines) do
         renderer.text(px + PANEL_PAD, ly, ln[2], ln[3], ln[4], 240, "", 0, ln[1])
         ly = ly + PANEL_ROW_H
+    end
+
+    -- ── World-space "SHIFT" flash ──────────────────────────────────────
+    -- Fires from the origin-jump check in ProcessPlayer -- a brief, fading
+    -- tag over ANY live enemy whose backtrack record just broke, not just
+    -- the current threat, since a shift is a rare, meaningful moment worth
+    -- surfacing regardless of who's aimed at. Inspired by a standalone
+    -- "lag comp breaker" ESP tool that draws a full 3D box for the same
+    -- event; kept to a simple fading world tag here to match RIFTVEIL's
+    -- own minimal visual language instead of adding a second style of HUD.
+    local decay = globals.frametime() * 2  -- fades out over ~0.5s
+    for _, p in ipairs(LIVE_ENEMIES) do
+        local s2 = EIDX_S64[p]
+        local r2 = s2 and REC[s2]
+        if r2 and (r2._shift_flash or 0) > 0 then
+            r2._shift_flash = math.max(0, r2._shift_flash - decay)
+            if r2._shift_flash > 0 then
+                local ox2, oy2, oz2 = entity.get_origin(p)
+                if isnum(ox2) and isnum(oy2) and isnum(oz2) then
+                    local sx, sy = renderer.world_to_screen(ox2, oy2, oz2 + 78)
+                    if sx then
+                        renderer.text(sx, sy, 255, 140, 60,
+                            math.floor(r2._shift_flash * 255), "c", 0, "SHIFT")
+                    end
+                end
+            end
+        end
     end
 end
 
