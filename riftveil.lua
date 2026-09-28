@@ -1,9 +1,23 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v4.9  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v5.0  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v5.0 – Panel visual upgrade: replaced the flat hard-cornered body/
+--            title rectangles and straight 1px border lines with a
+--            rounded panel + soft drop shadow. Ported RoundedRect() from
+--            a real "SOLUS UI"-style script's renderer_rounded_rect
+--            (shared identically between two of its files), trimmed to
+--            just the fill -- verified renderer.circle's start_degrees/
+--            percentage usage against docs.gamesense.gs/docs/api/
+--            renderer/circle rather than trusting the source blind. One
+--            offset RoundedRect pass stands in for that script's several-
+--            step gaussian shadow (this repaints every frame, so kept to
+--            a single extra draw pass). The header no longer gets its own
+--            filled rectangle -- a flat inset rect's square corners would
+--            poke out past the rounded body -- replaced with a thin inset
+--            separator line. Purely visual, no logic touched.
 --    v4.9 – Added an animlayer[6].weight settled-state cross-check to the
 --            UNK vuln branch, found reviewing a real neverlose resolver's
 --            find_desync_side: it treats weight==0 or weight==1 as "the
@@ -371,7 +385,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "4.9"
+local RV_VERSION = "5.0"
 
 local ffi = require "ffi"
 
@@ -2712,6 +2726,31 @@ local PANEL_PAD     = 7
 local PANEL_ROW_H   = 13
 local PANEL_TITLE_H = 16
 local PANEL_MIN_W   = 150
+local PANEL_R       = 6  -- corner radius
+
+-- Rounded rectangle: 3 straight-fill rects + 4 corner quarter-circles.
+-- Ported from a real "SOLUS UI"-style script's renderer_rounded_rect,
+-- trimmed to just the fill (no outline/multi-step shadow -- this repaints
+-- every frame, so a single extra call for a flat drop-shadow is used
+-- instead of a several-step gaussian falloff). renderer.circle's
+-- start_degrees/percentage usage here is verified against
+-- docs.gamesense.gs/docs/api/renderer/circle: 180@0.25 sweeps the
+-- top-left quarter, 270@0.25 top-right, 0@0.25 bottom-right, 90@0.25
+-- bottom-left.
+local function RoundedRect(x, y, w, h, r, cr, cg, cb, ca)
+    r = math.min(r, h / 2, w / 2)
+    if r <= 0 then
+        renderer.rectangle(x, y, w, h, cr, cg, cb, ca)
+        return
+    end
+    renderer.rectangle(x + r, y, w - 2 * r, h, cr, cg, cb, ca)
+    renderer.rectangle(x, y + r, r, h - 2 * r, cr, cg, cb, ca)
+    renderer.rectangle(x + w - r, y + r, r, h - 2 * r, cr, cg, cb, ca)
+    renderer.circle(x + r,     y + r,     cr, cg, cb, ca, r, 180, .25)
+    renderer.circle(x + w - r, y + r,     cr, cg, cb, ca, r, 270, .25)
+    renderer.circle(x + w - r, y + h - r, cr, cg, cb, ca, r, 0,   .25)
+    renderer.circle(x + r,     y + h - r, cr, cg, cb, ca, r, 90,  .25)
+end
 
 local ui_panel_x = ui.new_slider("LUA","B","  Panel X", 0, PANEL_RES, 6800)
 local ui_panel_y = ui.new_slider("LUA","B","  Panel Y", 0, PANEL_RES, 1400)
@@ -2904,13 +2943,19 @@ local function DrawOverlay()
     UpdateDrag(px, py, pw, PANEL_TITLE_H)
 
     -- ── Draw ────────────────────────────────────────────────────────
-    renderer.rectangle(px, py, pw, ph, 14, 14, 18, 232)             -- body
-    renderer.rectangle(px, py, pw, PANEL_TITLE_H, 21, 21, 26, 245)  -- title bar
-    renderer.gradient(px, py, pw, 2, accent_r, accent_g, accent_b, 235,
+    -- Rounded body + a single offset shadow pass instead of the old flat
+    -- hard-cornered rectangles and straight 1px border lines (which would
+    -- visibly clash with rounded corners). The header no longer gets its
+    -- own filled rectangle -- square corners on an inset rect would poke
+    -- out past the rounded body above/below it -- a thin inset separator
+    -- line marks the header/body boundary instead.
+    RoundedRect(px + 3, py + 4, pw, ph, PANEL_R, 0, 0, 0, 90)      -- shadow
+    RoundedRect(px, py, pw, ph, PANEL_R, 14, 14, 18, 232)          -- body
+    renderer.gradient(px + PANEL_R, py, pw - PANEL_R * 2, 2,
+                                      accent_r, accent_g, accent_b, 235,
                                       accent_r, accent_g, accent_b, 40, false) -- accent strip
-    renderer.line(px,      py, px,      py + ph, 48, 48, 54, 190)
-    renderer.line(px+pw-1, py, px+pw-1, py + ph, 48, 48, 54, 190)
-    renderer.line(px, py+ph-1, px+pw, py+ph-1,   48, 48, 54, 190)
+    renderer.rectangle(px + PANEL_R, py + PANEL_TITLE_H, pw - PANEL_R * 2, 1,
+                        45, 45, 52, 200) -- header separator
 
     -- "RV" tinted 55% toward the accent color, blended with light gray so
     -- it stays legible even if the user picks a dark accent.
