@@ -1,9 +1,24 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v6.5  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v6.6  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v6.6 – Checked the real gamesense API (docs.gamesense.gs/docs/api/
+--            entity) for a capability RIFTVEIL wasn't using yet, rather
+--            than inventing anything unverified. Found entity.hitbox_
+--            position(player, hitbox_id) -- confirmed real via the docs'
+--            own "Head Dot ESP" example, which uses hitbox id 0 for the
+--            head exactly the way this fix does. CanSeeHead (gates the
+--            LBY/UNK vuln TTL boost) was tracing to target origin +
+--            m_vecViewOffset.z as an approximation of head position --
+--            close while standing, but view offset and the actual head
+--            hitbox don't track each other precisely through every
+--            crouch/lean pose. Swapped the trace's target endpoint to the
+--            real queried head hitbox position, falling back to the old
+--            origin+view-offset approximation only if the hitbox query
+--            itself fails (dormant/unresolved entity this tick) -- same
+--            fail-open philosophy the rest of this function already uses.
 --    v6.5 – Traced whether the detection methods actually COLLABORATE
 --            (cross-validate each other) when making a decision, not just
 --            whether they're wired correctly (v6.4). Answer: mostly no --
@@ -793,7 +808,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "6.5"
+local RV_VERSION = "6.6"
 
 local ffi = require "ffi"
 
@@ -1924,16 +1939,38 @@ end
 --  Fails OPEN (returns true) on any missing data or trace error, so a
 --  bad read never costs a TTL boost the old heuristic would've granted.
 -- ══════════════════════════════════════════════════════════════════
+-- Target endpoint uses entity.hitbox_position(target, 0) -- the REAL head
+-- hitbox world position, confirmed against docs.gamesense.gs/docs/api/
+-- entity (hitbox id 0 = head; matches the documented "Head Dot ESP"
+-- example, which uses this exact call for the same purpose: tracing to
+-- where the head hitbox actually is). The old approximation
+-- (origin + m_vecViewOffset.z) is close while standing but drifts while
+-- crouching/leaning -- view offset and the actual head hitbox don't move
+-- in lockstep with every pose, so a trace aimed at "origin + view offset"
+-- can clip differently than one aimed at the real hitbox. Falls back to
+-- the old approximation only if the hitbox query itself fails (dormant/
+-- not-yet-resolved entity this tick) -- same fail-open philosophy as the
+-- rest of this function.
 local function CanSeeHead(me, target)
     if not me or not target then return true end
     local mx, my, mz = entity.get_origin(me)
-    local tx, ty, tz = entity.get_origin(target)
-    if not (isnum(mx) and isnum(tx)) then return true end
+    if not isnum(mx) then return true end
     local _, _, mvz = entity.get_prop(me, "m_vecViewOffset")
-    local _, _, tvz = entity.get_prop(target, "m_vecViewOffset")
+
+    local tx, ty, tz
+    local ok_hb, hx, hy, hz = pcall(entity.hitbox_position, target, 0)
+    if ok_hb and isnum(hx) and isnum(hy) and isnum(hz) then
+        tx, ty, tz = hx, hy, hz
+    else
+        local ox, oy, oz = entity.get_origin(target)
+        if not isnum(ox) then return true end
+        local _, _, tvz = entity.get_prop(target, "m_vecViewOffset")
+        tx, ty, tz = ox, oy, oz + (isnum(tvz) and tvz or 64)
+    end
+
     local ok, frac, hit = pcall(client.trace_line, me,
         mx, my, mz + (isnum(mvz) and mvz or 64),
-        tx, ty, tz + (isnum(tvz) and tvz or 64))
+        tx, ty, tz)
     if not ok or not isnum(frac) then return true end
     return frac >= 0.98 or hit == target
 end
