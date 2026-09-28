@@ -1,9 +1,12 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v4.7  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v4.8  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v4.8 – Removed the Force Shot indicator (v4.5/v4.6) entirely, per
+--            request. Pulled the checkbox, color picker, CFG.FORCESHOT_CONF,
+--            and the DrawOverlay render block -- nothing of it remains.
 --    v4.7 – Surfaced vuln_profile (seen/hit per vulnerability TYPE, e.g.
 --            lby/unk/stp/dck) in rv_stats as a new vuln:type:hit/seen
 --            field. This data has been silently tracked since the vuln
@@ -353,7 +356,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "4.7"
+local RV_VERSION = "4.8"
 
 local ffi = require "ffi"
 
@@ -457,19 +460,6 @@ local ui_sup   = ui.new_checkbox("LUA","B","  [EXP] Suppress shots")
 local _h3      = ui.new_label("LUA","B","\xe2\x96\xb8 INTERFACE")
 local ui_tight = ui.new_checkbox("LUA","B","  Tight interp")
 local ui_esp   = ui.new_checkbox("LUA","B","  Indicators")
--- Force Shot: NOT spread/RNG prediction (gamesense's Lua API doesn't expose
--- the engine's internal spread seed -- verified against docs.gamesense.gs,
--- client.random_float/random_int are generic RNG, unrelated to the engine's
--- own spray-pattern generator). Instead reuses RIFTVEIL's OWN already-
--- computed resolver confidence on client.current_threat() -- when the
--- override is confidently resolved (or a deterministic vuln window is
--- open) on whoever you're currently aiming at, that's a genuine signal
--- this specific shot is worth committing to. Purely a screen indicator;
--- never touches gamesense's own rage/hit-chance settings (no ui.override
--- equivalent exists to safely restore them if the script ever crashed
--- mid-override).
-local ui_forceshot       = ui.new_checkbox("LUA","B","  Force Shot indicator")
-local ui_forceshot_color = ui.new_color_picker("LUA","B","  Force Shot color", 255, 60, 60, 255)
 local ui_verb  = ui.new_checkbox("LUA","B","  Verbose log")
 -- Accent picker: only tints the panel's idle/neutral chrome (header text,
 -- idle top-strip). Never touches the vuln/resolved/building colors in
@@ -521,7 +511,7 @@ end)
 local SUB_ITEMS = {
     _h1, ui_6lex, ui_vuln, ui_hitmem,
     _h2, ui_per, ui_asym, ui_sup,
-    _h3, ui_tight, ui_esp, ui_forceshot, ui_forceshot_color, ui_verb, ui_accent,
+    _h3, ui_tight, ui_esp, ui_verb, ui_accent,
     _h4, _btn_flush, _btn_reset, _btn_wipe, _btn_clr,
 }
 local function RefreshVis()
@@ -674,9 +664,6 @@ local CFG = {
     CONF_GROW    = 0.20,    -- per-tick confidence gain when jitter detected
     CONF_DECAY   = 0.88,    -- per-tick decay multiplier when quiet
     CONF_ESP     = 0.38,    -- minimum conf to show "resolved" flag/indicator
-    FORCESHOT_CONF = 0.55,  -- minimum conf for the Force Shot indicator --
-                            -- stricter than CONF_ESP: this tells the player
-                            -- to commit to a shot, not just shows a color
     CONF_LOCK    = 0.65,    -- minimum to write to permanent DB
 
     -- Detection
@@ -2789,30 +2776,6 @@ local function DrawOverlay()
     if threat and entity.is_alive(threat) then
         local s64 = EIDX_S64[threat]
         rec = s64 and REC[s64]
-    end
-
-    -- FORCE SHOT indicator: prompt when RIFTVEIL's own resolver read on
-    -- the current threat is confident enough to commit to a shot. A
-    -- deterministic vuln window always qualifies; otherwise needs
-    -- FORCESHOT_CONF (stricter than the ESP "resolved" threshold).
-    -- Purely informational -- never touches any rage/hit-chance setting.
-    -- Sits well above screen center (crosshair sits at sh/2) with a
-    -- backing box and bold enlarged text -- small unboxed default-size
-    -- text at dead-center was unreadable and sat right on top of the
-    -- crosshair/enemy model.
-    if ui.get(ui_forceshot) and rec then
-        local force_ready = rec.vuln_ttl > 0
-            or (rec.resolved and rec.conf >= CFG.FORCESHOT_CONF)
-        if force_ready then
-            local fr, fg, fb, fa = ui.get(ui_forceshot_color)
-            fa = fa or 255
-            local sw, sh = client.screen_size()
-            local cx, cy = sw / 2, sh / 2 - 140
-            local box_w, box_h = 176, 34
-            renderer.rectangle(cx - box_w / 2, cy - box_h / 2, box_w, box_h, 14, 14, 18, 200)
-            renderer.gradient(cx - box_w / 2, cy - box_h / 2, box_w, 2, fr, fg, fb, 235, fr, fg, fb, 235, false)
-            renderer.text(cx, cy - 6, fr, fg, fb, fa, "+bc", 0, "FORCE SHOT")
-        end
     end
 
     -- lines: {text, r, g, b}. accent_* drives the title bar's top strip,
