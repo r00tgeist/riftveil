@@ -1,9 +1,24 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v4.8  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v4.9  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v4.9 – Added an animlayer[6].weight settled-state cross-check to the
+--            UNK vuln branch, found reviewing a real neverlose resolver's
+--            find_desync_side: it treats weight==0 or weight==1 as "the
+--            movement layer is fully settled, no active blend" -- a signal
+--            independent of the playback_rate digits 6lex reads off that
+--            same layer. When settled at the exact tick a torso_yaw read
+--            is taken, it's extra confirmation the read isn't caught
+--            mid-transition. Same modest-boost pattern already used for
+--            the live_min/live_max cross-check (+0.02 conf, capped at
+--            0.97) -- not a hard requirement, al6_weight is nil whenever
+--            the FFI read fails and the branch behaves exactly as before.
+--            Also reconfirmed (not changed): that resolver's own
+--            breaking_lc check uses the identical 4096 sq-unit origin-jump
+--            threshold RIFTVEIL's SHIFT detector already uses -- 4th
+--            independent source now confirming that number.
 --    v4.8 – Removed the Force Shot indicator (v4.5/v4.6) entirely, per
 --            request. Pulled the checkbox, color picker, CFG.FORCESHOT_CONF,
 --            and the DrawOverlay render block -- nothing of it remains.
@@ -356,7 +371,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "4.8"
+local RV_VERSION = "4.9"
 
 local ffi = require "ffi"
 
@@ -1460,7 +1475,7 @@ end
 --  Returns: vtype, correction_angle, confidence  OR  nil, 0, 0
 --  rec.prev_* fields must be set from the previous tick.
 -- ══════════════════════════════════════════════════════════════════
-local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap)
+local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
     -- Guard: if eye_y is zero or suspiciously small, try last ring buffer entry
     local safe_eye = (math.abs(eye_y) > 1.0) and eye_y
                      or (RLen(rec.hist) > 0 and RGet(rec.hist, 1) and RGet(rec.hist, 1).e)
@@ -1529,6 +1544,17 @@ local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap)
             if abs_c <= cap + 5 then   -- within live cap range (±5° tolerance)
                 conf = cluster_val and 0.96 or 0.92
             end
+        end
+
+        -- SETTLED-STATE CROSS-CHECK (animlayer[6].weight): a real neverlose
+        -- resolver's find_desync_side treats weight==0/1 as "movement layer
+        -- fully settled, no active blend" -- an independent confirmation
+        -- that torso_yaw isn't caught mid-transition between fake and real,
+        -- distinct from the playback_rate digits 6lex reads off the same
+        -- layer. Same modest-boost pattern as the live-cap check above, not
+        -- a hard requirement -- al6_weight is nil whenever the FFI read fails.
+        if al6_weight and (al6_weight <= 0.001 or al6_weight >= 0.999) then
+            conf = math.min(conf + 0.02, 0.97)
         end
 
         return VTYPE.UNK, correction, conf
@@ -1890,12 +1916,23 @@ local function ProcessPlayer(player, ctx)
 
         -- 6lex — pass live cap so playback_rate magnitude clamps to real bounds
         local six_side, six_desync = 0, 0
-        if ui.get(ui_6lex) then
+        local al6_weight = nil
+        do
             local ptr = GetPtr(player)
             if ptr then
-                six_side, six_desync = Extract6Lex(ptr, live_cap)
-                rec.six_side   = six_side
-                rec.six_desync = six_desync
+                if ui.get(ui_6lex) then
+                    six_side, six_desync = Extract6Lex(ptr, live_cap)
+                    rec.six_side   = six_side
+                    rec.six_desync = six_desync
+                end
+                -- animlayer[6].weight settled-state cross-check (see DetectVuln's
+                -- UNK branch): a real resolver's find_desync_side uses this same
+                -- field as a tri-state signal -- 0 or 1 means the movement layer
+                -- is fully settled (no active blend), which independently confirms
+                -- torso_yaw isn't mid-transition. Read once here regardless of
+                -- the 6lex toggle since it's an unrelated signal, not a 6lex output.
+                local al6 = GetAL(ptr, 6)
+                al6_weight = al6 and al6.weight
             end
         end
 
@@ -2002,7 +2039,7 @@ local function ProcessPlayer(player, ctx)
         -- Vulnerability window
         if rec.vuln_ttl > 0 then rec.vuln_ttl = rec.vuln_ttl - 1 end
 
-        local vtype, vcorr = DetectVuln(rec, as, pose, eye_y, spd, corr_cap)
+        local vtype, vcorr = DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
         if vtype then
             local lc_ttl = math.floor(CFG.LC_WINDOW_S / ctx.ti) - 1
             local base_ttl = CFG.VULN_TTL[vtype] or 1
