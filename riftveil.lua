@@ -1,9 +1,24 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v5.5  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v5.6  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v5.6 – Fixed the suppress streak-cap's pause window, which never
+--            actually functioned. The single-counter design reset
+--            _sup_streak to 0 in the non-suppress fallback branches the
+--            instant the 8-tick cap blocked suppress for even one tick --
+--            so the documented "pause 4 ticks, then resume" behavior
+--            never happened: suppress silently resumed on the very next
+--            tick instead, every time, since 0 < 8 immediately re-passed
+--            the gate. The streak_ok >= 12 branch was provably dead code.
+--            Rebuilt with a dedicated pause counter (_sup_pause) and a
+--            sup_pausing flag so the fallback branches (meta_hold/builtin
+--            release) know not to blow the counters away while a
+--            deliberate pause is genuinely in progress. Traced the full
+--            cycle by hand: 8 ticks suppress -> 4 ticks paused (shots go
+--            through normally) -> counters reset -> fresh cycle, matching
+--            the original design intent for the first time.
 --    v5.5 – Menu + bug review pass.
 --            (1) Renamed menu labels away from internal codenames a
 --            first-time user has no way to decode: "6lex extraction" ->
@@ -488,7 +503,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "5.5"
+local RV_VERSION = "5.6"
 
 local ffi = require "ffi"
 
@@ -1918,6 +1933,7 @@ local function NewRec(player, s64)
         -- Suppress streak: cap consecutive suppress ticks to prevent stuck-suppress pattern
         -- (from log: hxlw1ss had 375/914 corrections as suppress — mid-conf lock-in)
         _sup_streak = 0,           -- consecutive ticks suppress has been active
+        _sup_pause  = 0,           -- ticks into the post-cap pause window (0..4)
         -- Shifting guard: counts consecutive choke==0 ticks where the LC lookback
         -- (rec.tm) is missing a slot it should have. Real packet loss shows up as
         -- choke>0; a gap despite choke==0 means the backtrack record was broken
@@ -2403,6 +2419,7 @@ local function ProcessPlayer(player, ctx)
         local should_override = false
         local override_val    = 0
         local override_meth   = tracked_method
+        local sup_pausing     = false  -- true only during the suppress streak-cap's pause window
 
         -- [1] Vulnerability window: correction is deterministic.
         -- Lower confidence threshold when meta_aggressive — even a weaker
@@ -2452,20 +2469,36 @@ local function ProcessPlayer(player, ctx)
         -- where conf hovers above threshold permanently with no vuln ever firing.
         -- After 8 ticks suppress, pause 4 ticks and let a shot through. If we hit,
         -- great; if we miss, the correction data resets the stuck loop.
+        --
+        -- BUG FIXED: the old single-counter version reset _sup_streak to 0 in
+        -- the non-suppress branches below the instant the streak cap blocked
+        -- suppress for even one tick -- so streak_ok's "streak >= 12" arm was
+        -- unreachable dead code; suppress actually resumed on the very next
+        -- tick instead of pausing for 4. Fixed with a dedicated pause counter
+        -- (_sup_pause) and sup_pausing, which tells the bookkeeping below not
+        -- to blow the counters away while a deliberate pause is in progress.
         elseif ui.get(ui_sup) and rec.vuln_ttl == 0 then
             local is_jitter = aa_type == AA.TWO_WAY  or aa_type == AA.THREE_WAY
                             or aa_type == AA.FIVE_WAY or aa_type == AA.SKITTER
                             or aa_type == AA.HOLD
             local sup_thresh = rec.meta_aggressive and 0.28 or 0.45
-            local streak = rec._sup_streak or 0
-            -- Allow suppress only when streak < 8; skip for 4 ticks after the cap
-            local streak_ok = streak < 8 or (streak >= 12)
-            if is_jitter and rec.conf > sup_thresh and streak_ok then
-                should_override = true
-                local bs = tracked_side ~= 0 and tracked_side or dom_side
-                if bs == 0 then bs = 1 end
-                override_val  = -CfgAngle(bs, rec.state, TrustedCfg(rec), corr_cap)
-                override_meth = METH.SUPPRESS
+            if is_jitter and rec.conf > sup_thresh then
+                local streak = rec._sup_streak or 0
+                if streak < 8 then
+                    should_override = true
+                    local bs = tracked_side ~= 0 and tracked_side or dom_side
+                    if bs == 0 then bs = 1 end
+                    override_val  = -CfgAngle(bs, rec.state, TrustedCfg(rec), corr_cap)
+                    override_meth = METH.SUPPRESS
+                else
+                    local pause = (rec._sup_pause or 0) + 1
+                    rec._sup_pause = pause
+                    sup_pausing = true
+                    if pause >= 4 then
+                        rec._sup_streak = 0
+                        rec._sup_pause  = 0
+                    end
+                end
             end
         end
 
@@ -2488,6 +2521,7 @@ local function ProcessPlayer(player, ctx)
             else
                 rec._sup_streak = 0   -- any non-suppress override resets the streak
             end
+            rec._sup_pause = 0
 
         elseif rec.meta_aggressive and tracked_side ~= 0 then
             -- META_HOLD: built-in has failed this player's meta (serenity ways(),
@@ -2502,7 +2536,11 @@ local function ProcessPlayer(player, ctx)
             plist.set(player, "High priority", true)
             rec.active = true; rec.resolved = true
             rec.last_val = meta_val; rec.last_meth = METH.META_HOLD
-            rec._sup_streak = 0
+            -- Don't blow away a suppress streak/pause in progress -- this
+            -- branch fires DURING the deliberate 4-tick pause window (should_
+            -- override is false while paused), not just when suppress is
+            -- genuinely irrelevant. See sup_pausing above.
+            if not sup_pausing then rec._sup_streak = 0; rec._sup_pause = 0 end
 
         else
             plist.set(player, "Force body yaw", false)
@@ -2511,7 +2549,8 @@ local function ProcessPlayer(player, ctx)
             plist.set(player, "High priority", false)
             rec.active = false; rec.resolved = false
             rec.last_val = 0; rec.last_meth = "builtin"
-            rec._sup_streak = 0
+            -- Same sup_pausing guard as the meta_aggressive branch above.
+            if not sup_pausing then rec._sup_streak = 0; rec._sup_pause = 0 end
         end
 
         -- Only log when the correction method or value actually CHANGES.
@@ -2846,6 +2885,7 @@ local function on_aim_miss(e)
                     -- switched configs. Stale cluster = wrong correction for new config.
                     rec.torso_hist = {}
                     rec._sup_streak = 0
+                    rec._sup_pause = 0
                     rec._shift_streak = 0
                     rec._brute_idx = 0
                 end
