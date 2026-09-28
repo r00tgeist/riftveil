@@ -1,9 +1,40 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v6.0  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v6.1  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v6.1 – Senior gamesense-review pass #2, focused on platform-API
+--            correctness (ui/event/entity/plist call semantics) rather
+--            than internal resolver logic. Found a real UI/cvar state
+--            desync bug: ui.set_callback only fires on a CHANGE event --
+--            it does NOT run just because a checkbox loads already-
+--            checked from a saved gamesense config. RefreshVis already
+--            accounts for this (it's manually self-invoked once right
+--            after ui.set_callback(ui_on, RefreshVis) so panel-item
+--            visibility syncs with a persisted ui_on checkbox on load),
+--            but ui_tight's own callback never got the same treatment.
+--            Concretely: if "Tight Interpolation" was left checked at
+--            the end of a prior session, reloading the script restores
+--            the checkbox to checked (gamesense persists ui state), but
+--            the actual cl_interp/cl_interp_ratio/cl_interpolate cvars
+--            stay at whatever ORIG_* captured at THIS load -- silently
+--            desynced from what the UI displays as active, and nothing
+--            forces a re-toggle to notice since the checkbox already
+--            reads "on". Named the callback (ApplyTightInterp) and
+--            self-invoke it once after registration, mirroring
+--            RefreshVis's own pattern exactly.
+--            Also checked (no issues found) every ui.*/entity.*/plist.*/
+--            client.* call signature against the platform's actual
+--            semantics: register_esp_flag's (name, r,g,b, callback)
+--            shape, ui.new_color_picker's 4-value ui.get() return,
+--            client.key_state's VK_LBUTTON=0x01 check, plist.set's four
+--            field names used throughout (Force body yaw[/ value],
+--            Correction active, High priority), the aim_fire/aim_hit/
+--            aim_miss event field names (id/target/backtrack/hitgroup/
+--            reason/damage), and console_input's suppress-return
+--            contract -- all consistent with prior doc-verified usage
+--            elsewhere in this same file.
 --    v6.0 – Full senior-review pass, line by line, top to bottom (not
 --            triggered by a specific log this time). Found a real,
 --            previously-undetected bug in IsHold: it reset `stable` to 0
@@ -614,7 +645,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "6.0"
+local RV_VERSION = "6.1"
 
 local ffi = require "ffi"
 
@@ -784,7 +815,18 @@ end
 ui.set_callback(ui_on, RefreshVis)
 RefreshVis()
 
-ui.set_callback(ui_tight, function()
+-- BUG (senior gamesense-review pass, previously undetected): ui.set_callback
+-- only fires on a CHANGE event -- it does not run just because a checkbox
+-- loads already-checked from a saved config, the same reason RefreshVis()
+-- above has to be called manually once right after its own registration.
+-- ui_tight never got that same treatment: if "Tight Interpolation" was left
+-- checked from a prior session, gamesense restores the checkbox to checked
+-- on reload, but the actual cl_interp*/cl_interpolate cvars stay at
+-- whatever ORIG_* captured at THIS load -- silently desynced from what the
+-- UI displays as enabled, with no toggle needed to notice (the checkbox
+-- already reads "on"). Named the function and self-invoke it once after
+-- registration, same pattern as RefreshVis/RefreshVis().
+local function ApplyTightInterp()
     if not ui.get(ui_on) then return end
     if ui.get(ui_tight) then
         pcall(function()
@@ -801,7 +843,9 @@ ui.set_callback(ui_tight, function()
         end)
         info("interp", "tight OFF")
     end
-end)
+end
+ui.set_callback(ui_tight, ApplyTightInterp)
+ApplyTightInterp()
 
 -- ══════════════════════════════════════════════════════════════════
 --  CONSOLE COMMANDS  (console_input — confirmed cheat event)
