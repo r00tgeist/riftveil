@@ -1,9 +1,20 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v3.3  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v3.4  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v3.4 – Shifting guard upgraded with a direct signal: a >64-unit
+--            (4096 sq-unit) origin teleport on a clean (choke==0) tick now
+--            sets _shift_streak straight to the distrust floor instead of
+--            only inferring shifts indirectly from missing tm[] lookback
+--            slots. This exact threshold is independently confirmed in two
+--            real production resolvers (a public CS:GO lagrecord library,
+--            and a full HvH cheat script's own broke_lc check) -- not a
+--            guess. Origin comparison resets across any tick gap (GetAS
+--            miss, choke>2) the same way prev_pose already does, so it
+--            can't misfire by comparing across a skipped span of normal
+--            movement.
 --    v3.3 – on_aim_miss couldn't tell a real resolver miss from two other
 --            failure modes it was silently lumping in as "reason=?":
 --            (1) event timeout -- aim_miss firing >=0.5s after aim_fire
@@ -1386,7 +1397,10 @@ local function NewRec(player, s64)
         -- (rec.tm) is missing a slot it should have. Real packet loss shows up as
         -- choke>0; a gap despite choke==0 means the backtrack record was broken
         -- (shift-style), not lost -- don't trust LAGCOMP/PHASE while this is high.
+        -- Also set directly (to 3) by a same-tick origin teleport >64 units on a
+        -- clean update -- see the origin-jump check in ProcessPlayer.
         _shift_streak = 0,
+        prev_origin_x = nil, prev_origin_y = nil,  -- for the origin-jump shift check
         -- Blind-guess brute cycle: index into the last-resort NIXWARE-style
         -- shot-cycle fallback (meta_aggressive with zero side data). _brute_half
         -- marks the half-magnitude phase of that cycle.
@@ -1485,12 +1499,14 @@ local function ProcessPlayer(player, ctx)
         local as = GetAS(player)
         if not as then
             rec.prev_pose = nil  -- prevent stale LBY trigger next tick
+            rec.prev_origin_x, rec.prev_origin_y = nil, nil  -- gap ahead; don't compare across it
             break
         end
 
         if choke > 2 then
             ClearEnt(player)
             rec.prev_pose = nil
+            rec.prev_origin_x, rec.prev_origin_y = nil, nil
             break
         end
 
@@ -1551,6 +1567,23 @@ local function ProcessPlayer(player, ctx)
         local eye_y  = as.eye_angles_y or eyy or 0
         duck      = as.duck_amount or 0
         on_ground = as.on_ground
+
+        -- ORIGIN-JUMP SHIFT CHECK: a >64-unit origin teleport on a clean
+        -- (choke==0) tick is a direct shifting/broken-backtrack-record
+        -- signal -- confirmed independently in two real resolver
+        -- implementations, both using this exact 4096 sq-unit (64-unit)
+        -- threshold. Stronger and more immediate than the indirect tm[]-gap
+        -- proxy below, so it sets _shift_streak straight to the distrust
+        -- floor instead of accumulating gradually.
+        local ox, oy = entity.get_origin(player)
+        if choke == 0 and isnum(ox) and isnum(oy)
+           and rec.prev_origin_x and rec.prev_origin_y then
+            local dx, dy = ox - rec.prev_origin_x, oy - rec.prev_origin_y
+            if (dx*dx + dy*dy) > 4096 then
+                rec._shift_streak = math.max(rec._shift_streak or 0, 3)
+            end
+        end
+        rec.prev_origin_x, rec.prev_origin_y = ox, oy
 
         RPush(rec.hist, {p=pose, e=eye_y, t=st})
         rec.tm[st]      = rec.tm[st] or {p=pose, e=eye_y, t=st}
