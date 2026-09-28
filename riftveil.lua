@@ -1,9 +1,22 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v3.2  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v3.3  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v3.3 – on_aim_miss couldn't tell a real resolver miss from two other
+--            failure modes it was silently lumping in as "reason=?":
+--            (1) event timeout -- aim_miss firing >=0.5s after aim_fire
+--            means the event never got a clean resolution at all, not a
+--            real outcome; (2) damage rejected -- m_totalHitsOnServer
+--            moved between fire and miss despite reason=="?", meaning a
+--            hit landed server-side and the client-side miss event is a
+--            hit-registration quirk, not evidence our angle was wrong.
+--            Both used to feed straight into resolver_misses/flip/soft-
+--            reset as if they were genuine wrong-angle misses. Adapted
+--            from a public aim-event-logging reference; now discarded
+--            before touching any resolver state, logged separately
+--            (verbose only) instead of counted.
 --    v3.2 – Fixed config-recognition thrashing found in a real 12min match
 --            log: one player flipped luasense_beta/std/symmetric 22 times
 --            because those profiles sit only 4-9deg apart and noisy per-
@@ -1946,6 +1959,7 @@ local function on_aim_fire(e)
     local t = e.target; if not t then return end
     local s64 = GetS64(t); local r = s64 and REC[s64]
     local praw = entity.get_prop(t, "m_flPoseParameter", 11)
+    local me   = entity.get_local_player()
     SHOTS[e.id] = {
         s64     = s64,
         fy      = praw and (praw * CFG.POSE_SCALE - 60) or 0,
@@ -1961,6 +1975,11 @@ local function on_aim_fire(e)
         vuln_t  = r and r.vuln_type or nil,
         cfg     = r and r.config_type or nil,
         tick    = globals.tickcount(),
+        -- fire_time/total_hits: lets on_aim_miss tell a real resolver miss
+        -- apart from a stale/timed-out event or a server-side hit that got
+        -- reported as a client-side miss (see on_aim_miss).
+        fire_time  = globals.realtime(),
+        total_hits = me and (entity.get_prop(me, "m_totalHitsOnServer") or 0) or 0,
     }
 end
 
@@ -2019,18 +2038,45 @@ local function on_aim_hit(e)
 end
 
 local function on_aim_miss(e)
-    local d      = SHOTS[e.id]
-    local reason = e.reason or "?"
-    local is_resolver = reason == "?" or reason == "" or reason == "prediction error"
+    local d = SHOTS[e.id]
+    if not d then return end
 
-    if d then
-        warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%%%s",
-            entity.get_player_name(e.target) or "?",
-            reason, d.meth, d.val, d.bt, d.hc,
-            d.in_vuln and (" !" .. d.vuln_t) or "")
+    -- EVENT TIMEOUT: the miss event fired long after the shot (dropped or
+    -- delayed resolution) -- this was never a clean outcome to begin with,
+    -- resolver or otherwise, so it's discarded rather than counted as any
+    -- kind of miss. Threshold matches the public aim-logging pattern this
+    -- was adapted from.
+    local is_timeout = (globals.realtime() - (d.fire_time or 0)) >= 0.5
+
+    -- DAMAGE REJECTED: reason=="?" but the server's own hit counter moved
+    -- between fire and this event -- a hit landed server-side despite the
+    -- client reporting a miss. That's a hit-registration quirk, not
+    -- evidence our correction angle was wrong, so it must not count toward
+    -- resolver_misses/flip/soft-reset (those are supposed to mean "our
+    -- angle guess was wrong," and this specifically isn't that).
+    local reason  = e.reason or "?"
+    local me      = entity.get_local_player()
+    local is_dmg_rejected = reason == "?" and me
+        and (d.total_hits or 0) ~= (entity.get_prop(me, "m_totalHitsOnServer") or 0)
+
+    if is_timeout or is_dmg_rejected then
+        if ui.get(ui_verb) then
+            dbg("miss", "player=%s discarded (%s) meth=%s val=%.0f -- not counted",
+                entity.get_player_name(e.target) or "?",
+                is_timeout and "timeout" or "dmg_rejected", d.meth, d.val)
+        end
+        SHOTS[e.id] = nil
+        return
     end
 
-    if d and is_resolver then
+    local is_resolver = reason == "?" or reason == "" or reason == "prediction error"
+
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%%%s",
+        entity.get_player_name(e.target) or "?",
+        reason, d.meth, d.val, d.bt, d.hc,
+        d.in_vuln and (" !" .. d.vuln_t) or "")
+
+    if is_resolver then
         local rec = d.s64 and REC[d.s64]
         if rec then
             -- BUILT-IN FAIL TRACKING (meta_aggressive counter):
