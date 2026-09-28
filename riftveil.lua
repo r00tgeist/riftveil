@@ -1,9 +1,17 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v3.5  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v3.6  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v3.6 – Renamed "Flush DB" to "Save match to DB" and "Reset match" to
+--            "Reset match + DB" -- the old names caused real confusion:
+--            "Flush DB" reads like a clear/reset action but has always
+--            done the opposite (persists the current match into the
+--            permanent DB, merging with existing entries -- exactly what
+--            EndMatch already does automatically). No behavior changed,
+--            only the labels; "Reset match" was always the actual clear
+--            control.
 --    v3.5 – The panel's H/M header wasn't a hit/miss scoreboard, despite
 --            looking like one: it summed hit_count (head/neck-confirmed
 --            hits ONLY -- 27 of 77 real hits in the reference log) and
@@ -188,7 +196,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "3.5"
+local RV_VERSION = "3.6"
 
 local ffi = require "ffi"
 
@@ -294,11 +302,17 @@ local _h4      = ui.new_label("LUA","B","-- controls")
 -- Forward-declare FlushDB so button callbacks can reference it
 local FlushDB
 
-local _btn_flush = ui.new_button("LUA","B","  Flush DB", function()
+-- Renamed from "Flush DB" -- that name reads as a clear/reset action but
+-- does the opposite: it PERSISTS the current match's stats into the
+-- permanent DB (merging with existing entries), which is exactly what
+-- EndMatch already does automatically. This button is only useful for
+-- saving early mid-match; it has never cleared anything. "Reset match"
+-- below is the actual clear control.
+local _btn_flush = ui.new_button("LUA","B","  Save match to DB", function()
     if FlushDB then FlushDB() end
-    client.log("[RIFTVEIL] DB flushed")
+    client.log("[RIFTVEIL] match stats saved to DB")
 end)
-local _btn_reset = ui.new_button("LUA","B","  Reset match", function()
+local _btn_reset = ui.new_button("LUA","B","  Reset match + DB", function()
     local n = 0
     for s64 in pairs(REC) do DB[s64] = nil; n = n + 1 end
     REC = {}; DT_HIST = {}; SHOTS = {}; EIDX_S64 = {}
