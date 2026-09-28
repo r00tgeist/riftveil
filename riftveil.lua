@@ -1,9 +1,21 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v2.6  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v3.0  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v3.0 – HUD rebuilt as a single draggable panel (Solus-UI style)
+--            instead of stacked renderer.indicator rows. Position
+--            persists through two hidden ui.new_slider values (survives
+--            config save/load and reload -- a plain Lua local wouldn't),
+--            drag by holding left-click on the title bar, gated to the
+--            menu being open so it can never grab the panel mid-fight
+--            while you're holding down fire. Dark panel body, thin
+--            border, and a 2px top accent strip that recolors with
+--            resolver state (blue idle / red vuln / green resolved /
+--            amber building) so the state reads before you read a word.
+--            Same content as v2.6's condensed lines, now inside one
+--            self-contained box instead of floating text on the HUD.
 --    v2.6 – Overlay condensed from 6 indicator rows to 3-4: identity
 --            (name/AA/conf) and status (vuln/resolved/method/angle) merged
 --            into one line, carried by the leading glyph+color (⚡ red /
@@ -103,7 +115,7 @@
 --    L1140  Update — orchestration loop
 --    L1170  Shot feedback (on_aim_fire, on_aim_hit, on_aim_miss)
 --    L1265  ESP flags
---    L1305  DrawOverlay — skeet-style stacked indicators
+--    L1305  DrawOverlay — draggable Solus-style info panel
 --    L1365  Cleanup (ResetPlist, EndMatch, FullShutdown)
 --    L1395  Event registration
 -- ════════════════════════════════════════════════════════════════════
@@ -2124,25 +2136,56 @@ client.register_esp_flag("MYW", 160, 75, 255, function(ent)
 end)
 
 -- ══════════════════════════════════════════════════════════════════
---  DRAWOVERLAY  (v2.6 — condensed to 3-4 lines, was 6)
+--  DRAGGABLE PANEL  (v3.0 — Solus-UI style single panel, replaces the
+--  stacked renderer.indicator rows entirely)
 --
---  Line 1  header     RV │ H/M │ HR%                                 always
---  Line 2  identity   ⚡ name·VTYPE ttl+ang / ● name·AA%·meth+ang /
---                     ○ name·AA%                                     when threat
---  Line 3  side+tags  ◀ ■■■■■■···· 62%  bt:4 · luasense · def         when threat
---  Line 4  off-angle  ↳ name · AA conf%  (second live enemy)          optional
---
---  v2.5 had this at 6 separate indicator rows (header, target, status,
---  side, supplemental, off-angle) -- too much vertical noise for what's
---  meant to be a glance-able HUD. Collapsed target+status into one line
---  (the dot glyph+color already carries the state) and side+supplemental
---  into another (tags are secondary context, not the headline signal).
---
---  Log analysis (v2.0 session, 55k lines):
---    453 hits / 35k corr entries → 98% were stale TTL echoes (now fixed).
---    vuln_unk: 144/200 head hits (72%). TTL=11 on all events (lc_ttl wins).
---    LBY old code used safe_eye (absolute yaw) → fixed in v2.1 with CfgAngle.
+--  Position is persisted through two HIDDEN sliders instead of a plain
+--  Lua local -- ui.new_slider values survive config save/load and script
+--  reload (a raw local table wouldn't), which is the same trick real
+--  Solus-style HUDs use to make a "movable box" remember where you put it.
+--  Drag by clicking and holding inside the title bar -- gated to the menu
+--  being open so holding left-click to shoot during a round can never
+--  accidentally drag the panel around mid-fight.
 -- ══════════════════════════════════════════════════════════════════
+local PANEL_RES     = 10000
+local PANEL_PAD     = 7
+local PANEL_ROW_H   = 13
+local PANEL_TITLE_H = 16
+local PANEL_MIN_W   = 150
+
+local ui_panel_x = ui.new_slider("LUA","B","  Panel X", 0, PANEL_RES, 6800)
+local ui_panel_y = ui.new_slider("LUA","B","  Panel Y", 0, PANEL_RES, 1400)
+ui.set_visible(ui_panel_x, false)
+ui.set_visible(ui_panel_y, false)
+
+local function PanelPos()
+    local w, h = client.screen_size()
+    return ui.get(ui_panel_x) / PANEL_RES * w, ui.get(ui_panel_y) / PANEL_RES * h
+end
+local function SetPanelPos(x, y)
+    local w, h = client.screen_size()
+    ui.set(ui_panel_x, Clamp(x, 0, w) / w * PANEL_RES)
+    ui.set(ui_panel_y, Clamp(y, 0, h) / h * PANEL_RES)
+end
+
+local drag = {held = false, grabbed = false, mx = 0, my = 0}
+
+-- Called once per paint with the title bar's current screen rect.
+local function UpdateDrag(px, py, pw, ph)
+    local menu_open = ui.is_menu_open()
+    local mx, my    = ui.mouse_position()
+    local held      = menu_open and client.key_state(0x01) == true
+    if held and not drag.held then
+        drag.grabbed = mx >= px and mx <= px + pw and my >= py and my <= py + ph
+    elseif not held then
+        drag.grabbed = false
+    end
+    if drag.grabbed then
+        local x, y = PanelPos()
+        SetPanelPos(x + (mx - drag.mx), y + (my - drag.my))
+    end
+    drag.held, drag.mx, drag.my = held, mx, my
+end
 
 -- METH_LABEL: short display strings for each resolver method
 local METH_LABEL = {
@@ -2160,11 +2203,11 @@ local METH_LABEL = {
     [METH.META_HOLD]= "meta",
 }
 
--- SideBar: directional confidence fill.
---   side=-1  →  ◀ L  ▓▓▓▓▓░░░  78%        (fill anchored left, grows with conf)
---   side=+1  →    22%  ░░░▓▓▓▓▓  R ▶       (fill anchored right)
---   side= 0  →      ─── ? ───  --           (unknown)
--- Color caller provides: blue for L, orange for R, gray for unknown.
+-- SideBar: directional confidence fill, rendered as a plain text line
+-- inside the panel body.
+--   side=-1  →  ◀ ■■■■■■····  62%        (fill anchored left, grows with conf)
+--   side=+1  →    62%  ····■■■■■■ ▶      (fill anchored right)
+--   side= 0  →      ··· unk ···           (unknown)
 local function SideBar(side, conf)
     local cf     = Clamp(conf, 0, 1)
     local BARS   = 10
@@ -2173,10 +2216,8 @@ local function SideBar(side, conf)
     local empty  = string.rep("\xc2\xb7", BARS - filled)      -- · U+00B7
     local pct    = math.floor(cf * 100)
     if side < 0 then
-        -- ◀ ■■■■■■····  62%
         return "\xe2\x97\x80 " .. full .. empty .. " " .. pct .. "%"
     elseif side > 0 then
-        --   62%  ····■■■■■■ ▶
         return pct .. "% " .. empty .. full .. " \xe2\x96\xb6"
     else
         return "\xc2\xb7\xc2\xb7\xc2\xb7 unk \xc2\xb7\xc2\xb7\xc2\xb7"
@@ -2186,7 +2227,7 @@ end
 local function DrawOverlay()
     if not ui.get(ui_on) or not ui.get(ui_esp) then return end
 
-    -- ── Line 1: header — muted, single line, always present ─────────
+    -- ── Gather content ────────────────────────────────────────────────
     local mh, mm = 0, 0
     for _, r in pairs(REC) do
         mh = mh + (r.hit_count or 0)
@@ -2195,100 +2236,121 @@ local function DrawOverlay()
     local total  = mh + mm
     local hr_str = total > 0
         and string.format("%d%%", math.floor(mh / total * 100)) or "--"
-    renderer.indicator(150, 150, 150, 130,
-        string.format("RV \xe2\x94\x82 %dH/%dM \xe2\x94\x82 %s", mh, mm, hr_str))
+    local header = string.format("%dH/%dM \xc2\xb7 %s", mh, mm, hr_str)
 
-    -- ── Spike / threat guard ───────────────────────────────────────
     -- is_spike is computed once per net_update in Update() (LAST_SPIKE) --
     -- paint fires every rendered frame, so recomputing it here via GetLat()
-    -- (3 pcall-wrapped FFI calls) plus client.latency() every single frame
-    -- was pure per-frame overhead for a value that doesn't change that often.
-    local is_spike   = LAST_SPIKE
-    local threat     = client.current_threat()
-
-    if not threat or not entity.is_alive(threat) then
-        if is_spike then renderer.indicator(255, 125, 28, 200, "\xe2\x96\xb2 spike") end
-        return
+    -- would be pure per-frame overhead for a value that rarely changes.
+    local is_spike = LAST_SPIKE
+    local threat   = client.current_threat()
+    local rec      = nil
+    if threat and entity.is_alive(threat) then
+        local s64 = EIDX_S64[threat]
+        rec = s64 and REC[s64]
     end
 
-    local s64 = EIDX_S64[threat]
-    local rec = s64 and REC[s64]
-    if not rec then return end
+    -- lines: {text, r, g, b}. accent_* drives the title bar's top strip,
+    -- so the panel's overall color reads the resolver state even before
+    -- you read a single word of text.
+    local lines = {}
+    local accent_r, accent_g, accent_b = 90, 150, 255  -- idle default: cool blue
 
-    -- ── Line 2: identity + status, one line ──────────────────────────
-    -- name / AA-type / confidence / resolver state / method / angle used
-    -- to live across 3 separate indicator rows -- collapsed to one, with
-    -- the leading glyph+color alone carrying the state at a glance:
-    -- ⚡ red = vuln window, ● green = resolved, ○ amber = building.
-    local cf   = rec.conf
-    local name = entity.get_player_name(threat) or "?"
-    if #name > 15 then name = name:sub(1, 14) .. "\xe2\x80\xa6" end -- …
-    local tc      = AA_SHORT[rec.aa_type] or "?"
-    local meth    = rec.last_meth
-    local mlbl    = (meth and meth ~= "builtin") and (METH_LABEL[meth] or meth) or nil
-    local has_val = isnum(rec.last_val) and math.abs(rec.last_val) > 0.5
-    local angle_s = has_val and string.format(" %+.0f\xc2\xb0", rec.last_val) or ""
+    if rec then
+        local cf   = rec.conf
+        local name = entity.get_player_name(threat) or "?"
+        if #name > 16 then name = name:sub(1, 15) .. "\xe2\x80\xa6" end
+        local tc = AA_SHORT[rec.aa_type] or "?"
 
-    local glyph, gr, gg, gb, ga, body
-    if rec.vuln_ttl > 0 then
-        local vt    = (rec.vuln_type or "?"):upper()
-        local blink = math.floor(globals.realtime() * 9) % 2 == 0
-        glyph, gr, gg, gb, ga = "\xe2\x9a\xa1", 248, 20, 20, (blink and 255 or 110)
-        body = string.format("%s \xc2\xb7 %s %dt%s", name, vt, rec.vuln_ttl, angle_s)
-        -- ⚡ name · LBY 3t +41°
-    elseif rec.resolved and cf >= CFG.CONF_ESP then
-        local src = mlbl and (" \xc2\xb7 " .. mlbl) or ""
-        glyph, gr, gg, gb, ga = "\xe2\x97\x8f", 45, 215, 95, 235
-        body = string.format("%s \xc2\xb7 %s %d%%%s%s", name, tc, math.floor(cf * 100), src, angle_s)
-        -- ● name · 5way 78% · hit-mem +41°
-    else
-        glyph, gr, gg, gb, ga = "\xe2\x97\x8b", 195, 195, 195, 190
-        body = string.format("%s \xc2\xb7 %s %d%%", name, tc, math.floor(cf * 100))
-        -- ○ name · 5way 42%
-    end
-    renderer.indicator(gr, gg, gb, ga, glyph .. " " .. body)
+        lines[#lines+1] = {string.format("%s  \xc2\xb7  %s  %d%%", name, tc, math.floor(cf * 100)), 225, 225, 232}
 
-    -- ── Line 3: side meter + tags, one line ──────────────────────────
-    -- Side confidence bar used to be its own row with a separate tag row
-    -- below it (bt/config/def/spike/agg) -- merged into one, tags trailing
-    -- the bar since they're secondary context, not the headline signal.
-    local side = rec.side
-    local sr, sg, sb_b
-    if    side < 0 then sr, sg, sb_b = 60,  138, 255  -- L → blue
-    elseif side > 0 then sr, sg, sb_b = 255, 140, 42  -- R → orange
-    else                 sr, sg, sb_b = 100, 100, 100 end -- ? → gray
+        local meth    = rec.last_meth
+        local mlbl    = (meth and meth ~= "builtin") and (METH_LABEL[meth] or meth) or nil
+        local has_val = isnum(rec.last_val) and math.abs(rec.last_val) > 0.5
+        local angle_s = has_val and string.format(" %+.0f\xc2\xb0", rec.last_val) or ""
 
-    local sup = {}
-    if rec.preferred_bt > 0 then sup[#sup+1] = "bt:" .. rec.preferred_bt end
-    if rec.config_type and rec.config_conf >= CFG.CFG_THRESH then
-        sup[#sup+1] = CFG_LABEL[rec.config_type] or rec.config_type
-    end
-    if rec.def_tickbase    then sup[#sup+1] = "def" end
-    if is_spike            then sup[#sup+1] = "spk" end
-    if rec.meta_aggressive then sup[#sup+1] = "agg" end
-    local tag_s = (#sup > 0) and ("  " .. table.concat(sup, " \xc2\xb7 ")) or ""
-    renderer.indicator(sr, sg, sb_b, 200, SideBar(side, cf) .. tag_s)
-
-    -- ── Line 4 (optional): off-angle awareness ───────────────────────
-    -- 2v2/duel modes only ever have one other enemy; a quiet, dim line so
-    -- the un-aimed side of a fast peek isn't a total blind spot. Reads
-    -- LIVE_ENEMIES (cached once per net_update in Update()) instead of
-    -- calling entity.get_players() + is_enemy/is_alive again here every
-    -- rendered frame.
-    for _, p in ipairs(LIVE_ENEMIES) do
-        if p ~= threat then
-            local os64 = EIDX_S64[p]
-            local orec = os64 and REC[os64]
-            if orec then
-                local oname = entity.get_player_name(p) or "?"
-                if #oname > 15 then oname = oname:sub(1, 14) .. "\xe2\x80\xa6" end
-                local otc = AA_SHORT[orec.aa_type] or "?"
-                renderer.indicator(120, 120, 120, 150,
-                    string.format("\xe2\x86\xb3 %s \xc2\xb7 %s %d%%",
-                        oname, otc, math.floor(orec.conf * 100)))
-            end
-            break
+        if rec.vuln_ttl > 0 then
+            local vt = (rec.vuln_type or "?"):upper()
+            accent_r, accent_g, accent_b = 235, 60, 60
+            lines[#lines+1] = {string.format("\xe2\x9a\xa1 %s  %dt%s", vt, rec.vuln_ttl, angle_s), 245, 115, 115}
+        elseif rec.resolved and cf >= CFG.CONF_ESP then
+            accent_r, accent_g, accent_b = 70, 210, 130
+            local src = mlbl and ("  " .. mlbl) or ""
+            lines[#lines+1] = {string.format("\xe2\x97\x8f resolved%s%s", src, angle_s), 130, 225, 165}
+        else
+            accent_r, accent_g, accent_b = 215, 150, 60
+            lines[#lines+1] = {"\xe2\x97\x8b building", 215, 178, 120}
         end
+
+        local side = rec.side
+        local sr, sg, sb_line
+        if     side < 0 then sr, sg, sb_line = 100, 170, 255
+        elseif side > 0 then sr, sg, sb_line = 255, 165, 90
+        else                 sr, sg, sb_line = 150, 150, 158 end
+        lines[#lines+1] = {SideBar(side, cf), sr, sg, sb_line}
+
+        local sup = {}
+        if rec.preferred_bt > 0 then sup[#sup+1] = "bt:" .. rec.preferred_bt end
+        if rec.config_type and rec.config_conf >= CFG.CFG_THRESH then
+            sup[#sup+1] = CFG_LABEL[rec.config_type] or rec.config_type
+        end
+        if rec.def_tickbase    then sup[#sup+1] = "def" end
+        if is_spike            then sup[#sup+1] = "spk" end
+        if rec.meta_aggressive then sup[#sup+1] = "agg" end
+        if #sup > 0 then
+            lines[#lines+1] = {table.concat(sup, "  \xc2\xb7  "), 150, 150, 162}
+        end
+
+        -- Off-angle awareness: 2v2/duel modes only ever have one other
+        -- enemy. Reads LIVE_ENEMIES (cached once per net_update in
+        -- Update()) instead of scanning entity.get_players() again here
+        -- every rendered frame.
+        for _, p in ipairs(LIVE_ENEMIES) do
+            if p ~= threat then
+                local os64 = EIDX_S64[p]
+                local orec = os64 and REC[os64]
+                if orec then
+                    local oname = entity.get_player_name(p) or "?"
+                    if #oname > 16 then oname = oname:sub(1, 15) .. "\xe2\x80\xa6" end
+                    local otc = AA_SHORT[orec.aa_type] or "?"
+                    lines[#lines+1] = {string.format("\xe2\x86\xb3 %s  %s %d%%", oname, otc, math.floor(orec.conf * 100)), 125, 125, 135}
+                end
+                break
+            end
+        end
+    elseif is_spike then
+        lines[#lines+1] = {"\xe2\x96\xb2 spike", 235, 150, 60}
+    end
+
+    -- ── Layout ──────────────────────────────────────────────────────
+    local px, py  = PanelPos()
+    local title_w = renderer.measure_text(nil, header) + PANEL_PAD * 2 + 18
+    local content_w = PANEL_MIN_W
+    for _, ln in ipairs(lines) do
+        local w = renderer.measure_text(nil, ln[1])
+        if w > content_w then content_w = w end
+    end
+    local pw = math.max(title_w, content_w + PANEL_PAD * 2)
+    local ph = PANEL_TITLE_H + #lines * PANEL_ROW_H + (#lines > 0 and PANEL_PAD or 2)
+
+    UpdateDrag(px, py, pw, PANEL_TITLE_H)
+
+    -- ── Draw ────────────────────────────────────────────────────────
+    renderer.rectangle(px, py, pw, ph, 14, 14, 18, 232)             -- body
+    renderer.rectangle(px, py, pw, PANEL_TITLE_H, 21, 21, 26, 245)  -- title bar
+    renderer.gradient(px, py, pw, 2, accent_r, accent_g, accent_b, 235,
+                                      accent_r, accent_g, accent_b, 40, false) -- accent strip
+    renderer.line(px,      py, px,      py + ph, 48, 48, 54, 190)
+    renderer.line(px+pw-1, py, px+pw-1, py + ph, 48, 48, 54, 190)
+    renderer.line(px, py+ph-1, px+pw, py+ph-1,   48, 48, 54, 190)
+
+    renderer.text(px + PANEL_PAD, py + 3, 205, 208, 218, 255, "", 0, "RV")
+    local hdr_w = renderer.measure_text(nil, header)
+    renderer.text(px + pw - hdr_w - PANEL_PAD, py + 3, 150, 150, 162, 220, "", 0, header)
+
+    local ly = py + PANEL_TITLE_H + 3
+    for _, ln in ipairs(lines) do
+        renderer.text(px + PANEL_PAD, ly, ln[2], ln[3], ln[4], 240, "", 0, ln[1])
+        ly = ly + PANEL_ROW_H
     end
 end
 
