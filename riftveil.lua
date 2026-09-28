@@ -1,9 +1,25 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v4.1  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v4.2  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v4.2 – Fixed backtrack-depth learning: e.backtrack (aim_fire event)
+--            is documented as a TIME value in seconds, not a tick count --
+--            confirmed against docs.gamesense.gs/docs/events/aim_fire,
+--            whose own example converts it with globals.toticks() before
+--            use. We were storing the raw seconds value and comparing it
+--            against the 1..16 TICK range everywhere else (bt_hist,
+--            preferred_bt, rv_stats, every hit/miss log line) -- a real
+--            backtrack of a few ticks is a tiny fraction of a second, so
+--            that comparison was false almost always. This is why every
+--            single hit/miss line in every debug log ever pulled from
+--            this script shows "bt=0", even for players clearly being
+--            backtracked with large vuln swings. Fixed by converting
+--            through the existing TT() tick-rounding helper (same one
+--            used for m_flSimulationTime elsewhere) instead of the
+--            un-verified globals.toticks(). preferred_bt-based backtrack
+--            depth learning should now actually learn.
 --    v4.1 – Per-player 6lex trust calibration, inspired by vandal.lua's
 --            own per-opponent learning in resolver_on_miss -- but adapted
 --            to validate against CONFIRMED HEAD/NECK HITS instead of
@@ -260,7 +276,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "4.1"
+local RV_VERSION = "4.2"
 
 local ffi = require "ffi"
 
@@ -2225,7 +2241,10 @@ local function on_aim_fire(e)
         flip    = r and r.flip      or false,   -- store flip state at fire time
         conf    = r and r.conf      or 0,
         aa      = r and r.aa_type   or AA.UNKNOWN,
-        bt      = e.backtrack or 0,
+        -- e.backtrack is a TIME value (seconds), not a tick count -- must
+        -- go through TT() before comparing against the 1..16 tick range
+        -- used everywhere else (bt_hist/preferred_bt/log output).
+        bt      = TT(e.backtrack),
         hc      = e.hit_chance or 0,
         in_vuln = r and r.vuln_ttl > 0 or false,
         vuln_t  = r and r.vuln_type or nil,
