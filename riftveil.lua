@@ -1,9 +1,37 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v5.7  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v5.8  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v5.8 – Diagnosed a debug log complaint ("it feels horrible") down to
+--            two real bugs:
+--            (1) MAJOR: hit_mem overrides (the [3] branch, confirmed-side
+--            corrections from an actual prior hit on this player/state)
+--            were capped with corr_cap -- VelCap's velocity-scaled cap,
+--            which falls LINEARLY TO EXACTLY 0 once the target's speed
+--            reaches CFG.VEL_CAP_SPD (580u/s). A bhopping/fast-strafing
+--            enemy crosses that constantly, and CfgAngle's Clamp(raw, -cap,
+--            cap) with cap=0 forces the correction to literally 0 degrees --
+--            aim dead-center, no yaw correction at all, worse than a coin
+--            flip. Caught directly in a debug log:
+--            "meth=hit_mem val=0.0". The comment above VelCap's call site
+--            already said corr_cap is "used only to clamp CfgAngle's static
+--            guesses" -- hit_mem is confirmed data, not a guess, and was
+--            never supposed to be in scope. Switched both hit_mem call
+--            sites to live_cap (the engine's real desync bound, unscaled by
+--            velocity) instead of corr_cap.
+--            (2) "symmetric" is a real, recognized KNOWN_CFGS entry
+--            (avg_left=35, avg_right=35) but had no matching CFG_COUNTER
+--            table, so CfgAngle(..., "symmetric", ...) always fell through
+--            to ASYM_FALLBACK -- angles calibrated for an asymmetric desync
+--            pattern, applied to a player already confirmed to desync
+--            symmetrically. Added CFG_COUNTER.symmetric using the same
+--            35/35 flat value per state (no per-state symmetric calibration
+--            data exists yet). Seen in the same log: a player classified
+--            "symmetric" repeatedly, with worse-than-expected accuracy and
+--            config-switch churn, in the same session this angle mismatch
+--            was active.
 --    v5.7 – Bug review pass #3. Found and fixed four more:
 --            (1) MAJOR: on_aim_hit's is_head check used hitgroup==2 for
 --            "neck", but the file's OWN HG lookup table a few hundred
@@ -533,7 +561,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "5.7"
+local RV_VERSION = "5.8"
 
 local ffi = require "ffi"
 
@@ -981,6 +1009,17 @@ local CFG_COUNTER = {
         standing={L=30,R=38}, running={L=28,R=35},
         crouch={L=28,R=40}, crouch_moving={L=24,R=36},
         air={L=26,R=32}, air_crouch={L=20,R=36}, slowmotion={L=26,R=40},
+    },
+    -- "symmetric" is a recognized KNOWN_CFGS entry (avg_left=35, avg_right=35
+    -- above) but had no CFG_COUNTER table, so CfgAngle(..., "symmetric", ...)
+    -- always fell through to ASYM_FALLBACK -- angles calibrated for an
+    -- asymmetric desync pattern applied to a player we'd already confirmed
+    -- desyncs symmetrically. No per-state symmetric data exists, so this
+    -- uses the flat 35/35 avg from KNOWN_CFGS.symmetric for every state.
+    symmetric = {
+        standing={L=35,R=35}, running={L=35,R=35}, crouch={L=35,R=35},
+        crouch_moving={L=35,R=35}, air={L=35,R=35},
+        air_crouch={L=35,R=35}, slowmotion={L=35,R=35},
     },
 }
 
@@ -2485,16 +2524,29 @@ local function ProcessPlayer(player, ctx)
         -- standing vs. moving means the state-specific record is strictly
         -- more accurate whenever it exists; the global one is only a
         -- fallback for states we haven't confirmed a hit in yet this match.
+        -- NOTE: hit_mem is confirmed data (an actual prior hit on this player
+        -- in this state), not a static guess -- so it's capped by live_cap
+        -- (the engine's real desync bound) rather than corr_cap (VelCap's
+        -- velocity-scaled cap). corr_cap is meant only for CfgAngle's static
+        -- guesses per the comment above VelCap's call site; it linearly falls
+        -- to exactly 0 at CFG.VEL_CAP_SPD (580u/s), and a bhopping/fast-moving
+        -- enemy crosses that constantly. Using corr_cap here was clamping a
+        -- confirmed correction to literally val=0.0 -- aim dead-center, worse
+        -- than a coin flip -- every time the target's speed spiked, which is
+        -- exactly when hit_mem should matter most (fast movement is when
+        -- static guesses are least trustworthy, not when confirmed data should
+        -- be thrown out). Seen directly in a debug log: a hit_mem correction
+        -- logged val=0.0 for a fast-moving target.
         elseif ui.get(ui_hitmem) and rec.state
                and (rec.hit_count_by_state[rec.state] or 0) >= 2
                and (rec.hit_side_by_state[rec.state] or 0) ~= 0 then
             should_override = true
-            override_val    = CfgAngle(rec.hit_side_by_state[rec.state], rec.state, TrustedCfg(rec), corr_cap)
+            override_val    = CfgAngle(rec.hit_side_by_state[rec.state], rec.state, TrustedCfg(rec), live_cap)
             override_meth   = METH.HIT_MEM
 
         elseif ui.get(ui_hitmem) and rec.hit_count >= 2 and rec.hit_side ~= 0 then
             should_override = true
-            override_val    = CfgAngle(rec.hit_side, rec.state, TrustedCfg(rec), corr_cap)
+            override_val    = CfgAngle(rec.hit_side, rec.state, TrustedCfg(rec), live_cap)
             override_meth   = METH.HIT_MEM
 
         -- [4] Suppress [EXP]: force wrong angle to gate aimbot hit-chance.
