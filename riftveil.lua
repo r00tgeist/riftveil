@@ -1,9 +1,53 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v6.2  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v6.3  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v6.3 – MAJOR fix, found from a real debug log (not a review guess):
+--            5 of DetectVuln's 6 non-LBY branches (UNK/STP/PKA/DCK/LND/CTR)
+--            were returning a raw ABSOLUTE animstate yaw reading
+--            (as.torso_yaw / as.goal_feet_yaw / eye_y itself) as the vuln
+--            correction, which flows straight through rec.vuln_val ->
+--            override_val -> plist.set(..., "Force body yaw value", ...)
+--            with no transformation anywhere in between. [LBY]'s own
+--            CfgAngle output proves what that field actually wants: a
+--            small SIGNED DESYNC OFFSET (its KNOWN_CFGS/CFG_COUNTER
+--            tables are literally desync magnitudes, ~20-47°, bounded by
+--            DESYNC_CAP=58) -- not a full -180..180 compass-direction
+--            world yaw. Proof from a real log: type=stp val hit 354.3,
+--            type=unk hit 179.9 with 26% of all UNK corrections (178/679
+--            in one match) already exceeding DESYNC_CAP outright, type=lnd
+--            hit 172.8 -- while LBY's val stayed tightly inside 0..47 the
+--            entire time, exactly where a real desync belongs. The UNK
+--            branch even computes the CORRECT quantity for its own
+--            threshold check a few lines earlier (`d = NA(torso - eye)`,
+--            the signed delta) and then discarded it in favor of the raw
+--            torso reading for the actual return -- an internal self-
+--            contradiction within the same function, not just an
+--            outside-convention mismatch. This also explains why the
+--            symptom was inconsistent ("feels horrible" some fights, fine
+--            others): torso_yaw and eye_y are often coincidentally close
+--            (players roughly face where they look), so most UNK
+--            corrections LOOKED plausible by chance while a full quarter
+--            were wildly, silently wrong.
+--            Fixed: UNK/STP/PKA/DCK now convert their raw torso/
+--            goal_feet_yaw reading into Clamp(NA(reading - eye), -cap,
+--            cap), matching every CfgAngle-sourced correction elsewhere.
+--            LND/CTR had no torso reading at all -- just safe_eye standing
+--            in for "body already matches eye" -- so they now correctly
+--            return 0 (zero desync) instead of forcing body yaw to
+--            whatever absolute direction the enemy's eyes happened to be
+--            pointing. UNK's own live-cap-boost confidence check had the
+--            identical absolute-vs-delta bug one level down (comparing a
+--            raw torso reading against a desync-magnitude cap) and is
+--            fixed the same way, now operating on the corrected delta.
+--            This is very likely the single largest resolver-accuracy
+--            defect found across every review pass this session -- UNK
+--            alone fired 679 times in one log, by far the most common
+--            vuln type, meaning most vuln-window shots before this fix
+--            were aimed using a fundamentally wrong quantity roughly a
+--            quarter of the time.
 --    v6.2 – Senior resolver-review pass #3, focused on resolver-domain
 --            correctness this time (window/priority handling, flip and
 --            side-sign conventions, hit_side encoding-immutability)
@@ -681,7 +725,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "6.2"
+local RV_VERSION = "6.3"
 
 local ffi = require "ffi"
 
@@ -1867,6 +1911,36 @@ end
 --  Returns: vtype, correction_angle, confidence  OR  nil, 0, 0
 --  rec.prev_* fields must be set from the previous tick.
 -- ══════════════════════════════════════════════════════════════════
+-- MAJOR BUG (found via a real debug log, not a guess -- see the vuln=stp/
+-- unk/pka/dck/lnd/ctr val distributions): every branch below except [LBY]
+-- was returning a RAW ABSOLUTE animstate yaw reading (as.torso_yaw,
+-- as.goal_feet_yaw, or eye_y itself) as the vuln correction -- but that
+-- value goes straight into rec.vuln_val -> override_val -> plist.set(...,
+-- "Force body yaw value", ...) with ZERO transformation anywhere in the
+-- pipeline (checked ProcessPlayer and the override chain -- nothing adds
+-- eye_y back in). [LBY]'s own CfgAngle output proves what that field
+-- actually expects: a small SIGNED DESYNC OFFSET (its own KNOWN_CFGS/
+-- CFG_COUNTER tables are literally desync magnitudes, ~20-47 degrees,
+-- bounded by DESYNC_CAP=58) -- not a full compass-direction world yaw.
+-- torso_yaw/goal_feet_yaw/eye_angles_y are all ABSOLUTE angles that swing
+-- across the enemy's entire facing direction over a match (-180..180), so
+-- returning them directly is a straight type mismatch. Proof this isn't
+-- just theoretical: a real log showed type=stp val up to 354.3, type=unk
+-- up to 179.9 with 26% of all UNK corrections (178/679 in one log) already
+-- exceeding DESYNC_CAP entirely, type=lnd up to 172.8 -- while [LBY]'s own
+-- CfgAngle-based val stayed tightly inside 0..47 the entire time, exactly
+-- where a real desync amount belongs. The UNK branch even computes the
+-- CORRECT quantity for its own threshold check three lines below
+-- (`d = NA(torso - eye)`, the signed delta) and then discarded it in favor
+-- of the raw torso reading for the actual return value -- an internal
+-- self-contradiction within this same function, not just an outside-
+-- convention mismatch. Fixed: UNK/STP/PKA/DCK now convert their raw
+-- torso/goal_feet_yaw reading into NA(reading - eye), clamped to corr_cap
+-- like every other CfgAngle-sourced correction; LND/CTR (which had no
+-- torso reading at all, just safe_eye standing in for "body already
+-- matches eye") now correctly return 0 -- zero desync -- instead of
+-- literally forcing body yaw to whatever absolute direction the enemy's
+-- eyes happened to be pointing.
 local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
     -- Guard: if eye_y is zero or suspiciously small, try last ring buffer entry
     local safe_eye = (math.abs(eye_y) > 1.0) and eye_y
@@ -1921,14 +1995,27 @@ local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
         -- TorsoCluster accumulates readings and returns the dominant cluster center,
         -- which is the most-common real body position across the cycling pattern.
         -- If no stable cluster yet, fall back to the raw torso reading.
-        local cluster_val = TorsoCluster(rec, torso)
-        local correction  = cluster_val or torso
-        local conf        = cluster_val and 0.93 or 0.90  -- higher conf when clustered
+        local cluster_val    = TorsoCluster(rec, torso)
+        local correction_abs = cluster_val or torso
+        local conf           = cluster_val and 0.93 or 0.90  -- higher conf when clustered
 
-        -- LIVE CAP BOOST: when animstate min/max_yaw are populated and the correction
-        -- falls within the actual engine-reported desync bounds, it's a validated read.
-        -- Modest boost from 0.90→0.92 / 0.93→0.96 — not a guarantee, just extra signal.
-        -- Skeet DLL analysis confirmed min_yaw/max_yaw are accessible from animstate.
+        -- Convert the absolute torso/cluster reading into a signed desync
+        -- DELTA relative to eye_y -- see the note above DetectVuln. Without
+        -- safe_eye (rare -- both eye_y and the ring buffer fallback failed)
+        -- there's nothing to compute a delta against, so bail rather than
+        -- return a meaningless absolute value.
+        if not safe_eye then return nil, 0, 0 end
+        local correction = Clamp(NA(correction_abs - safe_eye), -corr_cap, corr_cap)
+
+        -- LIVE CAP BOOST: when animstate min/max_yaw are populated and the
+        -- correction (now a proper desync delta, not an absolute yaw) falls
+        -- within the actual engine-reported desync bounds, it's a validated
+        -- read. Modest boost from 0.90→0.92 / 0.93→0.96 — not a guarantee,
+        -- just extra signal. Skeet DLL analysis confirmed min_yaw/max_yaw
+        -- are accessible from animstate. (This check compared an ABSOLUTE
+        -- torso reading against a desync-magnitude cap before the fix above
+        -- -- same bug, one level down -- so it would rarely trigger unless
+        -- the enemy happened to be looking near world yaw 0.)
         if rec.live_min and rec.live_max
            and isnum(rec.live_min, -90, -0.5) and isnum(rec.live_max, 0.5, 90) then
             local abs_c = math.abs(correction)
@@ -1964,7 +2051,11 @@ local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
         if (spd or 0) < CFG.STOP_SPD_LO then
             local gfy = as.goal_feet_yaw or safe_eye
             if not gfy or math.abs(gfy) < 1.0 then return nil, 0, 0 end
-            return VTYPE.STP, gfy, 0.80
+            if not safe_eye then return nil, 0, 0 end
+            -- gfy is an absolute world yaw (see the note above DetectVuln) --
+            -- convert to a signed desync delta relative to eye before
+            -- returning it as the correction, same as every other branch.
+            return VTYPE.STP, Clamp(NA(gfy - safe_eye), -corr_cap, corr_cap), 0.80
         end
     end
 
@@ -1981,15 +2072,24 @@ local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
         local torso = as.torso_yaw
         -- Skip near-zero: faszsag/defensive-pose torso reads are as unreliable
         -- here as they are for UNK (see torpedo counter above).
-        if torso and math.abs(torso) >= 8 then
-            return VTYPE.PKA, torso, 0.75
+        if torso and math.abs(torso) >= 8 and safe_eye then
+            -- torso is an absolute world yaw -- convert to a signed desync
+            -- delta relative to eye, same as every other branch.
+            return VTYPE.PKA, Clamp(NA(torso - safe_eye), -corr_cap, corr_cap), 0.75
         end
     end
 
     -- [LND] landing: on_ground flipped false → true
     if rec.prev_onground == false and as.on_ground == true then
         if not safe_eye then return nil, 0, 0 end
-        return VTYPE.LND, safe_eye, 0.85
+        -- No torso reading available here -- this branch only ever had
+        -- safe_eye (the eye angle itself), which was being returned
+        -- directly as the correction: forcing body yaw to whatever
+        -- absolute compass direction the enemy's eyes happened to point,
+        -- not a desync amount. Landing is a "body yaw caught up" signal,
+        -- i.e. body should match eye right now -- which in the signed-
+        -- delta convention every other branch uses is 0, not eye_y itself.
+        return VTYPE.LND, 0, 0.85
     end
 
     -- [DCK] duck transition: duck_amount crossed 0.5.
@@ -2003,9 +2103,12 @@ local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
         -- cooldown ticking — decrement only, no DCK this tick
     elseif (dp < cross and dn >= cross) or (dp >= cross and dn < cross) then
         local torso = as.torso_yaw or safe_eye
-        if torso and math.abs(torso) >= 1.0 then
+        if torso and math.abs(torso) >= 1.0 and safe_eye then
             rec._dck_cooldown = 10   -- set before returning so it persists
-            return VTYPE.DCK, torso, 0.78
+            -- torso is an absolute world yaw (falls back to safe_eye, which
+            -- would correctly yield a 0 delta below) -- convert to a signed
+            -- desync delta relative to eye, same as every other branch.
+            return VTYPE.DCK, Clamp(NA(torso - safe_eye), -corr_cap, corr_cap), 0.78
         end
     end
 
@@ -2014,7 +2117,10 @@ local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
        and math.abs(pose) < CFG.CTR_THRESH
        and rec.prev_pose and math.abs(rec.prev_pose) >= 18 then
         if not safe_eye then return nil, 0, 0 end
-        return VTYPE.CTR, safe_eye, 0.72
+        -- Same as [LND]: no torso reading here, only safe_eye standing in
+        -- for "body already matches eye" -- the correct delta for that is
+        -- 0, not the absolute eye angle itself.
+        return VTYPE.CTR, 0, 0.72
     end
 
     return nil, 0, 0
