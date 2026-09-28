@@ -1,9 +1,17 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v3.7  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v3.8  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v3.8 – DB saves were only automatic on match-end/level_init/shutdown/
+--            disconnect -- a crash, force-quit, or a bad server disconnect
+--            between those events meant that session's progress against an
+--            opponent was never written, requiring the manual "Save match
+--            to DB" button as a workaround. Added a periodic autosave:
+--            every 60s, if there's an active match (REC non-empty), Update()
+--            flushes to the permanent DB on its own. Manual save/reset/wipe
+--            controls are unchanged and still work the same.
 --    v3.7 – Added a real full-DB-wipe (button "Wipe ALL saved DB" +
 --            console command rv_wipe). "Reset match + DB" can only clear
 --            DB[s64] for players CURRENTLY loaded into REC that session --
@@ -204,7 +212,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "3.7"
+local RV_VERSION = "3.8"
 
 local ffi = require "ffi"
 
@@ -266,6 +274,11 @@ local DT_HIST  = {}   -- [s64] = simtime-delta samples for DT detection
 -- a real, multiplicative FPS win, not a micro-optimization).
 local LIVE_ENEMIES = {}   -- array of live enemy entindexes, this net_update
 local LAST_SPIKE    = false
+
+-- Periodic DB autosave state. FlushDB previously only ran on match-end/
+-- disconnect/shutdown -- a crash, force-quit, or bad server disconnect
+-- between those events meant that session's DB updates were never written.
+local LAST_DB_SAVE  = 0    -- globals.realtime() of the last periodic autosave
 
 info("db", "loaded with %d entries", (function() local c=0; for _ in pairs(DB) do c=c+1 end; return c end)())
 
@@ -2050,6 +2063,15 @@ local function Update()
         end
     end
     for i = #LIVE_ENEMIES, n_live + 1, -1 do LIVE_ENEMIES[i] = nil end
+
+    -- Periodic autosave: don't rely solely on match-end/disconnect/shutdown
+    -- firing cleanly. Every 60s, if there's anyone worth saving, flush to
+    -- the permanent DB so a crash or hard stop doesn't lose the session.
+    local now = globals.realtime()
+    if next(REC) and (now - LAST_DB_SAVE) >= 60 then
+        LAST_DB_SAVE = now
+        FlushDB()
+    end
 
     -- Tight interp is handled by its ui.set_callback — nothing to do here
 
