@@ -1,9 +1,45 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v6.1  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v6.2  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v6.2 – Senior resolver-review pass #3, focused on resolver-domain
+--            correctness this time (window/priority handling, flip and
+--            side-sign conventions, hit_side encoding-immutability)
+--            rather than generic Lua bugs or platform-API misuse (already
+--            covered in the previous two passes).
+--            Found one real issue: DetectVuln re-evaluates all 7 trigger
+--            conditions independently every tick with zero awareness of
+--            rec.vuln_ttl. If a window was already open (say an LBY snap
+--            with 2 ticks still left) and a DIFFERENT vtype fired on the
+--            very next tick with a shorter base_ttl (say a UNK unchoke,
+--            base_ttl=1), the old code unconditionally overwrote
+--            rec.vuln_ttl down to the new value -- cutting the still-
+--            active, still-valid window off early and handing the aimbot
+--            less time to find a shot than either signal alone would
+--            have given. Fixed with rec.vuln_ttl = math.max(rec.vuln_ttl,
+--            base_ttl, lc_ttl) -- provably monotonic (a fresh detection
+--            can now only extend/refresh the window, never shrink it),
+--            so unlike the KNOWN_CFGS tolerance-overlap observation
+--            (v5.9, still just flagged, not changed -- would need real
+--            per-type accuracy data to justify a specific retune), this
+--            one doesn't require guessing at resolver accuracy to know
+--            it's strictly no worse and sometimes better. vuln_type/
+--            vuln_val still update to the freshest read (presumably the
+--            more current correction) -- only the ttl is protected.
+--            Also specifically re-verified (no changes needed): the
+--            override-branch priority chain (vuln > 6lex > hit_mem >
+--            meta_hold > suppress > release) makes sense in reliability
+--            order; hit_side's flip-encoding is genuinely immutable once
+--            stored (a later rec.flip toggle correctly never re-applies
+--            to an already-encoded hit_side, confirmed by tracing every
+--            "apply flip" site against tracked_method); the suppress
+--            branch's angle math (negates the BELIEVED real side, not a
+--            random one); and the +/- side-sign convention (positive =
+--            right) is consistent across every one of the 8 side-sourcing
+--            methods (ring/hit_mem/6lex/period/lagcomp/def_tick/
+--            ring_spike/yaw_cache) plus vuln and suppress.
 --    v6.1 – Senior gamesense-review pass #2, focused on platform-API
 --            correctness (ui/event/entity/plist call semantics) rather
 --            than internal resolver logic. Found a real UI/cvar state
@@ -645,7 +681,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "6.1"
+local RV_VERSION = "6.2"
 
 local ffi = require "ffi"
 
@@ -2462,7 +2498,22 @@ local function ProcessPlayer(player, ctx)
                 end
             end
 
-            rec.vuln_ttl  = math.max(base_ttl, lc_ttl)
+            -- Never let a fresh detection cut an already-open window short.
+            -- DetectVuln re-evaluates all 7 trigger conditions independently
+            -- every tick with no awareness of rec.vuln_ttl -- if a window is
+            -- already open (e.g. an LBY snap with 2 ticks left) and a
+            -- different vtype fires on the very next tick (e.g. a UNK
+            -- unchoke with base_ttl=1), the old code overwrote vuln_ttl down
+            -- to the new, SHORTER value, cutting the still-active window off
+            -- early and handing the aimbot less time to find a shot than
+            -- either signal would have given alone. rec.vuln_ttl here is
+            -- already the post-decrement remaining time for THIS tick (see
+            -- the decrement a few lines above), so max()-ing against it is
+            -- monotonic -- a fresh detection can only extend or refresh the
+            -- window, never shrink it. vuln_type/vuln_val still update to
+            -- the newest read (a fresher signal is presumably a more
+            -- current correction), only the ttl is protected from shrinking.
+            rec.vuln_ttl  = math.max(rec.vuln_ttl, base_ttl, lc_ttl)
             rec.vuln_type = vtype
             rec.vuln_val  = vcorr
             if ui.get(ui_verb) then
