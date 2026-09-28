@@ -1,9 +1,35 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v6.4  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v6.5  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v6.5 – Traced whether the detection methods actually COLLABORATE
+--            (cross-validate each other) when making a decision, not just
+--            whether they're wired correctly (v6.4). Answer: mostly no --
+--            both the side-tracking chain and the override chain are
+--            strict if/elseif priority waterfalls (hit_mem > 6lex >
+--            period > lagcomp > def_tick > ring_spike > yaw_cache; vuln >
+--            6lex > hit_mem > meta_hold > suppress > release). The first
+--            method whose conditions pass wins outright; every lower-
+--            priority method's opinion is discarded for that tick even if
+--            it would have disagreed. No voting, no consensus, at the
+--            actual decision point.
+--            Two real collaboration points already existed: six_agree/
+--            six_disagree (6lex's per-player track record graded against
+--            hit_mem's confirmed hits over time, gating whether 6lex is
+--            even trusted) and a confidence bump when 6lex's side agrees
+--            with the ring buffer's dom_side. But that second one was
+--            asymmetric -- a real gap, not just an absence of a feature:
+--            it unconditionally added +0.08 confidence on ANY nonzero
+--            six_side, even when six_side and dom_side ACTIVELY
+--            CONTRADICTED each other (both nonzero, opposite signs).
+--            Agreement was rewarded (+0.05 on top); disagreement between
+--            two independent signals was silently treated as neutral
+--            instead of negative evidence. Fixed: a real disagreement
+--            between six_side and dom_side now decays confidence the same
+--            way a genuinely quiet/no-signal tick already does
+--            (CFG.CONF_DECAY), instead of still gaining ground.
 --    v6.4 – Wiring audit: verified every function's return values are
 --            actually consumed by its caller (not just that the file
 --            parses), and that every defined function is actually called
@@ -767,7 +793,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "6.4"
+local RV_VERSION = "6.5"
 
 local ffi = require "ffi"
 
@@ -2563,10 +2589,26 @@ local function ProcessPlayer(player, ctx)
         --  are never read — RecognizeCfg uses MeanSidePose directly)
 
         -- Confidence
+        -- COLLABORATION GAP (found by tracing whether detection methods
+        -- actually cross-validate each other, not just whether they're
+        -- wired correctly): this used to boost confidence on ANY nonzero
+        -- six_side, unconditionally -- so two independent signals actively
+        -- CONTRADICTING each other (six_side and dom_side both nonzero but
+        -- pointing opposite ways) still added +0.08 as if 6lex alone were
+        -- confirming evidence, with no penalty for the disagreement.
+        -- Agreement got rewarded (the extra +0.05 below); disagreement was
+        -- silently ignored instead of counting against confidence. Two
+        -- detectors contradicting each other is negative evidence, not
+        -- neutral -- now decayed the same way a genuinely quiet/no-signal
+        -- tick already is (CFG.CONF_DECAY), instead of still gaining.
         if six_side ~= 0 then
-            rec.conf = math.min(rec.conf + 0.08, 1.0)
-            if dom_side ~= 0 and dom_side == six_side then
-                rec.conf = math.min(rec.conf + 0.05, 1.0)
+            if dom_side ~= 0 and dom_side ~= six_side then
+                rec.conf = rec.conf * CFG.CONF_DECAY
+            else
+                rec.conf = math.min(rec.conf + 0.08, 1.0)
+                if dom_side ~= 0 and dom_side == six_side then
+                    rec.conf = math.min(rec.conf + 0.05, 1.0)
+                end
             end
         end
         if raw_c > 0.35 or yaw_jit then
