@@ -1,9 +1,26 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v4.0  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v4.1  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v4.1 – Per-player 6lex trust calibration, inspired by vandal.lua's
+--            own per-opponent learning in resolver_on_miss -- but adapted
+--            to validate against CONFIRMED HEAD/NECK HITS instead of
+--            misses, since a hit proves which side was actually real and
+--            a miss doesn't. Every confirmed hit now compares what 6lex
+--            claimed at fire time against the established real side
+--            (six_agree/six_disagree, tracked in on_aim_hit). Once 6lex
+--            has been proven wrong for a specific player by more than a
+--            small margin over how often it's been right, both the
+--            override gate and the side-tracking fallback stop trusting
+--            it for THAT player and fall through to hit-mem/suppress --
+--            doesn't touch the extraction formula itself, only how much
+--            its output is trusted per-opponent. Visible via rv_stats
+--            (6lex:agree/total). Not reset on soft-reset: it reflects a
+--            physical property of that player's animation data, not our
+--            tracked-side confidence, so an unrelated miss streak
+--            shouldn't erase evidence 6lex has already been wrong for them.
 --    v4.0 – Two resolver-adjacent additions from reviewing vandal.lua and
 --            re-reading lagcomp_box.lua more closely:
 --            (1) plist "High priority" is now set true whenever we have
@@ -243,7 +260,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "4.0"
+local RV_VERSION = "4.1"
 
 local ffi = require "ffi"
 
@@ -444,11 +461,12 @@ client.set_event_callback("console_input", function(text)
             local tot = (rec.total_hits or 0) + (rec.total_misses or 0)
             local hr  = tot > 0 and math.floor(rec.total_hits / tot * 100) or 0
             out[#out+1] = string.format(
-                "  %s | %s | conf:%d%% | %d/%d (%d%%) | head:%d rmiss:%d | bt:%d | cfg:%s",
+                "  %s | %s | conf:%d%% | %d/%d (%d%%) | head:%d rmiss:%d | 6lex:%d/%d | bt:%d | cfg:%s",
                 entity.get_player_name(rec.eidx or 0) or s64,
                 rec.aa_type, math.floor(rec.conf*100),
                 rec.total_hits or 0, tot, hr,
                 rec.hit_count, rec.resolver_misses,
+                rec.six_agree or 0, (rec.six_agree or 0) + (rec.six_disagree or 0),
                 rec.preferred_bt, rec.config_type or "?")
         end
         out[#out+1] = string.format("  log lines: %d", log_total)
@@ -1522,6 +1540,13 @@ local function NewRec(player, s64)
         side=0, period=0, conf=seeded_conf,
         aa_type=AA.UNKNOWN, flip=false, lt=-1,
         hit_side=0, hit_count=0, resolver_misses=0,
+        -- Per-player 6lex trust calibration (inspired by vandal.lua's
+        -- per-opponent learning, but validated against confirmed head/neck
+        -- hits instead of misses -- a hit proves which side was actually
+        -- real; a miss doesn't). Doesn't touch the extraction formula
+        -- itself, only how much the override block trusts its output for
+        -- THIS specific player -- see on_aim_hit and the 6lex override gate.
+        six_agree=0, six_disagree=0,
         -- True match totals -- every real (non-discarded) hit/miss outcome,
         -- unlike hit_count (head/neck-confirmed only, drives hit_mem) and
         -- resolver_misses (non-vuln only, drives soft-reset). The panel
@@ -1893,7 +1918,8 @@ local function ProcessPlayer(player, ctx)
                 tracked_side   = rec.hit_side   -- already flip-encoded at storage time
                 tracked_method = METH.HIT_MEM
 
-            elseif six_side ~= 0 and rec.conf > 0.30 then
+            elseif six_side ~= 0 and rec.conf > 0.30
+                   and (rec.six_disagree or 0) <= (rec.six_agree or 0) + 2 then
                 tracked_side   = six_side
                 tracked_method = METH.SIX_LEX
 
@@ -2010,8 +2036,13 @@ local function ProcessPlayer(player, ctx)
             override_val    = rec.vuln_val
             override_meth   = "vuln_" .. rec.vuln_type
 
-        -- [2] 6lex: animlayer digit read — direct, no guessing
-        elseif ui.get(ui_6lex) and six_side ~= 0 and rec.conf > 0.25 then
+        -- [2] 6lex: animlayer digit read — direct, no guessing. Gated by
+        -- per-player calibration: once it's been proven wrong against
+        -- confirmed hits more than a small margin above how often it's
+        -- been right for THIS player, stop trusting it for them and fall
+        -- through to hit-mem/suppress instead (see on_aim_hit).
+        elseif ui.get(ui_6lex) and six_side ~= 0 and rec.conf > 0.25
+               and (rec.six_disagree or 0) <= (rec.six_agree or 0) + 2 then
             should_override = true
             override_val    = six_desync > 0
                               and (six_side * six_desync)
@@ -2199,6 +2230,7 @@ local function on_aim_fire(e)
         in_vuln = r and r.vuln_ttl > 0 or false,
         vuln_t  = r and r.vuln_type or nil,
         cfg     = r and r.config_type or nil,
+        six_side = r and r.six_side or 0,  -- for 6lex agree/disagree calibration on hit
         tick    = globals.tickcount(),
         -- fire_time/srv_hits: lets on_aim_miss tell a real resolver miss
         -- apart from a stale/timed-out event or a server-side hit that got
@@ -2234,6 +2266,18 @@ local function on_aim_hit(e)
         if d.side ~= 0 and is_head then
             rec.hit_side  = d.flip and -d.side or d.side
             rec.hit_count = rec.hit_count + 1
+            -- 6lex trust calibration: this confirmed head/neck hit IS the
+            -- real side (same ground truth hit_mem just used above) --
+            -- compare it against whatever 6lex claimed at fire time, if it
+            -- made a call. Doesn't touch the extraction formula, only how
+            -- much the override gate below trusts it for this player.
+            if (d.six_side or 0) ~= 0 then
+                if d.six_side == rec.hit_side then
+                    rec.six_agree = (rec.six_agree or 0) + 1
+                else
+                    rec.six_disagree = (rec.six_disagree or 0) + 1
+                end
+            end
         end
         -- Backtrack depth learning. bt=0 means no backtrack used — skip it
         -- to avoid conflicting with preferred_bt=0 which means "not learned".
