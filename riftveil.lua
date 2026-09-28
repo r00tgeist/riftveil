@@ -1,9 +1,31 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v5.3  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v5.4  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v5.4 – CRITICAL fix to the v5.2 vuln-type trust gate: vuln_profile's
+--            "seen" counter was incremented every time DetectVuln logged a
+--            detection, not once per actual shot taken. Checked against a
+--            real debug log: one player logged 110 "unk" detections in a
+--            single match against roughly a dozen actual shots at them --
+--            most vuln windows never get shot at (target not visible/not
+--            aimed-at during the brief ttl). That inflated denominator
+--            crushed hit/seen toward near-zero regardless of true
+--            accuracy, meaning the v5.2 gate would have started
+--            distrust-probing perfectly good vuln types almost
+--            immediately -- actively working against hit rate, the
+--            opposite of its purpose. Compounding it, on_aim_miss ALSO
+--            incremented seen a second time for every vuln miss (but hits
+--            were never double-counted), biasing the already-wrong ratio
+--            further downward specifically on misses.
+--            Fixed by crediting seen exactly once per shot, in
+--            on_aim_fire when a shot is fired during an open vuln
+--            window -- the same "one shot, one trial" definition
+--            on_aim_hit already uses for hit -- and removing both the
+--            per-detection increment and the duplicate miss-path
+--            increment. seen/hit are now symmetric: exactly one of each
+--            per shot outcome, nothing double-counted.
 --    v5.3 – Fixed the SHIFT box's tether line: it targeted scr[1], one
 --            arbitrary box corner (bottom, min-x, min-y), instead of the
 --            box's center. That corner sits on the far side of the box
@@ -440,7 +462,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "5.3"
+local RV_VERSION = "5.4"
 
 local ffi = require "ffi"
 
@@ -2154,16 +2176,21 @@ local function ProcessPlayer(player, ctx)
         if rec.vuln_ttl > 0 then rec.vuln_ttl = rec.vuln_ttl - 1 end
 
         local vtype, vcorr = DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
-        if vtype then
-            -- seen counts every genuine detection regardless of trust state,
-            -- so the ratio VulnTrusted reads keeps updating even while this
-            -- type is currently being skipped -- required for the probe
-            -- below to ever let it recover.
-            if not rec.vuln_profile[vtype] then
-                rec.vuln_profile[vtype] = {seen=0, hit=0}
-            end
-            rec.vuln_profile[vtype].seen = rec.vuln_profile[vtype].seen + 1
+        if vtype and not rec.vuln_profile[vtype] then
+            rec.vuln_profile[vtype] = {seen=0, hit=0}
         end
+        -- NOTE: seen is NOT incremented here. A vuln window opening is not
+        -- a "trial" -- most windows never get shot at (target not visible/
+        -- not aimed-at during the brief ttl). Counting every detection as
+        -- seen made the denominator wildly larger than actual shot
+        -- attempts (a single player logged 110 "unk" detections in one
+        -- match against maybe a dozen actual shots), crushing the hit
+        -- ratio to near-zero regardless of true accuracy and risking the
+        -- trust gate below distrusting a perfectly good vuln type just
+        -- because it rarely got fired at. seen is now credited in
+        -- on_aim_fire, once per actual shot taken during an open vuln
+        -- window -- the same definition of "trial" that on_aim_hit
+        -- already uses for hit.
         if vtype and VulnTrusted(rec, vtype) then
             local lc_ttl = math.floor(CFG.LC_WINDOW_S / ctx.ti) - 1
             local base_ttl = CFG.VULN_TTL[vtype] or 1
@@ -2560,6 +2587,12 @@ local function on_aim_fire(e)
         fire_time  = globals.realtime(),
         srv_hits = me and (entity.get_prop(me, "m_totalHitsOnServer") or 0) or 0,
     }
+    -- Credit a vuln_profile "seen" (trial) here, once per actual shot fired
+    -- during an open vuln window -- not once per detection (see the
+    -- comment at the DetectVuln call site in ProcessPlayer for why).
+    if r and r.vuln_ttl > 0 and r.vuln_type and r.vuln_profile[r.vuln_type] then
+        r.vuln_profile[r.vuln_type].seen = r.vuln_profile[r.vuln_type].seen + 1
+    end
 end
 
 local function on_aim_hit(e)
@@ -2713,10 +2746,11 @@ local function on_aim_miss(e)
             if d.in_vuln then
                 should_flip = false   -- absolute angle, flip is meaningless
                 rec.vuln_ttl = 0
-                if d.vuln_t and rec.vuln_profile[d.vuln_t] then
-                    rec.vuln_profile[d.vuln_t].seen =
-                        rec.vuln_profile[d.vuln_t].seen + 1
-                end
+                -- seen was already credited once for this shot in
+                -- on_aim_fire -- crediting it again here would double-count
+                -- every miss (but not hits, which only increment hit in
+                -- on_aim_hit), artificially crushing the ratio below what
+                -- it actually is.
             elseif d.meth == METH.HIT_MEM then
                 should_flip = false   -- confirmed side, don't flip it away
                 -- This specific movement state's memory just proved wrong
