@@ -1,9 +1,18 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v4.2  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v4.3  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v4.3 – console_input now returns true after handling any rv_* command
+--            (rv_stats/rv_db/rv_clear/rv_reset/rv_wipe). Per
+--            docs.gamesense.gs/docs/events/console_input, returning true
+--            suppresses the engine's own command processing; without it,
+--            since rv_* isn't a real registered concommand, the engine
+--            ALSO tried to process it after our handler ran and printed
+--            "Unknown command: rv_stats" right below our own output every
+--            single time -- confirmed via a user screenshot. Purely
+--            cosmetic console noise, now gone.
 --    v4.2 – Fixed backtrack-depth learning: e.backtrack (aim_fire event)
 --            is documented as a TIME value in seconds, not a tick count --
 --            confirmed against docs.gamesense.gs/docs/events/aim_fire,
@@ -276,7 +285,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "4.2"
+local RV_VERSION = "4.3"
 
 local ffi = require "ffi"
 
@@ -468,6 +477,10 @@ end)
 --    rv_reset   hard reset match + DB entries for CURRENT enemies only
 --    rv_wipe    wipe the ENTIRE permanent DB, every steam64 ever saved
 -- ══════════════════════════════════════════════════════════════════
+-- Returning true suppresses the engine's own command processing (per
+-- docs.gamesense.gs/docs/events/console_input) -- without it, rv_* isn't
+-- a real concommand, so after we handle it the engine ALSO complains
+-- "Unknown command: rv_stats" right below our own output every time.
 client.set_event_callback("console_input", function(text)
     local cmd = (text:match("^%s*(%S+)") or ""):lower()
 
@@ -519,7 +532,10 @@ client.set_event_callback("console_input", function(text)
         REC = {}; DT_HIST = {}; SHOTS = {}; EIDX_S64 = {}
         client.log(string.format("[RIFTVEIL] wiped entire DB (%d entries)", n))
         info("reset", "full DB wipe, %d entries cleared", n)
+    else
+        return
     end
+    return true  -- suppress the engine's "Unknown command" for our own commands
 end)
 
 -- ══════════════════════════════════════════════════════════════════
