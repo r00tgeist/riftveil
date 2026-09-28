@@ -1,9 +1,24 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v3.4  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v3.5  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v3.5 – The panel's H/M header wasn't a hit/miss scoreboard, despite
+--            looking like one: it summed hit_count (head/neck-confirmed
+--            hits ONLY -- 27 of 77 real hits in the reference log) and
+--            resolver_misses (non-vuln misses ONLY, by design -- most
+--            misses happen during vuln windows and deliberately don't
+--            count there). Added real total_hits/total_misses fields,
+--            incremented on every genuine (non-discarded) aim_hit/
+--            aim_miss, and pointed the panel header and rv_stats at those
+--            instead. hit_count/resolver_misses are untouched and still
+--            drive hit_mem/soft-reset exactly as before -- this only fixes
+--            what gets displayed as "misses". Also fixed the init log
+--            line, which hardcoded "v2.3" as a separate literal from the
+--            banner above and had silently drifted for the entire session
+--            (still printing "v2.3 loaded" as of v3.4) -- now reads from a
+--            single RV_VERSION constant.
 --    v3.4 – Shifting guard upgraded with a direct signal: a >64-unit
 --            (4096 sq-unit) origin teleport on a clean (choke==0) tick now
 --            sets _shift_streak straight to the distrust floor instead of
@@ -167,6 +182,13 @@
 --    L1365  Cleanup (ResetPlist, EndMatch, FullShutdown)
 --    L1395  Event registration
 -- ════════════════════════════════════════════════════════════════════
+
+-- Single source of truth for the version string -- the init log line used
+-- to hardcode "v2.3" as a separate literal from the header banner above,
+-- silently drifting out of sync with every version bump since (it was
+-- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
+-- together; nothing else should hardcode a version number.
+local RV_VERSION = "3.5"
 
 local ffi = require "ffi"
 
@@ -334,10 +356,13 @@ client.set_event_callback("console_input", function(text)
     if cmd == "rv_stats" then
         local out = {"[RIFTVEIL] === MATCH STATS ==="}
         for s64, rec in pairs(REC) do
+            local tot = (rec.total_hits or 0) + (rec.total_misses or 0)
+            local hr  = tot > 0 and math.floor(rec.total_hits / tot * 100) or 0
             out[#out+1] = string.format(
-                "  %s | %s | conf:%d%% | hits:%d | rmiss:%d | bt:%d | cfg:%s",
+                "  %s | %s | conf:%d%% | %d/%d (%d%%) | head:%d rmiss:%d | bt:%d | cfg:%s",
                 entity.get_player_name(rec.eidx or 0) or s64,
                 rec.aa_type, math.floor(rec.conf*100),
+                rec.total_hits or 0, tot, hr,
                 rec.hit_count, rec.resolver_misses,
                 rec.preferred_bt, rec.config_type or "?")
         end
@@ -1368,6 +1393,11 @@ local function NewRec(player, s64)
         side=0, period=0, conf=seeded_conf,
         aa_type=AA.UNKNOWN, flip=false, lt=-1,
         hit_side=0, hit_count=0, resolver_misses=0,
+        -- True match totals -- every real (non-discarded) hit/miss outcome,
+        -- unlike hit_count (head/neck-confirmed only, drives hit_mem) and
+        -- resolver_misses (non-vuln only, drives soft-reset). The panel
+        -- header reads these, not those, so it shows what it claims to.
+        total_hits=0, total_misses=0,
         def_tickbase=false,
         six_side=0, six_desync=0, state=STATE.STANDING,
         config_type=db.config_type or nil,
@@ -2008,11 +2038,11 @@ local function on_aim_fire(e)
         vuln_t  = r and r.vuln_type or nil,
         cfg     = r and r.config_type or nil,
         tick    = globals.tickcount(),
-        -- fire_time/total_hits: lets on_aim_miss tell a real resolver miss
+        -- fire_time/srv_hits: lets on_aim_miss tell a real resolver miss
         -- apart from a stale/timed-out event or a server-side hit that got
         -- reported as a client-side miss (see on_aim_miss).
         fire_time  = globals.realtime(),
-        total_hits = me and (entity.get_prop(me, "m_totalHitsOnServer") or 0) or 0,
+        srv_hits = me and (entity.get_prop(me, "m_totalHitsOnServer") or 0) or 0,
     }
 end
 
@@ -2022,6 +2052,7 @@ local function on_aim_hit(e)
     local rec = d.s64 and REC[d.s64]
 
     if rec then
+        rec.total_hits       = rec.total_hits + 1
         rec.resolver_misses = 0
         rec.conf            = math.min(rec.conf + 0.06, 1.0)
         rec.kills           = rec.kills + 1
@@ -2090,7 +2121,7 @@ local function on_aim_miss(e)
     local reason  = e.reason or "?"
     local me      = entity.get_local_player()
     local is_dmg_rejected = reason == "?" and me
-        and (d.total_hits or 0) ~= (entity.get_prop(me, "m_totalHitsOnServer") or 0)
+        and (d.srv_hits or 0) ~= (entity.get_prop(me, "m_totalHitsOnServer") or 0)
 
     if is_timeout or is_dmg_rejected then
         if ui.get(ui_verb) then
@@ -2100,6 +2131,11 @@ local function on_aim_miss(e)
         end
         SHOTS[e.id] = nil
         return
+    end
+
+    do
+        local rec = d.s64 and REC[d.s64]
+        if rec then rec.total_misses = rec.total_misses + 1 end
     end
 
     local is_resolver = reason == "?" or reason == "" or reason == "prediction error"
@@ -2322,10 +2358,16 @@ local function DrawOverlay()
     if not ui.get(ui_on) or not ui.get(ui_esp) then return end
 
     -- ── Gather content ────────────────────────────────────────────────
+    -- total_hits/total_misses (every real outcome) -- NOT hit_count
+    -- (head/neck-confirmed only) or resolver_misses (non-vuln only). Those
+    -- two drive internal resolver logic and were never meant to be a
+    -- hit/miss scoreboard; using them here undercounted misses badly,
+    -- since most misses happen during vuln windows and resolver_misses
+    -- deliberately excludes those.
     local mh, mm = 0, 0
     for _, r in pairs(REC) do
-        mh = mh + (r.hit_count or 0)
-        mm = mm + (r.resolver_misses or 0)
+        mh = mh + (r.total_hits or 0)
+        mm = mm + (r.total_misses or 0)
     end
     local total  = mh + mm
     local hr_str = total > 0
@@ -2499,5 +2541,5 @@ client.set_event_callback("level_init",  EndMatch)
 client.set_event_callback("shutdown",    FullShutdown)
 client.set_event_callback("disconnect",  FullShutdown)
 
-info("init", "RIFTVEIL v2.3 loaded -- commands: rv_stats  rv_db  rv_clear  rv_reset")
+info("init", "RIFTVEIL v" .. RV_VERSION .. " loaded -- commands: rv_stats  rv_db  rv_clear  rv_reset")
 flush_log()
