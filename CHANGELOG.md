@@ -3,6 +3,26 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.3 – Weapon aim policy, built (Detection › Weapon aim, on once).
+          v8.2 only logged weapon data and probed the fields; this acts.
+          PREFER BODY when one body shot kills: enemy HP <= our weapon's
+          chest damage after armor, minus 8% for range falloff. AWP
+          always, scout <= 68 HP, R8 <= 73, auto <= 60, deagle <= 53,
+          pistols <= 22. A lethal body shot doesn't depend on the desync
+          side; a head shot does.
+          SAFE POINT after two resolver misses in a row on a player (reset
+          by a head hit only), outside vulnerability windows: two misses
+          say our side is wrong, and safe points hit whatever the side.
+          Otherwise the ragebot's own per-weapon config. Head is never
+          taken away: only "prefer" and "On" are written, never "Force".
+          FIELDS verified at run time: the first "On" written is read
+          back; a missing field or different value switches the policy
+          off for the session and logs why ([aim] lines).
+          Shot lines log pol=; the panel's INFO row shows BODY / SAFE PT;
+          log_report adds BY AIM POLICY (overall and per weapon).
+          Tests: 10 policy cases (every weapon, armor, miss streak, vuln
+          window); the harness now holds an AWP, checks writes are only
+          "-" or "On"; its bit.band mock handles real masks.
   v8.2 – Progress saved; condition detection, speed, weapon data back.
           SAVED: versions/ holds v6.2, v7.9 and v8.1 as files (the git
           proxy refuses tags); docs/ROADMAP.md lists every feature, what

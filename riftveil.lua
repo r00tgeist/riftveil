@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v8.2  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v8.3  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · cheat revealer · per-cheat method trust
 -- ════════════════════════════════════════════════════════════════════
@@ -12,6 +12,8 @@
 --  v8.2 – Condition detection by physics, cached player-list writes,
 --          rv_perf, weapon/target logging, aim-field probe. Status and
 --          next steps: docs/ROADMAP.md.
+--  v8.3 – Weapon aim policy: prefer body when one body shot kills, safe
+--          point after two resolver misses in a row, fields verified.
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
 --    v6.2 – Senior resolver-review pass #3, focused on resolver-domain
@@ -691,7 +693,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.2"
+local RV_VERSION = "8.3"
 
 local ffi = require "ffi"
 
@@ -896,12 +898,12 @@ local function TitleText()
 end
 
 local DET_KEYS  = {["Vulnerability"] = "vuln", ["Hit memory"] = "hitmem", ["Desync angle"] = "six",
-                   ["Cheat profiles"] = "cheat"}
+                   ["Cheat profiles"] = "cheat", ["Weapon aim"] = "aim"}
 local IND_KEYS  = {["Info panel"] = "panel", ["ESP flags"] = "esp", ["Shift marker"] = "shift"}
 
 local ui_title  = ui.new_label      ("LUA", "B", TitleText())
 local ui_on     = ui.new_checkbox   ("LUA", "B", "Resolver\nriftveil")
-local ui_detect = ui.new_multiselect("LUA", "B", "Detection\nriftveil", {"Vulnerability", "Hit memory", "Desync angle", "Cheat profiles"})
+local ui_detect = ui.new_multiselect("LUA", "B", "Detection\nriftveil", {"Vulnerability", "Hit memory", "Desync angle", "Cheat profiles", "Weapon aim"})
 local ui_tight  = ui.new_checkbox   ("LUA", "B", "Tight interpolation\nriftveil")
 local ui_ind    = ui.new_multiselect("LUA", "B", "Indicators\nriftveil", {"Info panel", "ESP flags", "Shift marker"})
 local ui_verb   = ui.new_checkbox   ("LUA", "B", "Debug log\nriftveil")
@@ -933,10 +935,21 @@ if not database.read("riftveil_ui_defaults_v81") then
     database.write("riftveil_ui_defaults_v81", true)
 end
 
+-- v8.3: "Weapon aim" (WEAPON AIM POLICY) added once to the selection.
+if not database.read("riftveil_ui_defaults_v83") then
+    local sel = ui.get(ui_detect)
+    sel = type(sel) == "table" and sel or {}
+    local copy, has = {}, false
+    for i = 1, #sel do copy[i] = sel[i]; if sel[i] == "Weapon aim" then has = true end end
+    if not has then copy[#copy + 1] = "Weapon aim" end
+    ui.set(ui_detect, copy)
+    database.write("riftveil_ui_defaults_v83", true)
+end
+
 -- Multiselect values cached as booleans: ui.get on a multiselect builds a
 -- fresh table, and ProcessPlayer/paint would otherwise pay for that on
 -- every read. Refreshed by the callbacks below and once per net update.
-local DET = {vuln = false, hitmem = false, six = false, cheat = false, verbose = false}
+local DET = {vuln = false, hitmem = false, six = false, cheat = false, aim = false, verbose = false}
 local IND = {panel = false, esp = false, shift = false}
 local function ReadMulti(ref, keys, out)
     for _, k in pairs(keys) do out[k] = false end
@@ -3338,6 +3351,92 @@ end
 -- ══════════════════════════════════════════════════════════════════
 --  UPDATE  — orchestration loop
 -- ══════════════════════════════════════════════════════════════════
+-- ══════════════════════════════════════════════════════════════════
+--  WEAPON AIM POLICY  (Detection > Weapon aim)
+--
+--  Per enemy, per tick, one of three: ragebot default ("-"), prefer body,
+--  or head on safe points. Head is never taken away -- "prefer body aim"
+--  still shoots the head when no body point is hittable, and nothing here
+--  ever sets "Force". The ragebot's own per-weapon configs stay the base.
+--
+--  PREFER BODY when one body shot kills: enemy HP <= chest damage of our
+--  weapon after armor, with an 8% margin for range falloff (CS:GO weapon
+--  data, same numbers as tools/aim_model.lua). In practice:
+--      AWP     always (112 armored)        scout   <= 68 HP
+--      R8      <= 73 HP                    auto    <= 60 HP
+--      deagle  <= 53 HP                    pistols <= 22 HP
+--  A body shot that kills doesn't care which side the desync is on; a
+--  head shot does. That is the whole case for body when it's lethal.
+--
+--  SAFE POINT after two resolver misses in a row on that player (reset by
+--  a head hit, not a body hit -- a body hit says nothing about the side):
+--  two misses are evidence our side is wrong, and a safe point is a point
+--  that is hit whatever the side is. Not during a vulnerability window,
+--  where the correction is read, not guessed.
+--
+--  The player-list fields are verified at run time: the first "On" we
+--  write is read back; if the field is missing or holds something else,
+--  the policy switches itself off for the session and logs why.
+-- ══════════════════════════════════════════════════════════════════
+local WEAPON_CLASS = {
+    [9] = "awp", [40] = "scout", [11] = "auto", [38] = "auto",
+    [64] = "r8", [1] = "deagle",
+    [4] = "pistol", [61] = "pistol", [32] = "pistol", [36] = "pistol",
+    [3] = "pistol", [30] = "pistol", [63] = "pistol", [2] = "pistol",
+}
+local function LocalWeaponClass()
+    local me = entity.get_local_player()
+    local w = me and entity.get_player_weapon(me)
+    local idx = w and entity.get_prop(w, "m_iItemDefinitionIndex")
+    if type(idx) ~= "number" then return "?" end
+    return WEAPON_CLASS[bit.band(idx, 0xFFFF)] or "other"
+end
+
+-- {base damage, armor penetration}; chest multiplier 1
+local BODY_DMG = {awp = {115, 0.975}, scout = {88, 0.85}, auto = {80, 0.825},
+                  r8 = {86, 0.932}, deagle = {63, 0.932}, pistol = {35, 0.70}}
+local AIM_F_BODY, AIM_F_SP = "Override prefer body aim", "Override safe point"
+local AIM = {ok = nil}   -- nil: not verified yet, true: verified, false: off
+
+local function AimWrite(ent, field, v)
+    if AIM.ok == false then return end
+    local okw = pcall(PSet, ent, field, v)
+    if not okw then
+        AIM.ok = false
+        warn("aim", "writing %s failed -- weapon aim policy off this session", field)
+    elseif AIM.ok == nil and v ~= "-" then
+        local okg, back = pcall(plist.get, ent, field)
+        AIM.ok = okg and back == v
+        info("aim", "%s: wrote %s, read back %s -- %s", field, v, tostring(back),
+             AIM.ok and "policy active" or "policy off this session")
+        if not AIM.ok then pcall(plist.set, ent, field, "-") end
+    end
+end
+
+local function AimPolicyFor(rec, ent, wpn)
+    local bd = BODY_DMG[wpn]
+    if not bd then return "-" end
+    local hp    = tonumber(entity.get_prop(ent, "m_iHealth")) or 100
+    local armor = tonumber(entity.get_prop(ent, "m_ArmorValue")) or 0
+    local body  = bd[1] * (armor > 0 and bd[2] or 1) * 0.92
+    if hp > 0 and hp <= body then return "body" end
+    if rec and (rec.aim_miss_streak or 0) >= 2 and rec.vuln_ttl == 0 then return "sp" end
+    return "-"
+end
+
+local function AimPolicyTick()
+    local wpn = DET.aim and LocalWeaponClass() or nil
+    for i = 1, #LIVE_ENEMIES do
+        local ent = LIVE_ENEMIES[i]
+        local s64 = EIDX_S64[ent]
+        local rec = s64 and REC[s64]
+        local pol = wpn and AimPolicyFor(rec, ent, wpn) or "-"
+        if rec then rec.aim_pol = pol end
+        AimWrite(ent, AIM_F_BODY, pol == "body" and "On" or "-")
+        AimWrite(ent, AIM_F_SP,   pol == "sp"   and "On" or "-")
+    end
+end
+
 -- Read by the info panel and ESP flags (paint runs every frame; these only
 -- change once per net update or on a shot event).
 local ESP_VLN, ESP_RES = {}, {}
@@ -3411,6 +3510,7 @@ local function Update()
         end
     end
     CTX.threat = ctx.threat
+    AimPolicyTick()
     UpdateEspState()
     STATE_VER = STATE_VER + 1
 
@@ -3435,36 +3535,6 @@ end
 -- ══════════════════════════════════════════════════════════════════
 --  SHOT FEEDBACK
 -- ══════════════════════════════════════════════════════════════════
--- Local weapon class, logged on every shot (wpn=) for the per-weapon aim
--- policy (docs/WEAPON_PLAN.md): item definition indexes of the guns that
--- matter in HvH; anything else logs as "other".
-local WEAPON_CLASS = {
-    [9] = "awp", [40] = "scout", [11] = "auto", [38] = "auto",
-    [64] = "r8", [1] = "deagle",
-    [4] = "pistol", [61] = "pistol", [32] = "pistol", [36] = "pistol",
-    [3] = "pistol", [30] = "pistol", [63] = "pistol", [2] = "pistol",
-}
-local function LocalWeaponClass()
-    local me = entity.get_local_player()
-    local w = me and entity.get_player_weapon(me)
-    local idx = w and entity.get_prop(w, "m_iItemDefinitionIndex")
-    if type(idx) ~= "number" then return "?" end
-    return WEAPON_CLASS[bit.band(idx, 0xFFFF)] or "other"
-end
-
--- Aim policy step 1 (docs/WEAPON_PLAN.md): do the player-list override
--- fields exist, and what do they hold? Read once per session on the first
--- shot and logged; nothing is written to them yet.
-local AIM_FIELDS_PROBED = false
-local function ProbeAimFields(ent)
-    if AIM_FIELDS_PROBED then return end
-    AIM_FIELDS_PROBED = true
-    for _, f in ipairs({"Override prefer body aim", "Override safe point", "Force body aim"}) do
-        local ok, v = pcall(plist.get, ent, f)
-        info("aimfield", "%s: %s", f, ok and ("exists, value=" .. tostring(v)) or ("missing (" .. tostring(v) .. ")"))
-    end
-end
-
 -- aim_fire's backtrack, in ticks. The docs call it ticks but their example
 -- converts it as seconds; the two ranges can't overlap (seconds < 1 under
 -- sv_maxunlag, a nonzero tick count >= 1), so both read correctly. v6.2 ran
@@ -3492,8 +3562,9 @@ local function on_aim_fire(e)
         aa      = r and r.aa_type   or AA.UNKNOWN,
         state   = r and r.state     or nil,  -- movement state at fire time, for per-condition hit_mem
         cheat   = r and r.cheat     or nil,  -- enemy cheat (CHEAT REVEALER), logged
-        -- per-weapon aim policy inputs (logged only)
+        -- per-weapon aim policy: inputs and the choice in effect
         wpn     = LocalWeaponClass(),
+        pol     = r and r.aim_pol or "-",
         aim_hg  = tonumber(e.hitgroup) or -1,
         aim_dmg = isnum(e.damage) and math.floor(e.damage) or -1,
         thp     = tonumber(entity.get_prop(t, "m_iHealth")) or -1,
@@ -3520,7 +3591,6 @@ local function on_aim_fire(e)
     if r and r.vuln_ttl > 0 and r.vuln_type and r.vuln_profile[r.vuln_type] then
         r.vuln_profile[r.vuln_type].seen = r.vuln_profile[r.vuln_type].seen + 1
     end
-    ProbeAimFields(t)
     -- Shot counter for CheatTrusts' probe (every 4th shot at a player)
     if r then r.shots_fired = (r.shots_fired or 0) + 1 end
 end
@@ -3568,7 +3638,10 @@ local function on_aim_hit(e)
         -- comment says it's guarding against.
         local is_head = e.hitgroup == 1 or e.hitgroup == 8
         -- A head hit confirms the method that was applied, for this cheat
-        if is_head then CheatCredit(d.cheat, d.meth, true) end
+        if is_head then
+            CheatCredit(d.cheat, d.meth, true)
+            rec.aim_miss_streak = 0
+        end
         if d.side ~= 0 and is_head then
             rec.hit_side  = d.flip and -d.side or d.side
             rec.hit_count = rec.hit_count + 1
@@ -3615,11 +3688,11 @@ local function on_aim_hit(e)
         end
     end
 
-    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s wpn=%s hp=%d ar=%d aim=%s pdmg=%d cf=%.2f%s%s",
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s wpn=%s pol=%s hp=%d ar=%d aim=%s pdmg=%d cf=%.2f%s%s",
         entity.get_player_name(e.target) or "?",
         HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
         isnum(e.damage) and math.floor(e.damage) or 0,
-        d.meth, d.val, d.bt, d.state or "?", d.wpn or "?", d.thp or -1, d.tarm or -1,
+        d.meth, d.val, d.bt, d.state or "?", d.wpn or "?", d.pol or "-", d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
@@ -3684,15 +3757,19 @@ local function on_aim_miss(e)
 
     local is_resolver = reason == "?" or reason == "" or reason == "prediction error"
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s wpn=%s hp=%d ar=%d aim=%s pdmg=%d cf=%.2f%s%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s wpn=%s pol=%s hp=%d ar=%d aim=%s pdmg=%d cf=%.2f%s%s",
         entity.get_player_name(e.target) or "?",
-        reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.wpn or "?", d.thp or -1, d.tarm or -1,
+        reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.wpn or "?", d.pol or "-", d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
 
     if is_resolver then
         CheatCredit(d.cheat, d.meth, false)
+        do
+            local rr = d.s64 and REC[d.s64]
+            if rr then rr.aim_miss_streak = (rr.aim_miss_streak or 0) + 1 end
+        end
         local rec = d.s64 and REC[d.s64]
         if rec then
             -- BUILT-IN FAIL TRACKING (meta_aggressive counter):
@@ -4049,6 +4126,8 @@ local function BuildOverlay(OV, threat)
 
         local tags = {}
         if rec.cheat then tags[#tags+1] = string.upper(rec.cheat) end
+        -- weapon aim policy in effect on this enemy
+        if rec.aim_pol == "body" then tags[#tags+1] = "BODY" elseif rec.aim_pol == "sp" then tags[#tags+1] = "SAFE PT" end
         if rec.preferred_bt > 0 then tags[#tags+1] = "BT " .. rec.preferred_bt end
         if rec.config_type and rec.config_conf >= CFG.CFG_THRESH then
             tags[#tags+1] = string.upper((rec.config_type:gsub("_", " ")))
@@ -4291,6 +4370,10 @@ local function ResetPlist()
             plist.set(i, "Correction active", false)
             plist.set(i, "High priority", false)
         end)
+        if AIM.ok then
+            pcall(plist.set, i, AIM_F_BODY, "-")
+            pcall(plist.set, i, AIM_F_SP, "-")
+        end
     end
     PL_CACHE = {}; PL_KNOWN = {}
 end

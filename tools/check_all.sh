@@ -76,10 +76,10 @@ luajit tools/cheat_detect_test.lua > "$TMP/cd.txt" 2>&1 && pass "$(grep -c PASS 
 
 echo "8. Log analyzer smoke test"
 printf '%s\n' '[00:00:00.000][INF][init] RIFTVEIL v8.0 loaded' \
-    '[00:00:01.000][INF][hit] player=a b group=head dmg=100 meth=suppress val=-29 bt=0 st=running cht=nl' \
+    '[00:00:01.000][INF][hit] player=a b group=head dmg=100 meth=suppress val=-29 bt=0 st=running wpn=awp pol=body cht=nl' \
     '[00:00:02.000][WRN][miss] player=a b reason=? meth=hit_mem val=31 bt=0 hc=80% st=air cht=nl' > "$TMP/log.txt"
-lua5.3 tools/log_report.lua "$TMP/log.txt" > "$TMP/rep.txt" 2>&1 && grep -q "BY ENEMY CHEAT" "$TMP/rep.txt" \
-    && pass "parses hit/miss/st/cht lines" || fail "log_report"
+lua5.3 tools/log_report.lua "$TMP/log.txt" > "$TMP/rep.txt" 2>&1 && grep -q "BY ENEMY CHEAT" "$TMP/rep.txt" && grep -q "BY AIM POLICY" "$TMP/rep.txt" \
+    && pass "parses hit/miss/st/wpn/pol/cht lines" || fail "log_report"
 
 echo "9. Performance on LuaJIT (2v2: net update + 4 paint frames per tick)"
 line=$(RV_BENCH=2 luajit tools/sandbox_check.lua 2>&1 | grep "^Bench")

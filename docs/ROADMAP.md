@@ -5,7 +5,7 @@ and what comes next. Older versions are kept in `versions/` so none of the
 work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 (the decision engine), `riftveil_v8.1.lua`.
 
-## In the script (v8.2)
+## In the script (v8.3)
 
 | Area | Feature | Changes shots? |
 |---|---|---|
@@ -18,7 +18,7 @@ work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 | Speed | Player-list writes only on change (-68% writes), player list refreshed once a second | no |
 | Logging | Every shot: `st= wpn= hp= ar= aim= pdmg= cf= cht=`; bounded log, flushed each round | no |
 | Tools | `rv_perf` profiler, `rv_stats`, `rv_db`, `rv_save` | no |
-| Weapons | Player-list override fields probed and logged once per session (`[aimfield]`) | no |
+| Weapons | Aim policy: prefer body when one body shot kills, safe point after two resolver misses; fields verified at run time | yes, Detection › Weapon aim |
 
 Every release proves with `tools/check_all.sh` step 7 that, with the
 post-v6.2 features off, the script forces the same side and value as v6.2.
@@ -31,17 +31,17 @@ post-v6.2 features off, the script forces the same side and value as v6.2.
 2. **Does condition detection help?** Compare `st=running` and
    `st=slowmotion` against the v6.2-era logs. If it's worse, set
    `FEATURE.STATE_PHYSICS = false` (one word).
-3. **Do the aim override fields exist?** The log's `[aimfield]` lines say.
-   That unblocks the per-weapon aim policy.
+3. **Is the aim policy active?** The log's `[aim]` lines say whether the
+   player-list fields were verified. `BY AIM POLICY` in log_report shows
+   the kill-relevant hit rate with prefer body / safe point / default.
 4. **Does the cheat revealer fire in game?** Look for `[cheat] player=...`
    lines, and `[cheat] learned ...` after a save.
 
 ## Next, in order
 
-1. **Per-weapon aim policy** (`docs/WEAPON_PLAN.md`): once `[aimfield]`
-   shows the field names, fit the head / safe-point / body constants from
-   the logged `wpn= aim= pdmg= hp=` data and apply soft overrides per
-   weapon. Head is never blocked.
+1. **Aim policy v2** (`docs/WEAPON_PLAN.md`): fit the head / safe-point /
+   body constants from the logged `wpn= pol= aim= pdmg= hp=` data; add
+   two-shot lethal for auto / deagle when time pressure allows.
 2. **Prediction errors not counted as resolver misses** (v6.8). v6.2 flips
    the tracked side on them; it's a candidate once the core is confirmed
    back at v6.2's rate.

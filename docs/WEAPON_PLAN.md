@@ -1,6 +1,6 @@
 # Per-weapon aim policy — implementation plan (v2)
 
-Status: **step 1 built (v8.2): the override fields are probed and logged as `[aimfield]`.** v8.2 logs every input the policy needs
+Status: **built in v8.3** as a first, conservative version (one-shot-lethal prefer body; safe point after two resolver misses; fields verified at run time). The fitted head / safe-point / body model below is the next step, once `pol=` and `wpn=` logs exist.
 (`wpn=`, `hp=`, `ar=`, `aim=`, `pdmg=` on every shot line). One match of
 that data plus an in-game check of the player-list fields come first.
 

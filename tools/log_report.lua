@@ -46,7 +46,7 @@ local function bucket(t, key)
     return b
 end
 
-local by_meth, by_arm, by_player, by_origin, by_state, by_wpn, by_cheat = {}, {}, {}, {}, {}, {}, {}
+local by_meth, by_arm, by_player, by_origin, by_state, by_wpn, by_cheat, by_pol = {}, {}, {}, {}, {}, {}, {}, {}
 local calib = {}          -- decile -> {n, heads, psum}
 local versions, engine_lines, resets = {}, {}, 0
 local brier_n, brier_se = 0, 0
@@ -94,6 +94,14 @@ for _, path in ipairs(files) do
                 -- choices per weapon, the aim model's missing input
                 local aim = line:match(" aim=(.-) pdmg=")
                 if aim then targets[#targets + 1] = bucket(by_wpn, wpn .. " -> " .. aim) end
+            end
+            -- weapon aim policy (v8.3+): prefer body / safe point / default,
+            -- per weapon; body hits count here, since body is the point
+            local pol = field(line, "pol")
+            if pol then
+                local w = field(line, "wpn") or "?"
+                targets[#targets + 1] = bucket(by_pol, pol)
+                targets[#targets + 1] = bucket(by_pol, w .. " -> " .. pol)
             end
             -- enemy cheat x method: which methods work against which cheat
             local cht = field(line, "cht")
@@ -156,6 +164,7 @@ report("BY METHOD (what was applied)", by_meth)
 report("BY MOVEMENT STATE (v7.5+ logs)", by_state)
 report("BY WEAPON (v7.7+ logs)", by_wpn)
 report("BY ENEMY CHEAT (v7.9+ logs, cheat revealer running)", by_cheat)
+report("BY AIM POLICY (v8.3+; body = prefer body, sp = safe point, - = ragebot default)", by_pol)
 report("BY ENGINE ARM", by_arm)
 report("ENGINE OVERRIDES vs CHAIN PICKS", by_origin)
 report("BY PLAYER (5+ shots)", by_player, 5)

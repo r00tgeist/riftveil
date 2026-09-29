@@ -26,7 +26,7 @@ same side with the same value as v6.2 (`tools/check_all.sh`, step 7).
 | Row | What it does |
 |---|---|
 | **Resolver** | Master switch. Off releases every player back to the built-in resolver. |
-| **Detection** | Vulnerability windows, Hit memory, Desync angle (6lex), Cheat profiles. |
+| **Detection** | Vulnerability windows, Hit memory, Desync angle (6lex), Cheat profiles, Weapon aim. |
 | **Tight interpolation** | Low-latency interp cvars while the resolver is on; originals restored when off. |
 | **Indicators** | Info panel, ESP flags (`VLN`, `RES`, enemy cheat), SHIFT marker. |
 | **Debug log** | Verbose `riftveil_debug.txt` (the log is always written; this adds per-tick detail). |
@@ -40,6 +40,16 @@ Console: `rv_stats`, `rv_db`, `rv_perf`, `rv_save`, `rv_clear`, `rv_reset`, `rv_
 
 Status of every feature, what's waiting on a match log, and what comes
 next: `docs/ROADMAP.md`. Earlier versions are kept in `versions/`.
+
+## Weapon aim
+
+Per enemy, per tick: **prefer body** when one body shot from your weapon
+kills (AWP always, scout at 68 HP or less, R8 73, auto 60, deagle 53,
+pistols 22 -- after armor), **safe point** after two resolver misses in a
+row on that player, otherwise your ragebot config as it is. Head stays
+available: nothing is ever forced. The player-list fields are checked the
+first time they're used; if they don't behave, the policy turns itself off
+for the session and says so in the log.
 
 ## Cheat-based resolving
 

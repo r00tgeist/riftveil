@@ -41,6 +41,12 @@ local FUZZ_SEED = tonumber(os.getenv("RV_FUZZ") or "")
 local PLIST_BAD, PLIST_BAD_N = {}, 0
 local NO_ENGINE = os.getenv("RV_NO_ENGINE") ~= nil
 local PLIST_LOG = {}
+local PLIST_STATE = {}
+-- Values the aim policy may write to gamesense's player-list combo fields
+local AIM_FIELD_VALUES = {
+    ["Override prefer body aim"] = {["-"] = true, ["On"] = true},
+    ["Override safe point"]      = {["-"] = true, ["On"] = true},
+}
 
 -- Functions the scenario is designed to reach. If any of these show zero
 -- executed lines, the harness itself is broken and the run fails.
@@ -60,12 +66,14 @@ local MUST_RUN = os.getenv("RV_MUST_RUN_V7") and {
     "BuildOverlay", "DrawPanel", "FitText", "UpdateDrag", "DrawShiftMarkers", "SetPanelPos",
     "on_aim_fire", "on_aim_hit", "on_aim_miss", "FlushDB",
     "TorsoCluster", "ExtrapolateOrigin", "clear_log",
+    "AimPolicyTick", "AimPolicyFor", "AimWrite", "LocalWeaponClass",
 }
 
 -- ── Mutable world state the mocks read from ──────────────────────────
 local TI = 1 / 64
 local W = {
     tick = 100, real = 0, srv_hits = 0, threat = 101, menu_open = false,
+    weapon = 9,   -- AWP in hand: the weapon aim policy has work to do
     players = {
         [101] = {sim = 0, vx = 0, vy = 0, pose01 = 0.5, eye = 45, duck = 0,
                  torso = 70, gfy = 60},
@@ -184,6 +192,7 @@ local mock = {
             return s and (W.tick * 0.5 + (s.jump or 0)) or 0, 0, 0
         end end
         if k == "hitbox_position"  then return function() return 100, 0, 64 end end
+        if k == "get_player_weapon" then return function() return W.weapon and 900 or nil end end
         if k == "get_prop" then
             return function(ent, prop, idx)
                 local p = W.players[ent]
@@ -197,6 +206,9 @@ local mock = {
                 if prop == "m_vecMaxs"          then return 16, 16, 72 end
                 if prop == "m_vecViewOffset"    then return 0, 0, 64 end
                 if prop == "m_nTickBase"        then return W.tick end
+                if prop == "m_iHealth"          then return p and p.hp or 100 end
+                if prop == "m_ArmorValue"       then return p and p.armor or 100 end
+                if prop == "m_iItemDefinitionIndex" then return ent == 900 and W.weapon or 0 end
                 return 0
             end
         end
@@ -261,7 +273,16 @@ local mock = {
         return function() return 0 end
     end}),
     bit = setmetatable({}, {__index = function(_, k)
-        if k == "band" then return function(a, b) return (a % (2 * b) >= b) and b or 0 end end
+        if k == "band" then return function(a, b)
+            -- general bitwise AND on non-negative integers (flags, masks)
+            local r, bitv = 0, 1
+            a, b = math.floor(a), math.floor(b)
+            while a > 0 and b > 0 do
+                if a % 2 == 1 and b % 2 == 1 then r = r + bitv end
+                a, b, bitv = math.floor(a / 2), math.floor(b / 2), bitv * 2
+            end
+            return r
+        end end
         return function() return 0 end
     end}),
     plist    = setmetatable({}, {__index = function(_, k)
@@ -271,8 +292,11 @@ local mock = {
                     PLIST_LOG[#PLIST_LOG + 1] = string.format("%d\t%s\t%s\t%s", W.tick, tostring(ent), field, tostring(value))
                 end
                 local bad
+                PLIST_STATE[tostring(ent) .. "\t" .. field] = value
                 if field == "Force body yaw value" then
                     if type(value) ~= "number" or value ~= value or math.abs(value) > 60 then bad = true end
+                elseif AIM_FIELD_VALUES[field] then
+                    if not AIM_FIELD_VALUES[field][value] then bad = true end
                 elseif type(value) ~= "boolean" then
                     bad = true
                 end
@@ -282,6 +306,14 @@ local mock = {
                         PLIST_BAD[#PLIST_BAD + 1] = string.format("tick %d ent %s %s = %s", W.tick, tostring(ent), field, tostring(value))
                     end
                 end
+            end
+        end
+        -- get returns what set stored, "-" for an aim field never written
+        if k == "get" then
+            return function(ent, field)
+                local v = PLIST_STATE[tostring(ent) .. "\t" .. field]
+                if v == nil and AIM_FIELD_VALUES[field] then return "-" end
+                return v
             end
         end
         return function() end
@@ -927,6 +959,40 @@ do
         if fresh ~= 10 then UNIT_FAIL[#UNIT_FAIL + 1] = string.format("DB cap: pruned %d of this match's 10 profiles", 10 - fresh) end
         for i = 1, 10 do REC_T["new" .. i] = nil end
         if n == 500 and fresh == 10 then UNIT_OK = "DB cap: 610 profiles -> 500, this match's 10 kept" end
+    end
+end
+
+-- WEAPON AIM POLICY: prefer body only when one body shot kills, safe point
+-- after two resolver misses in a row, the ragebot's default otherwise.
+do
+    local POL = probe("AimPolicyFor")
+    if POL then
+        local P = {}
+        W.players[950] = P
+        local cases = {
+            -- weapon, hp, armor, miss streak, vuln ttl, expected
+            {"awp", 100, 100, 0, 0, "body"},
+            {"scout", 100, 100, 0, 0, "-"},
+            {"scout", 60, 100, 0, 0, "body"},
+            {"scout", 72, 0, 0, 0, "body"},     -- unarmored: 88 * 0.92 = 81
+            {"auto", 61, 100, 0, 0, "-"},
+            {"auto", 60, 100, 0, 0, "body"},
+            {"deagle", 100, 100, 2, 0, "sp"},
+            {"deagle", 100, 100, 2, 3, "-"},    -- vulnerability window open
+            {"pistol", 20, 100, 0, 0, "body"},
+            {"other", 10, 100, 5, 0, "-"},      -- knife/nade/unknown: default
+        }
+        for i, c in ipairs(cases) do
+            P.hp, P.armor = c[2], c[3]
+            local got = POL({aim_miss_streak = c[4], vuln_ttl = c[5]}, 950, c[1])
+            if got ~= c[6] then
+                UNIT_FAIL[#UNIT_FAIL + 1] = string.format("AimPolicyFor case %d (%s hp %d): got %s, expected %s",
+                    i, c[1], c[2], tostring(got), c[6])
+            end
+        end
+        W.players[950] = nil
+    elseif not os.getenv("RV_TARGET") then
+        UNIT_FAIL[#UNIT_FAIL + 1] = "AimPolicyFor not reachable"
     end
 end
 
