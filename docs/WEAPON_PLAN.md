@@ -1,90 +1,95 @@
-# Per-weapon aim policy — implementation plan
+# Per-weapon aim policy — implementation plan (v2)
 
-Status: **plan, not implemented.** v7.7 only adds the logging this plan
-needs (`wpn=`, `hp=`, `ar=` on every shot line). It needs one match log
-with that data, plus one in-game check, before any code goes in.
+Status: **plan, not implemented.** v7.8 logs every input the policy needs
+(`wpn=`, `hp=`, `ar=`, `aim=`, `pdmg=` on every shot line). One match of
+that data plus an in-game check of the player-list fields come first.
 
-## The idea
+## Principle
 
-Choosing hitboxes is the ragebot's job, and gamesense already has
-per-weapon configs (RAGE › Weapon type): hitboxes, body-aim preference,
-minimum damage per AWP / scout / auto / R8 / deagle / pistols. RIFTVEIL
-must not duplicate that.
+The head is always an option. Nothing in this design forbids it; the
+policy only *leans* the ragebot per enemy, per tick, through soft
+player-list overrides (prefer body, prefer safe point), never "force
+body". gamesense's own per-weapon configs (RAGE › Weapon type) stay the
+baseline; RIFTVEIL adds the one input the ragebot lacks: how sure the
+resolver is about this enemy's head right now.
 
-What the ragebot does **not** know is how sure the *resolver* is about a
-given enemy's head right now. RIFTVEIL does: the decision engine keeps a
-posterior head chance `p` for the correction it applies to each enemy.
-So the per-weapon policy is a per-enemy **risk gate**:
+## The decision, derived — not hand-picked
 
-> Take the head shot only when this weapon needs it *and* the resolver is
-> sure enough; otherwise push the ragebot to the body or to safe points —
-> through the player-list overrides, per enemy, per tick.
+`tools/aim_model.lua` computes, per weapon, enemy HP, body exposure and
+resolver certainty `p`, which option maximizes the probability of killing
+within one peek (~0.6 s), with each later kill discounted when the enemy
+shoots back:
 
-## Inputs, per enemy, per tick
-
-| Input | Source |
-|---|---|
-| Weapon class | local weapon's `m_iItemDefinitionIndex` (already logged) |
-| Resolver certainty `p` | `ENG.Post(rec.E, rec.eng_arm, rec.state)`; `rec.conf` when the engine is off; 1.0 inside a vulnerability window with a trusted type |
-| Enemy health / armor | `m_iHealth`, `m_ArmorValue` (already logged) |
-| Body lethal? | enemy health ≤ weapon body damage after armor (table below) |
-
-## Weapon table (CS:GO weapon data; verify from logs)
-
-Body damage = base × armor penetration when armored. Head ×4, stomach
-×1.25, legs ×0.75. Range falloff ignored (HvH distances).
-
-| Class | Base | Armor pen. | Chest vs armor | Head vs armor |
-|---|---|---|---|---|
-| AWP | 115 | 97.5% | ~112 → **lethal** | lethal |
-| Scout | 88 | 85% | ~75 | lethal |
-| Auto (G3/SCAR) | 80 | 82.5% | ~66 | lethal |
-| R8 | 86 | 93.2% | ~80 | lethal |
-| Deagle | 63 | 93.2% | ~59 | lethal |
-| Pistols | 30–40 | 47–93% | 15–35 | often not lethal |
-
-These numbers are from memory of the game's weapon data. The shot logs
-will confirm or correct them: every hit logs `dmg=`, `group=`, `wpn=`, `ar=`.
-
-## Policy (starting point, tuned from logs)
-
-| Class | Head when | Otherwise |
+| Option | Hit chance per shot | When it wins |
 |---|---|---|
-| AWP | never needed: body is lethal | force body |
-| Scout | `p ≥ 0.80` | body if lethal, else safe point |
-| Auto | `p ≥ 0.85` (fires fast; a body shot costs little) | prefer body + limbs |
-| R8 | `p ≥ 0.80` | body if lethal (≤ ~80 hp), else safe point |
-| Deagle | `p ≥ 0.75` | body if lethal (≤ ~59 hp), else safe point |
-| Pistols | `p ≥ 0.70` (body rarely kills) | safe point head |
+| **head** | `geo_head × p` | resolver sure enough |
+| **head, safe point** | `geo_sp` (side-proof, smaller area) | head needed but resolver unsure |
+| **prefer body** | `geo_body(exposure) × 0.95` | body lethal within the peek *and* exposed |
 
-"Sure without delay": the gate reads `p` fresh every tick, so the
-ragebot fires the moment the condition holds — no timers.
+What comes out (armor + helmet; full table: run the model):
 
-## Implementation steps
+1. **Head vs head-on-safe-points is one ratio.** Head beats safe points
+   exactly when `p > geo_sp / geo_head`. With the placeholder values
+   (0.60 / 0.85) that is p > 0.71 for *every* weapon — so the most
+   important number in the whole policy is how much hit chance safe
+   points cost versus a normal head shot. It must be measured, not
+   assumed (step 2).
+2. **Body only when it is lethal within the peek and visible.**
+   - AWP, body fully open: body (112 dmg kills). Partial or head-only
+     exposure: head, on safe points when unsure.
+   - Scout: body only at ≤ ~74 HP; above that, head / head-sp.
+   - R8: body at ≤ ~80 HP.
+   - Auto, deagle at full HP: body wins only with no time pressure (2-3
+     hits). When the enemy shoots back, one head hit now beats two body
+     hits 0.25 s later → head / head-sp.
+   - Pistols: head / head-sp almost always.
+3. **Exposure decides as much as the weapon.** "Full open" is what makes
+   body viable; a head-first peek over cover makes body worthless no
+   matter the weapon.
 
-1. **Verify the plist fields in game (blocker).** On load, try
-   `plist.get(ent, "Override prefer body aim")` and `"Override safe point"`
-   inside `pcall` and log the result and the value type. The only source
-   for these names so far is an obfuscated script — not good enough to
-   build on.
-2. **Collect one match with v7.7.** `tools/log_report.lua` now reports
-   head rate per weapon; add body-damage-per-weapon and lethal-body
-   checks to confirm the table above.
-3. **Implement `AimGate(rec, weapon)`** in the ApplyDecision stage: pure
-   function → {body = "-"/"on"/"force", safepoint = "-"/"on"}, written
-   through `PSet` (cached, so no extra plist writes when nothing changes).
-4. **Menu:** one new Detection item, "Weapon aim gate", off by default
-   until step 5.
-5. **Measure:** log the gate's decision per shot (`gate=body|head|sp`),
-   compare head/body kill rates per weapon with the gate on vs off.
-6. **Tests:** unit test the policy table, fuzz the new plist writes
-   (values must be one of the allowed strings), differential test that
-   with the gate off plist writes are unchanged.
+## Inputs, per enemy, per tick (threat only, to stay cheap)
+
+| Input | Source | Cost |
+|---|---|---|
+| weapon class | local weapon item index | 2 API calls |
+| resolver certainty `p` | engine posterior of the applied arm; 1.0 in a trusted vuln window | none |
+| HP, armor, helmet | `m_iHealth`, `m_ArmorValue`, `m_bHasHelmet` | 3 props |
+| exposure | `client.trace_bullet` from our eye to head and chest: estimated damage vs open-air damage | 2 traces, threat only |
+| time pressure | enemy weapon class and whether we're in their view | cheap props |
+
+## Measured constants (from logs, not guessed)
+
+| Constant | How |
+|---|---|
+| `geo_head`, `geo_body` | hit rate by `wpn` × `aim=` hitgroup on shots with a right side (head hits confirm side) |
+| `geo_sp` | same, on shots taken with the safe-point override on (step 4 logs it) |
+| weapon damage table | `dmg=` by `group=`, `wpn=`, `ar=` |
+| peek length | time between first aim_fire and loss of the target |
+
+## Steps
+
+1. **Verify the player-list fields in game.** `pcall(plist.get, ent,
+   "Override prefer body aim")` / `"Override safe point"`: log existence
+   and accepted values. The only source for the names so far is an
+   obfuscated script — not enough to build on.
+2. **Collect a v7.8 match; fit the constants** above with an extension of
+   `tools/log_report.lua`; rerun `aim_model.lua` with the fitted values.
+3. **Implement `AimPolicy(rec, weapon, exposure)`** in the ApplyDecision
+   stage, a pure function returning one of `head`, `head_sp`, `body`,
+   mapped to soft overrides through `PSet` (cached writes). Head is never
+   blocked.
+4. **Log the decision** per shot (`pol=head|sp|body`) so the kill rate of
+   each choice can be compared per weapon.
+5. **Menu:** Detection › "Weapon aim policy", off by default until the
+   first measured match.
+6. **Tests:** unit-test the policy against `aim_model.lua`'s table;
+   fuzz the new plist writes (allowed values only); differential test
+   that with the policy off nothing changes.
 
 ## Risks
 
-- The field names or values may differ → step 1 exists for that.
-- Forcing body against an enemy whose body is hard to hit (behind cover)
-  can cost shots the ragebot would have taken at the head: the gate only
-  applies while that enemy's head is *not* sure, and safe point (not
-  force body) is the default fallback for non-lethal weapons.
+- Field names or values differ → step 1.
+- The placeholder `geo_sp / geo_head` ratio decides the head/safe-point
+  split everywhere → nothing ships before step 2 measures it.
+- Exposure traces cost time → threat only, once per tick, and skipped
+  when no shot is possible.

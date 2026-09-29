@@ -3,6 +3,16 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v7.8 – Per-weapon aim policy: model and data, no behaviour change.
+          tools/aim_model.lua derives when head, head-on-safe-points or
+          prefer-body kills fastest, per weapon, enemy HP, body exposure
+          and resolver certainty, with kills discounted when the enemy
+          shoots back. Head stays available everywhere; body wins only
+          when lethal within the peek and exposed; head vs safe points is
+          decided by the ratio of their hit chances, which must be
+          measured. Shot lines now also log the ragebot's aimed hitgroup
+          and predicted damage (aim=, pdmg=); log_report breaks weapons
+          down by aimed hitgroup. Plan rewritten: docs/WEAPON_PLAN.md.
   v7.7 – Logs that contain the match; weapon data for per-weapon aim.
           The first v7.6 log sent in held no shots: the log reached disk
           only every 2048 lines or at match end, so a match with Debug

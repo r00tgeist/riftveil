@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v7.7  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v7.8  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · config recognition · vulnerability windows
 --  Adaptive decision engine · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
@@ -22,7 +22,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "7.7"
+local RV_VERSION = "7.8"
 
 local ffi = require "ffi"
 
@@ -3379,6 +3379,11 @@ local function on_aim_fire(e)
         teleported   = e.teleported == true,
         hc      = e.hit_chance or 0,
         wpn     = LocalWeaponClass(),
+        -- What the ragebot aimed at and expected to deal (aim_fire fields),
+        -- so logs show hit rate per weapon and aimed hitgroup -- the input
+        -- the per-weapon aim model needs (docs/WEAPON_PLAN.md).
+        aim_hg  = tonumber(e.hitgroup) or -1,
+        aim_dmg = tonumber(e.damage) or -1,
         -- target health/armor at fire time: was a body shot lethal?
         thp     = tonumber(entity.get_prop(t, "m_iHealth")) or -1,
         tarm    = tonumber(entity.get_prop(t, "m_ArmorValue")) or -1,
@@ -3506,11 +3511,12 @@ local function on_aim_hit(e)
         end
     end
 
-    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s wpn=%s hp=%d ar=%d%s%s",
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s wpn=%s hp=%d ar=%d aim=%s pdmg=%d%s%s",
         entity.get_player_name(e.target) or "?",
         HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
         Finite(tonumber(e.damage)) and math.floor(e.damage) or 0,
         d.meth, d.val, d.bt, d.state or "?", d.wpn or "?", d.thp or -1, d.tarm or -1,
+        HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1,
         d.in_vuln and (" !" .. d.vuln_t) or "", EngTag(d))
     SHOTS[e.id] = nil
 end
@@ -3584,9 +3590,10 @@ local function on_aim_miss(e)
     local is_resolver = (reason == "?" or reason == "")
                         and not d.extrapolated and not d.teleported
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s wpn=%s hp=%d ar=%d%s%s%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s wpn=%s hp=%d ar=%d aim=%s pdmg=%d%s%s%s",
         entity.get_player_name(e.target) or "?",
         reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.wpn or "?", d.thp or -1, d.tarm or -1,
+        HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1,
         d.in_vuln and (" !" .. d.vuln_t) or "",
         (d.extrapolated and " [extrap]" or "") .. (d.teleported and " [tele]" or ""),
         EngTag(d))

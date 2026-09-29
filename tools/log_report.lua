@@ -88,7 +88,13 @@ for _, path in ipairs(files) do
             local st = field(line, "st")
             if st then targets[#targets + 1] = bucket(by_state, st) end
             local wpn = field(line, "wpn")
-            if wpn then targets[#targets + 1] = bucket(by_wpn, wpn) end
+            if wpn then
+                targets[#targets + 1] = bucket(by_wpn, wpn)
+                -- weapon x aimed hitgroup: the hit rate of head vs body
+                -- choices per weapon, the aim model's missing input
+                local aim = line:match(" aim=(.-) pdmg=")
+                if aim then targets[#targets + 1] = bucket(by_wpn, wpn .. " -> " .. aim) end
+            end
             if arm then
                 targets[#targets + 1] = bucket(by_arm, arm)
                 targets[#targets + 1] = bucket(by_origin, by and "engine override" or "chain pick")
