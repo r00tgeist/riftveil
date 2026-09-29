@@ -3,6 +3,41 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v7.3 – Engine v2 by measurement, full debugging pass, tooling.
+          ENGINE: per-movement-state context (state -> player -> other
+          players -> prior, each level a capped prior for the next), a
+          Brier-score self-audit with automatic safe mode (margin 0.04 cut
+          the worst simulated scenario from -1.27 to -0.83 points), and a
+          predicted head chance p on every shot line (eng=arm p=0.61).
+          Tried and cut after ablation in tools/engine_sim.lua: per-shot
+          forgetting, a Page-Hinkley config-change detector (0.45 false
+          alarms per stationary player-match) and a coupled per-source
+          sign-accuracy model (+1.3 avg vs +1.9). Per-state evidence is
+          session-only: saving it cost 1.68 MB per autosave at the DB cap
+          (now 208 KB).
+          BUGS FOUND BY THE NEW TESTS:
+          - NA() never returned on inf/huge input (inf - 360 == inf): one
+            corrupt FFI float would freeze the game thread. Bounded now,
+            identical on 2M finite inputs.
+          - GetLat compared the netchannel call's result outside its
+            pcall; a non-number would crash Update every tick. Found by
+            running the harness on LuaJIT for the first time.
+          - Profile keys used tostring(steam64): a 64-bit id in a double
+            prints as 7.6561198e+16 and every player would share one
+            profile. %.0f now; identical keys for real account ids.
+          - Non-finite eye yaw / pose / duck reached the history buffers
+            and Clamp, whose NaN behaviour differs between Lua builds.
+            Input boundary at the sample site; a missing pose now reads as
+            centre (no evidence) instead of a full -60 desync.
+          - Backtrack ticks and damage are sanitized before logging.
+          VERIFICATION: tools/check_all.sh -- syntax on Lua 5.3 and
+          LuaJIT, luacheck 0 warnings, scripted harness on both runtimes,
+          identical plist writes across runtimes (scripted and 8 fuzz
+          worlds, ~720k writes), 200k-tick soak with flat memory, DB-cap
+          unit check, engine sim, log analyzer smoke test.
+          TOOLS: tools/log_report.lua (per-method/arm head rates with
+          Wilson intervals, override record, calibration, range check);
+          README.md.
   v7.2 – Adaptive decision engine; review cleanups.
           ENGINE (Detection > Adaptive engine, on by default): every
           detector's correction becomes a candidate arm (vuln windows,

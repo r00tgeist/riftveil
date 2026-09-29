@@ -44,10 +44,16 @@ local database = {read = function() return nil end}
 local function isnum(v, lo) return type(v) == "number" and v == v and (not lo or v >= lo) end
 ]]
 local ENG = assert(load(prelude .. block .. "\nreturn ENG"))()
+-- Tuning: RV_ENG="FORGET=1,PH_LAMBDA=99" overrides engine constants.
+for k, v in (os.getenv("RV_ENG") or ""):gmatch("([%w_]+)=([%w%.%-%+]+)") do ENG[k] = tonumber(v) end
+RUNS = tonumber(os.getenv("RV_RUNS") or "") or RUNS
 
 math.randomseed(20260929)
+local STATS = {safe = 0}
 local function side() return (math.random() < 0.5) and 1 or -1 end
 
+-- q_* may be a number or a function(state, shot) for context and drift.
+local STATES = {"standing", "running", "air", "crouch"}
 local SCEN = {
     {name = "chain right (logs)",   q_pose = 0.22, q_lby = 0.70, q_hit = 0.70, builtin = 0.45},
     {name = "suppress backwards",   q_pose = 0.75, q_lby = 0.70, q_hit = 0.70, builtin = 0.45},
@@ -56,16 +62,23 @@ local SCEN = {
     {name = "everything a coin",    q_pose = 0.50, q_lby = 0.50, q_hit = 0.50, builtin = 0.45},
     {name = "built-in strong",      q_pose = 0.45, q_lby = 0.55, q_hit = 0.55, builtin = 0.70},
     {name = "mixed",                q_pose = 0.60, q_lby = 0.40, q_hit = 0.55, builtin = 0.45},
+    {name = "per-state split",      q_lby = 0.70, q_hit = 0.60, builtin = 0.45,
+     q_pose = function(st) return (st == "standing" or st == "crouch") and 0.22 or 0.80 end},
+    {name = "config switch @20",    q_lby = 0.70, q_hit = 0.70, builtin = 0.45,
+     q_pose = function(_, shot) return shot <= 20 and 0.22 or 0.80 end},
+    {name = "no signal at all",     q_pose = 0.50, q_lby = 0.50, q_hit = 0.50, builtin = 0.45, flat = true},
 }
 
-local function sgn_for(q, T) return (math.random() < q) and T or -T end
+local function q(v, st, shot) return type(v) == "function" and v(st, shot) or v end
+local function sgn_for(acc, T) return (math.random() < acc) and T or -T end
 
 -- One player's match. Returns head hits.
 local function play(sc, use_engine, rec)
     local heads = 0
     local C = {}
-    for _ = 1, SHOTS do
+    for shot = 1, SHOTS do
         local T = side()
+        local st = STATES[math.random(#STATES)]
         local n = 0
         local signs = {}
         local function push(arm, s, meth)
@@ -75,25 +88,28 @@ local function play(sc, use_engine, rec)
         end
         local legacy
         if math.random() < 0.3 then
-            local s = sgn_for(sc.q_lby, T); signs.vuln_lby = s
+            local s = sgn_for(q(sc.q_lby, st, shot), T); signs.vuln_lby = s
             push("vuln_lby:as", s); push("vuln_lby:inv", -s)
             legacy = legacy or "vuln_lby:as"
         end
         if rec.heads >= 2 then
-            local s = sgn_for(sc.q_hit, T); signs.hitmem = s
+            local s = sgn_for(q(sc.q_hit, st, shot), T); signs.hitmem = s
             push("hitmem:as", s); push("hitmem:inv", -s)
             legacy = legacy or "hitmem:as"
         end
-        local ps = sgn_for(sc.q_pose, T); signs.pose = ps
+        local ps = sgn_for(q(sc.q_pose, st, shot), T); signs.pose = ps
         push("pose:as", ps); push("pose:inv", -ps)
         legacy = legacy or "pose:inv"
         push("builtin", 0)
         local d
         for i = 1, n do if C[i].arm == legacy then d = i end end
-        local pick = use_engine and ENG.Decide(rec, C, n, d) or d
+        local pick = use_engine and ENG.Decide(rec, C, n, d, st) or d
         local c = C[pick]
         local r, outcome = math.random(), nil
-        if c.arm == "builtin" then
+        if sc.flat then
+            -- outcome independent of the side: nothing to learn
+            outcome = (r < 0.45) and "head" or ((r < 0.57) and "body" or "miss")
+        elseif c.arm == "builtin" then
             outcome = (r < sc.builtin) and "head" or ((r < sc.builtin + 0.12) and "body" or "miss")
         elseif c.val == T then
             outcome = (r < 0.72) and "head" or ((r < 0.85) and "body" or "miss")
@@ -102,27 +118,32 @@ local function play(sc, use_engine, rec)
         end
         if outcome == "head" then heads = heads + 1; rec.heads = rec.heads + 1 end
         if outcome ~= "body" then
-            ENG.Credit(rec, {arm = c.arm, sign = c.val, signs = signs}, outcome == "head")
+            local p = ENG.Post(rec.E, c.arm, st)
+            ENG.Credit(rec, {arm = c.arm, sign = c.val, signs = signs, state = st, p = p},
+                       outcome == "head")
         end
     end
     return heads
 end
 
 local function match(sc, use_engine, saved)
-    ENG.G = saved and ENG.Load(saved.G) or {}
+    ENG.G = saved and ENG.Load({all = saved.G}).all or {}
+    ENG.AUD = {n = 0, se_eng = 0, se_base = 0, heads = 0, safe = false}
     local total, recs = 0, {}
     for p = 1, 2 do
         local rec = {E = ENG.Load(saved and saved.E[p]), heads = 0}
         recs[p] = rec
         total = total + play(sc, use_engine, rec)
     end
-    return total, {G = ENG.Save(ENG.G), E = {ENG.Save(recs[1].E), ENG.Save(recs[2].E)}}
+    if ENG.AUD.safe then STATS.safe = STATS.safe + 1 end
+    return total, {G = ENG.SaveGlobal(), E = {ENG.Save(recs[1].E), ENG.Save(recs[2].E)}}
 end
 
-print(string.format("%-22s %8s %8s %7s %11s", "scenario", "chain", "engine", "delta", "2nd match"))
+print(string.format("%-22s %8s %8s %7s %11s %6s", "scenario", "chain", "engine", "delta", "2nd match", "safe"))
 local sum, worst, fails = 0, math.huge, 0
 for _, sc in ipairs(SCEN) do
     local ch, en, en2 = 0, 0, 0
+    STATS.safe = 0
     for _ = 1, RUNS do
         ch = ch + match(sc, false)
         local h, saved = match(sc, true)
@@ -133,23 +154,25 @@ for _, sc in ipairs(SCEN) do
     local d = 100 * (en - ch) / T
     sum = sum + d
     if d < worst then worst = d end
-    print(string.format("%-22s %7.1f%% %7.1f%% %+6.1f %10.1f%%", sc.name,
-        100 * ch / T, 100 * en / T, d, 100 * en2 / T))
+    -- safe: share of matches that ended in audit safe mode
+    print(string.format("%-22s %7.1f%% %7.1f%% %+6.1f %10.1f%% %5.0f%%", sc.name,
+        100 * ch / T, 100 * en / T, d, 100 * en2 / T, 100 * STATS.safe / (RUNS * 2)))
 end
 local avg = sum / #SCEN
 print(string.format("\naverage gain %+.2f points, worst scenario %+.2f", avg, worst))
 
 -- Safety: with no evidence at all, the engine returns the chain's pick.
 local ARMS = {}
-for arm in pairs(ENG.PRIOR) do ARMS[#ARMS + 1] = arm end
+for arm in pairs(ENG.PRIOR) do ARMS[#ARMS + 1] = arm end   -- priors are keyed by arm
 table.sort(ARMS)
 local bad = 0
 for _ = 1, 5000 do
     ENG.G = {}
+    ENG.AUD.safe = false
     local n, C = math.random(2, #ARMS), {}
     for i = 1, n do C[i] = {arm = ARMS[math.random(#ARMS)], val = side()} end
     local d = math.random(n)
-    if ENG.Decide({E = {}}, C, n, d) ~= d then bad = bad + 1 end
+    if ENG.Decide({E = ENG.New()}, C, n, d, STATES[math.random(#STATES)]) ~= d then bad = bad + 1 end
 end
 print(string.format("no-evidence check: engine kept the chain's pick in %d/5000 random cases", 5000 - bad))
 

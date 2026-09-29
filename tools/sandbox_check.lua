@@ -30,6 +30,15 @@ local TARGET     = os.getenv("RV_TARGET") or (SCRIPT_DIR .. "../riftveil.lua")
 -- records every plist.set call to a file, RV_NO_ENGINE starts Detection
 -- without "Adaptive engine".
 local PLIST_OUT = os.getenv("RV_PLIST_OUT")
+-- Fuzz + soak: RV_FUZZ=<seed> appends a randomized phase of RV_TICKS ticks
+-- (default 20000): players joining and leaving (bots included), NaN/inf/
+-- nil in props and animstate, simtime jumping backwards, shots resolved
+-- late, twice, or never, garbage hitgroups/reasons/backtrack values,
+-- random menu changes, console commands and round/match events. Every
+-- plist write is checked (value finite and within +-60, flags boolean)
+-- and memory must stay flat across the run.
+local FUZZ_SEED = tonumber(os.getenv("RV_FUZZ") or "")
+local PLIST_BAD, PLIST_BAD_N = {}, 0
 local NO_ENGINE = os.getenv("RV_NO_ENGINE") ~= nil
 local PLIST_LOG = {}
 
@@ -59,16 +68,25 @@ local CUR = 101  -- entity whose animstate the FFI proxy currently reports
 -- Animstate / animlayer fields returned as real numbers. Anything else
 -- indexed on the FFI proxy returns the proxy itself so pointer chains like
 -- `cel[0][3]` and `ffi.cast(...)(nc, 0)` never crash the stub.
+-- Real FFI float fields are always numbers (possibly NaN/inf, never nil),
+-- so a missing value reads as 0 here, and a departed player as all zeros.
+local ZERO = {duck = 0, eye = 0, torso = 0, gfy = 0, vx = 0, vy = 0}
 local function field(k)
-    local p = W.players[CUR]
-    if k == "duck_amount"      then return p.duck end
-    if k == "eye_angles_y"     then return p.eye end
-    if k == "torso_yaw"        then return p.torso end
-    if k == "goal_feet_yaw"    then return p.gfy end
+    local p = W.players[CUR] or ZERO
+    if k == "duck_amount"      then return p.duck or 0 end
+    if k == "eye_angles_y"     then return p.eye or 0 end
+    if k == "torso_yaw"        then return p.torso or 0 end
+    if k == "goal_feet_yaw"    then return p.gfy or 0 end
     if k == "on_ground"        then return true end
     if k == "min_yaw"          then return -58 end
     if k == "max_yaw"          then return 58 end
-    if k == "feet_spd_fwd"     then return math.min(1, math.sqrt(p.vx^2 + p.vy^2) / 250) end
+    if k == "feet_spd_fwd"     then
+        -- NaN passes through untouched: math.min(1, NaN) differs between
+        -- Lua builds, and a real FFI field would just hold the NaN.
+        local v = math.sqrt((p.vx or 0)^2 + (p.vy or 0)^2) / 250
+        if v ~= v then return v end
+        return v > 1 and 1 or v
+    end
     if k == "feet_spd_unk"     then return 1 end
     if k == "stop_to_full_run" then return 0.5 end
     if k == "playback_rate"    then return 0.9123 end
@@ -95,10 +113,15 @@ proxy = setmetatable({}, {
 })
 
 local CALLBACKS, ESP_FLAGS, UI_CALLBACKS = {}, {}, {}
-local LOG_CAPTURE = {}
+local LOG_CAPTURE, LOG_SCANNED, ERR_LINES = {}, {}, {}
 
 -- UI elements carry their kind so ui.get returns the right shape.
-local function ui_el(kind, a, b, c, d) return {kind = kind, a = a, b = b, c = c, d = d} end
+local UI_ELEMS = {}
+local function ui_el(kind, a, b, c, d)
+    local el = {kind = kind, a = a, b = b, c = c, d = d}
+    UI_ELEMS[#UI_ELEMS + 1] = el
+    return el
+end
 
 local mock = {
     ffi = setmetatable({}, {__index = function(_, k)
@@ -123,13 +146,26 @@ local mock = {
         return function() return nil end
     end}),
     entity = setmetatable({}, {__index = function(_, k)
-        if k == "get_players"      then return function() return {101, 102} end end
+        if k == "get_players"      then return function()
+            if W.live then
+                local out = {}
+                for i, p in ipairs(W.live) do out[i] = p end
+                return out
+            end
+            return {101, 102}
+        end end
         if k == "is_enemy"         then return function() return true end end
-        if k == "is_alive"         then return function() return true end end
+        if k == "is_alive"         then return function(p) return not (W.dead and W.dead[p]) end end
         if k == "get_local_player" then return function() return 1 end end
-        if k == "get_steam64"      then return function(p) return 76561198000000000 + p end end
+        if k == "get_steam64"      then return function(p)
+            if W.s64 then return W.s64[p] end
+            -- gamesense returns the 32-bit account id, not a 64-bit
+            -- SteamID (real logs: s64=1888056751)
+            return 1888056000 + p
+        end end
         -- 102 gets a long Cyrillic name so the panel's UTF-8 width fit runs.
         if k == "get_player_name"  then return function(p)
+            if W.names then return W.names[p] end
             if p == 102 then return "Тимур Пшеничный the second" end
             return "bot" .. tostring(p)
         end end
@@ -161,10 +197,13 @@ local mock = {
         -- Multiselects start with every item selected, so each module runs.
         if k == "new_multiselect"  then return function(_, _, _, items)
             local sel = {}
+            local el
             for _, v in ipairs(items) do
                 if not (NO_ENGINE and v == "Adaptive engine") then sel[#sel + 1] = v end
             end
-            return ui_el("multi", sel)
+            el = ui_el("multi", sel)
+            el.items = items
+            return el
         end end
         if k == "reference"        then return function() return ui_el("color", 150, 200, 60, 255) end end
         if k == "new_slider"       then return function(_, _, _, _, _, def) return ui_el("slider", def or 0) end end
@@ -209,7 +248,21 @@ local mock = {
     plist    = setmetatable({}, {__index = function(_, k)
         if k == "set" then
             return function(ent, field, value)
-                PLIST_LOG[#PLIST_LOG + 1] = string.format("%d\t%s\t%s\t%s", W.tick, tostring(ent), field, tostring(value))
+                if PLIST_OUT then
+                    PLIST_LOG[#PLIST_LOG + 1] = string.format("%d\t%s\t%s\t%s", W.tick, tostring(ent), field, tostring(value))
+                end
+                local bad
+                if field == "Force body yaw value" then
+                    if type(value) ~= "number" or value ~= value or math.abs(value) > 60 then bad = true end
+                elseif type(value) ~= "boolean" then
+                    bad = true
+                end
+                if bad then
+                    PLIST_BAD_N = PLIST_BAD_N + 1
+                    if #PLIST_BAD < 8 then
+                        PLIST_BAD[#PLIST_BAD + 1] = string.format("tick %d ent %s %s = %s", W.tick, tostring(ent), field, tostring(value))
+                    end
+                end
             end
         end
         return function() end
@@ -219,13 +272,23 @@ local mock = {
         if k == "world_to_screen" then return function() return 500, 500 end end
         return function() end
     end}),
-    writefile = function(_, content) LOG_CAPTURE[#LOG_CAPTURE + 1] = content end,
+    writefile = function(name, content)
+        -- The logger rewrites the whole file each flush; scan only what was
+        -- appended since the last write (or everything after a roll/clear).
+        local from = LOG_SCANNED[name] or 0
+        if #content < from then from = 0 end
+        for line in content:sub(from + 1):gmatch("[^\n]+") do
+            if line:find("%]%[ERR%]") then ERR_LINES[#ERR_LINES + 1] = line end
+        end
+        LOG_SCANNED[name] = #content
+        LOG_CAPTURE[1] = content
+    end,
     readfile  = function() return "" end,
     print = print,
     string = string, table = table, math = math, pairs = pairs, ipairs = ipairs,
     tostring = tostring, tonumber = tonumber, type = type, select = select,
     pcall = pcall, setmetatable = setmetatable, error = error, next = next,
-    os = os, unpack = table.unpack,
+    os = os, unpack = table.unpack or unpack,
 }
 mock.require = function() return mock.ffi end
 
@@ -313,9 +376,9 @@ for step = 1, 80 do
     elseif step % 10 == 7 then
         local id = step
         local reasons = {"?", "prediction error", "spread", "death"}
-        local reason  = reasons[(step // 10) % #reasons + 1]
+        local reason  = reasons[math.floor(step / 10) % #reasons + 1]
         fire("aim_fire", {id = id, target = 101, backtrack = 2, hit_chance = 70,
-                          extrapolated = (step // 10) % 3 == 0})
+                          extrapolated = math.floor(step / 10) % 3 == 0})
         fire("aim_miss", {id = id, target = 101, reason = reason})
     end
 end
@@ -347,6 +410,222 @@ for step = 81, 240 do
         if r == 0 then fire("aim_hit",  {id = id, target = 101, hitgroup = 1, damage = 90})
         elseif r == 3 then fire("aim_hit", {id = id, target = 101, hitgroup = 3, damage = 30})
         else fire("aim_miss", {id = id, target = 101, reason = "?"}) end
+    end
+end
+
+-- Reads a script-local by name through the upvalues of registered
+-- callbacks (and the functions they close over), for soak measurements.
+local function probe(name)
+    local seen = {}
+    local function walk(f, depth)
+        if seen[f] or depth > 4 then return nil end
+        seen[f] = true
+        for i = 1, 255 do
+            local n, v = debug.getupvalue(f, i)
+            if not n then break end
+            if n == name then return v, true end
+            if type(v) == "function" then
+                local r, ok = walk(v, depth + 1)
+                if ok then return r, true end
+            end
+        end
+    end
+    for _, cb in pairs(CALLBACKS) do
+        local v, ok = walk(cb, 0)
+        if ok then return v end
+    end
+end
+local function count(t) local n = 0; if type(t) == "table" then for _ in pairs(t) do n = n + 1 end end; return n end
+
+-- ── Fuzz + soak phase (RV_FUZZ) ──────────────────────────────────────
+local FUZZ_REPORT
+if FUZZ_SEED then
+    debug.sethook()   -- line coverage would make a long soak crawl
+    -- MINSTD (Park-Miller): exact in both Lua 5.3 integers and LuaJIT
+    -- doubles (state * 48271 < 2^53), so a seed builds the same world on
+    -- both runtimes and their plist writes can be compared one to one.
+    local rng_state = (FUZZ_SEED % 2147483646) + 1
+    local function rnd()
+        rng_state = (rng_state * 48271) % 2147483647
+        return (rng_state - 1) / 2147483646
+    end
+    local function rint(a, b)
+        if not b then a, b = 1, a end
+        return a + math.floor(rnd() * (b - a + 1))
+    end
+    local TICKS = tonumber(os.getenv("RV_TICKS") or "") or 20000
+    local NAN, INF = 0 / 0, 1 / 0
+    local function nasty(x)
+        local r = rnd()
+        if r < 0.004 then return NAN elseif r < 0.006 then return INF
+        elseif r < 0.008 then return -INF elseif r < 0.012 then return nil end
+        return x
+    end
+    local NAMES = {"zia anger", "goralan", "миша", "Тимур Пшеничный", "7vip", "", "unknown", "x"}
+    W.live, W.s64, W.names, W.dead = {}, {}, {}, {}
+    local free = {}
+    for i = 2, 24 do free[#free + 1] = i end
+    local function join()
+        if #free == 0 then return end
+        local p = table.remove(free, rint(#free))
+        W.live[#W.live + 1] = p
+        -- 600 steam ids so profiles outnumber DB_MAX and pruning runs; 8% bots
+        W.s64[p] = (rnd() < 0.08) and 0 or (1888056000 + rint(600))
+        W.names[p] = NAMES[rint(#NAMES)] .. tostring(rint(99))
+        W.players[p] = {sim = W.tick * TI, vx = 0, vy = 0, pose01 = 0.5, eye = 0, duck = 0, torso = 0, gfy = 0}
+    end
+    local function leave()
+        if #W.live == 0 then return end
+        local i = rint(#W.live)
+        local p = table.remove(W.live, i)
+        free[#free + 1] = p
+        W.players[p] = nil
+    end
+    for _ = 1, 3 do join() end
+
+    local next_id, pending = 50000, {}
+    local REASONS = {"?", "?", "?", "spread", "prediction error", "death", "", false, "weird"}
+    local BT = {0, 0, 0, 1, 2, 5, 0.03, -1, 100}
+    local CMDS = {"rv_stats", "rv_db", "rv_save", "rv_reset", "rv_wipe", "rv_clear", "rv_nope", "  RV_STATS  ", ""}
+    local mem = {}
+    local t0 = os.clock()
+    for step = 1, TICKS do
+        W.tick = W.tick + ((rnd() < 0.002) and -3 or 1)
+        W.real = W.real + TI
+        if rnd() < 0.01 then join() end
+        if rnd() < 0.008 then leave() end
+        for _, p in ipairs(W.live) do
+            local s = W.players[p]
+            local r = rnd()
+            if r < 0.7 then s.sim = W.tick * TI                           -- clean update
+            elseif r < 0.95 then                                         -- choke: no update
+            else s.sim = (W.tick - rint(0, 20)) * TI end          -- stale/back
+            s.sim     = nasty(s.sim)
+            s.pose01  = nasty((rnd() < 0.5) and rnd() or (s.pose01 or 0.5))
+            s.eye     = nasty((s.eye or 0) + rint(-40, 40))
+            s.vx      = nasty(rint(0, 300))
+            s.duck    = nasty((rnd() < 0.1) and 1 or 0)
+            s.torso   = nasty(rint(-180, 180))
+            s.gfy     = nasty(rint(-180, 180))
+            W.dead[p] = rnd() < 0.02
+        end
+        local rt = rnd()
+        W.threat = (rt < 0.8 and #W.live > 0) and W.live[rint(#W.live)] or (rt < 0.9 and nil or 999)
+        if rnd() < 0.01 then W.menu_open = not W.menu_open end
+
+        fire("net_update_end")
+        if os.getenv("RV_DUMP_TICK") and W.tick == tonumber(os.getenv("RV_DUMP_TICK")) then
+            -- Debug aid: every scalar field of every profile, sorted, so two
+            -- runs can be diffed line by line.
+            local out = {}
+            local function dump(prefix, t, depth)
+                local keys = {}
+                for k in pairs(t) do keys[#keys + 1] = k end
+                table.sort(keys, function(x, y) return tostring(x) < tostring(y) end)
+                for _, k in ipairs(keys) do
+                    local v = t[k]
+                    if type(v) == "number" then
+                        out[#out + 1] = string.format("%s.%s = %.6g", prefix, tostring(k), v)
+                    elseif type(v) == "string" or type(v) == "boolean" then
+                        out[#out + 1] = string.format("%s.%s = %s", prefix, tostring(k), tostring(v))
+                    elseif type(v) == "table" and depth < 3 then
+                        dump(prefix .. "." .. tostring(k), v, depth + 1)
+                    end
+                end
+            end
+            dump("REC", probe("REC") or {}, 0)
+            local f = assert(io.open(os.getenv("RV_DUMP_OUT"), "w"))
+            f:write(table.concat(out, "\n"), "\n"); f:close()
+        end
+        fire("paint")
+        for _, cb in ipairs(ESP_FLAGS) do pcall(cb, W.live[1] or 5); pcall(cb, 999) end
+
+        if rnd() < 0.15 then
+            next_id = (rnd() < 0.02) and (next_id - 1) or (next_id + 1)   -- id reuse
+            local tgt = (#W.live > 0 and rnd() < 0.95) and W.live[rint(#W.live)] or rint(1, 64)
+            fire("aim_fire", {id = next_id, target = tgt, backtrack = nasty(BT[rint(#BT)]),
+                              hit_chance = nasty(rint(0, 100)), extrapolated = rnd() < 0.1,
+                              teleported = rnd() < 0.05})
+            pending[#pending + 1] = {id = next_id, target = tgt, at = step + rint(0, 40)}
+        end
+        for i = #pending, 1, -1 do
+            local sh = pending[i]
+            if sh.at <= step then
+                table.remove(pending, i)
+                local r = rnd()
+                local id = (rnd() < 0.03) and 999999 or sh.id                -- unknown id
+                if r < 0.35 then
+                    fire("aim_hit", {id = id, target = sh.target, hitgroup = nasty(rint(-1, 12)),
+                                     damage = nasty(rint(0, 120))})
+                elseif r < 0.95 then
+                    fire("aim_miss", {id = id, target = sh.target, reason = REASONS[rint(#REASONS)]})
+                end                                                                 -- else: never resolved
+                if rnd() < 0.03 then                                         -- duplicate event
+                    fire("aim_miss", {id = id, target = sh.target, reason = "?"})
+                end
+            end
+        end
+
+        if rnd() < 0.002 then fire("round_start") end
+        if rnd() < 0.0004 then fire(rnd() < 0.5 and "game_end" or "level_init") end
+        if rnd() < 0.003 then fire("console_input", CMDS[rint(#CMDS)]) end
+        if rnd() < 0.002 then
+            local el = UI_ELEMS[rint(#UI_ELEMS)]
+            if el.kind == "checkbox" then el.a = not el.a
+            elseif el.kind == "multi" then
+                local sel = {}
+                for _, it in ipairs(el.items) do if rnd() < 0.6 then sel[#sel + 1] = it end end
+                el.a = sel
+            end
+            for _, cb in ipairs(UI_CALLBACKS) do pcall(cb) end
+        end
+
+        if step % math.floor(TICKS / 20) == 0 then
+            collectgarbage("collect")
+            -- Heap net of the logger's in-memory file text, which grows to
+            -- LOG_ROLL_BYTES by design and then rolls over.
+            local logb = #(probe("log_disk") or "")
+            mem[#mem + 1] = {heap = collectgarbage("count"), net = collectgarbage("count") - logb / 1024,
+                             rec = count(probe("REC")), shots = count(probe("SHOTS")),
+                             db = count(probe("DB")), log = logb}
+        end
+    end
+    -- Put the menu back the way the rest of the run expects it.
+    for _, el in ipairs(UI_ELEMS) do
+        if el.kind == "checkbox" then el.a = true
+        elseif el.kind == "multi" then el.a = {}; for i, it in ipairs(el.items) do el.a[i] = it end end
+    end
+    FUZZ_REPORT = {ticks = TICKS, secs = os.clock() - t0, mem = mem}
+    W.live, W.s64, W.names, W.dead = nil, nil, nil, nil
+    debug.sethook(hook, "l")
+end
+
+-- ── Targeted unit checks on the live script state ────────────────────
+-- DB cap: 600 profiles through the real FlushDB must leave exactly 500,
+-- keeping the most recently stamped ones.
+local UNIT_FAIL, UNIT_OK = {}, nil
+do
+    local REC_T, FLUSH, DB_T = probe("REC"), probe("FlushDB"), probe("DB")
+    local ENG_T = probe("ENG")
+    if not (REC_T and FLUSH and DB_T and ENG_T) then
+        UNIT_FAIL[#UNIT_FAIL + 1] = "DB cap: could not reach REC/FlushDB/DB/ENG through upvalues"
+    else
+        for k in pairs(DB_T) do DB_T[k] = nil end
+        for i = 1, 600 do
+            DB_T["old" .. i] = {gen = 0, samples = 1, kills = 0}
+        end
+        for i = 1, 10 do
+            REC_T["new" .. i] = {hit_count = 2, resolver_misses = 1, kills = 1, preferred_bt = 0,
+                                 E = ENG_T.New(), db_base = nil}
+        end
+        local ok, e = pcall(FLUSH)
+        if not ok then UNIT_FAIL[#UNIT_FAIL + 1] = "DB cap: FlushDB raised " .. tostring(e) end
+        local n, fresh = count(DB_T), 0
+        for i = 1, 10 do if DB_T["new" .. i] then fresh = fresh + 1 end end
+        if n ~= 500 then UNIT_FAIL[#UNIT_FAIL + 1] = string.format("DB cap: %d profiles after flush, expected 500", n) end
+        if fresh ~= 10 then UNIT_FAIL[#UNIT_FAIL + 1] = string.format("DB cap: pruned %d of this match's 10 profiles", 10 - fresh) end
+        for i = 1, 10 do REC_T["new" .. i] = nil end
+        if n == 500 and fresh == 10 then UNIT_OK = "DB cap: 610 profiles -> 500, this match's 10 kept" end
     end
 end
 
@@ -391,10 +670,47 @@ if #cb_errors > 0 then
     for _, e in ipairs(cb_errors) do print("  " .. e) end
 end
 
-local log_text = table.concat(LOG_CAPTURE, "\n")
-local err_lines = {}
-for line in log_text:gmatch("[^\n]+") do
-    if line:find("%]%[ERR%]") then err_lines[#err_lines + 1] = line end
+local err_lines = ERR_LINES
+if UNIT_OK then print("Unit: " .. UNIT_OK) end
+if #UNIT_FAIL > 0 then
+    failed = true
+    print("FAIL -- unit checks:")
+    for _, l in ipairs(UNIT_FAIL) do print("  " .. l) end
+end
+if PLIST_BAD_N > 0 then
+    failed = true
+    print(string.format("FAIL -- %d invalid plist writes (value outside +-60, NaN, or non-boolean flag):", PLIST_BAD_N))
+    for _, l in ipairs(PLIST_BAD) do print("  " .. l) end
+end
+if FUZZ_REPORT then
+    local m = FUZZ_REPORT.mem
+    print(string.format("Fuzz: %d ticks in %.1fs (%.0f ticks/s)", FUZZ_REPORT.ticks, FUZZ_REPORT.secs,
+        FUZZ_REPORT.ticks / math.max(FUZZ_REPORT.secs, 1e-9)))
+    -- Leak test: the net heap's peak over the second half of the soak may
+    -- not exceed the first half's peak by more than 25% + 256 KB.
+    local peak1, peak2, maxshots, maxrec, maxdb = 0, 0, 0, 0, 0
+    for i, c in ipairs(m) do
+        if i <= #m / 2 then peak1 = math.max(peak1, c.net) else peak2 = math.max(peak2, c.net) end
+        maxshots, maxrec, maxdb = math.max(maxshots, c.shots), math.max(maxrec, c.rec), math.max(maxdb, c.db)
+    end
+    print(string.format("  net heap peak: first half %.0f KB, second half %.0f KB | max REC %d, SHOTS %d, DB %d",
+        peak1, peak2, maxrec, maxshots, maxdb))
+    if os.getenv("RV_SOAK_TRACE") then
+        for i, c in ipairs(m) do
+            print(string.format("    %2d  heap %6.0f KB  net %6.0f KB  log %7d B  REC %3d  SHOTS %3d  DB %3d",
+                i, c.heap, c.net, c.log, c.rec, c.shots, c.db))
+        end
+    end
+    -- (skipped when RV_PLIST_OUT is set: the recorder itself keeps every
+    -- write in memory and would read as a leak)
+    if not PLIST_OUT and peak2 > peak1 * 1.25 + 256 then
+        failed = true
+        print(string.format("FAIL -- net heap grew %.0f KB from the first half to the second (leak)", peak2 - peak1))
+    end
+    if maxdb > 500 then
+        failed = true
+        print(string.format("FAIL -- DB held %d profiles, cap is 500", maxdb))
+    end
 end
 if #err_lines > 0 then
     failed = true

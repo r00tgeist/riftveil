@@ -61,7 +61,8 @@ local function isnum(v) return type(v) == "number" and v == v end
 local METH = {HIT_MEM="hit_mem", SIX_LEX="6lex", PERIOD="period", SUPPRESS="suppress",
     DEF_TICK="def_tick", LAGCOMP="lagcomp", PHASE="phase", RING="ring", RING_SPK="ring_spike",
     YAW_CACHE="yaw_cache", SYM_FLIP="sym_flip", META_HOLD="meta_hold", TRACK="track"}
-local ENG = {Label = function(arm) return string.upper((arm:gsub("_", " "):gsub(":as", ""):gsub(":", " "))) end}
+local DET = {engine = true}
+local ENG = {AUD = {safe = false}, Label = function(arm) return string.upper((arm:gsub("_", " "):gsub(":as", ""):gsub(":", " "))) end}
 local AA_SHORT = {two="2way", three="3way", five="5way", skitter="skitter", hold="hold", static="static"}
 local CFG = {CONF_ESP = 0.5, CFG_THRESH = 0.6}
 local REC, EIDX_S64, LIVE_ENEMIES = P.REC, P.EIDX, P.LIVE

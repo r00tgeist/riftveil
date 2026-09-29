@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v7.2  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v7.3  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · config recognition · vulnerability windows
 --  Adaptive decision engine · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
@@ -22,7 +22,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "7.2"
+local RV_VERSION = "7.3"
 
 local ffi = require "ffi"
 
@@ -337,7 +337,7 @@ local ENG
 local function EngSummary(rec)
     if not rec.E then return "-" end
     local parts = {}
-    for arm, c in pairs(rec.E) do
+    for arm, c in pairs(rec.E.all) do
         if c.s + c.f >= 1 then
             local m = ENG.Post(rec.E, arm)
             parts[#parts + 1] = string.format("%s=%d%%(%.1f)", arm, math.floor(m * 100 + 0.5), c.s + c.f)
@@ -403,6 +403,10 @@ client.set_event_callback("console_input", function(text)
                 -- plus the arm it is holding against the chain, if any.
                 EngSummary(rec))
         end
+        local A = ENG.AUD
+        out[#out+1] = string.format("  engine: %s | shots scored %d | brier %.3f vs base-rate %.3f",
+            A.safe and "SAFE MODE (chain only)" or "active", A.n,
+            A.n > 0 and A.se_eng / A.n or 0, A.n > 0 and A.se_base / A.n or 0)
         out[#out+1] = string.format("  log lines: %d", log_total)
         local s = table.concat(out, "\n")
         client.log(s); log_write("CMD","stats", s)
@@ -647,12 +651,6 @@ local AA_SHORT = {
     [AA.STATIC]="static",  [AA.UNKNOWN]="?",
 }
 
-local CFG_LABEL = {
-    luasense_beta = "luasense β",
-    luasense_std  = "luasense",
-    symmetric     = "symmetric",
-}
-
 local HG = {
     "generic","head","chest","stomach",
     "left arm","right arm","left leg","right leg","neck","?","gear",
@@ -749,8 +747,15 @@ local function GetLat()
     end
     local ok1, cur = pcall(nc_lat, nc, 9)
     local ok2, avg = pcall(nc_lat, nc, 10)
-    cur = (ok1 and cur and cur > 0) and cur or client.latency()
-    avg = (ok2 and avg and avg > 0) and avg or cur
+    -- Type-checked before comparing: the vtable call sits inside pcall, the
+    -- comparison doesn't. If a game update moved the slot and the call
+    -- returned cdata instead of a number, "cur > 0" would throw on every
+    -- tick and take the whole Update down with it. (Found by running the
+    -- harness under LuaJIT, which, like the game, refuses number-vs-table
+    -- comparisons that Lua 5.3 allowed through a metamethod.)
+    cur = (ok1 and type(cur) == "number" and cur == cur and cur > 0 and cur < 2) and cur
+          or client.latency()
+    avg = (ok2 and type(avg) == "number" and avg == avg and avg > 0 and avg < 2) and avg or cur
     return cur, avg
 end
 
@@ -758,10 +763,23 @@ end
 --  MATH HELPERS + INPUT VALIDATION
 -- ══════════════════════════════════════════════════════════════════
 local function Clamp(v, a, b) return math.min(math.max(v, a), b) end
+-- A usable number: not nil, not NaN, not +-inf. math.min/max handle NaN
+-- differently across Lua builds (Lua 5.3 can return the NaN, LuaJIT's
+-- native min/max returns the other operand), so anything headed for Clamp
+-- or the history buffers is checked with this first.
+local function Finite(v) return type(v) == "number" and v == v and v > -math.huge and v < math.huge end
 local function Sign(x)        return x > 0 and 1 or (x < 0 and -1 or 0) end
+-- Normalize an angle to [-180, 180]. Bounded work for any input: the old
+-- subtract-360 loops never terminated on inf (inf - 360 == inf) and
+-- effectively never on huge finite values (1e300 - 360 == 1e300) -- one
+-- corrupt float from an FFI animstate read would have frozen the game's
+-- main thread, where no pcall can reach. Found by the v7.3 fuzzer.
+-- Non-finite input maps to 0: no usable angle.
 local function NA(a)
-    while a >  180 do a = a - 360 end
-    while a < -180 do a = a + 360 end
+    if a ~= a or a == math.huge or a == -math.huge then return 0 end
+    if a >= -180 and a <= 180 then return a end
+    a = a % 360                      -- [0, 360): Lua's % is floored
+    if a > 180 then a = a - 360 end
     return a
 end
 local function TT(t) return t and math.floor(t / globals.tickinterval() + 0.5) or 0 end
@@ -869,8 +887,9 @@ local function Extract6Lex(ptr, live_cap)
     local s, d = try(al.playback_rate)
     if s ~= 0 then return s, d end
 
-    s, d = try(al.weight)
-    if s ~= 0 then return s, math.min(35.0, live_cap) end  -- weight fallback: fixed estimate
+    -- Weight fallback: the side only; its magnitude is a fixed estimate.
+    s = (try(al.weight))
+    if s ~= 0 then return s, math.min(35.0, live_cap) end
     return 0, 0
 end
 
@@ -975,18 +994,13 @@ end
 --  windows, 6lex, hit memory, the pose-tracked side (applied as-is by
 --  meta hold, inverted by suppress) and the built-in resolver. The legacy
 --  chain ranks them by a fixed priority. The engine keeps that ranking as
---  its default and learns, per player, when a different candidate is
---  measurably better -- and only then overrides it.
+--  its default and learns, per player and per movement state, when a
+--  different candidate is measurably better -- and only then overrides it.
 --
 --  ARMS. Each source has two orientations: "as" applies its value, "inv"
 --  the opposite sign. Suppress is literally pose:inv, so suppress and meta
 --  hold share evidence instead of being learned separately. Built-in is a
 --  single arm (it has no sign we can see).
---
---  PRIORS come from the 9 match logs: head rate when each method was the
---  one applied (suppress 50/64 = 78%, hit memory 47/72 = 65%, LBY window
---  101/157 = 64%, delta windows 130/211 = 62%, ...). Inverted arms start
---  from the complement with half the weight.
 --
 --  EVIDENCE is shared between detectors. A head hit confirms the applied
 --  side, so every candidate present at fire time is scored: agreeing with
@@ -997,30 +1011,57 @@ end
 --  -> half success (a miss is weaker evidence than a hit: magnitude and
 --  timing also cause misses).
 --
---  CROSS-PLAYER. A global table sums every player's evidence and is saved
---  between sessions (halved on load). A player's prior is the log prior
---  plus up to GLOBAL_CAP counts of everyone else's evidence, so what the
---  engine learns on one opponent shifts its starting point on the next.
+--  CONTEXT. Real AA configs pick their side per movement state, so the
+--  belief about an arm is a four-level hierarchy, each level a prior for
+--  the one below it with a capped weight:
+--      log prior  (head rate from the 9 match logs, e.g. suppress 78%)
+--    + other players' evidence       (<= GLOBAL_CAP counts, persisted)
+--    + this player's other states    (<= STATE_POOL counts)
+--    + this player in this state     (full weight)
+--  A fresh state borrows the player's general tendency; a state with its
+--  own shots speaks for itself. Nothing is double counted: each level is
+--  the level above minus what the level below already holds.
+--
+--  WHAT WAS TRIED AND CUT (tools/engine_sim.lua, 10 opponent models):
+--  per-shot forgetting, a Page-Hinkley config-change detector (fired 0.45
+--  times per stationary player-match), and a coupled sign-accuracy model
+--  (theta per source) all scored below this design. The state layer
+--  measured neutral: with ~10 shots per movement state per match there is
+--  little evidence to separate states before the match ends. It stays,
+--  in memory for the session only, because it never scored worse. The audit earned
+--  its place: margin 0.04 cut the worst scenario from -1.27 to -0.83 and
+--  raised the average from +1.85 to +1.94 points.
+--
+--  SELF-AUDIT. Every credited shot scores the engine's prediction (Brier
+--  score) against a base-rate model that only knows the running head
+--  rate. If after AUDIT_MIN shots the engine predicts worse than that
+--  baseline by AUDIT_MARGIN, it is miscalibrated for this lobby: it enters
+--  safe mode and returns the chain's pick until its score recovers. It
+--  keeps learning in safe mode; only its overrides stop.
 --
 --  DECISION. Greedy on posterior means, deterministic (no RNG, so the
---  debug log explains every choice). A candidate replaces the legacy pick
---  only when P(candidate > default) > SWITCH_IN under a normal
---  approximation of the Beta posteriors, and only once either the
---  candidate has MIN_OWN observations on this player or the default has
---  failed enough (MIN_DEFAULT observations) to be in doubt. An engaged
---  switch holds while P stays above HOLD, so it doesn't flicker per shot.
---  With no evidence the engine always returns the legacy pick: the
---  differential test in tools/engine_sim.lua checks exactly that.
+--  debug log explains every choice). A candidate replaces the chain's pick
+--  only when P(candidate > pick) > SWITCH_IN under a normal approximation
+--  of the Beta posteriors, and only once either the candidate has MIN_OWN
+--  observations on this player or the pick has MIN_DEFAULT and is in
+--  doubt. An engaged switch holds while P stays above HOLD. With no
+--  evidence the engine returns the chain's pick -- tools/engine_sim.lua
+--  checks that on 5000 random candidate sets.
 -- ══════════════════════════════════════════════════════════════════
 ENG = {
-    SWITCH_IN   = 0.85,
-    HOLD        = 0.65,
-    MIN_OWN     = 2,
-    MIN_DEFAULT = 3,
-    MISS_SPILL  = 0.5,
-    GLOBAL_CAP  = 12,
-    DECAY       = 0.5,   -- applied to saved counts on load, and on a soft reset
-    DB_KEY      = "riftveil_engine",
+    SWITCH_IN    = 0.85,
+    HOLD         = 0.65,
+    MIN_OWN      = 2,
+    MIN_DEFAULT  = 3,
+    MISS_SPILL   = 0.5,
+    GLOBAL_CAP   = 12,
+    STATE_POOL   = 8,     -- votes a state borrows from the player's other states
+    FORGET       = 1,     -- per credited shot; 1 = off (see above)
+    AUDIT_MIN    = 20,
+    AUDIT_MARGIN = 0.04,
+    PRIOR_SCALE  = 1,
+    DECAY        = 0.5,   -- saved counts on load, and on a soft reset
+    DB_KEY       = "riftveil_engine",
     -- {prior mean, prior weight} per arm
     PRIOR = {
         ["vuln_delta:as"] = {0.62, 8}, ["vuln_delta:inv"] = {0.38, 4},
@@ -1042,7 +1083,8 @@ ENG = {
     -- vuln type -> source
     VULN_SRC = {unk = "vuln_delta", stp = "vuln_delta", pka = "vuln_delta",
                 dck = "vuln_delta", lby = "vuln_lby"},
-    G = {},   -- global evidence: [arm] = {s, f}
+    G   = {},   -- global evidence: [arm] = {s, f}
+    AUD = {n = 0, se_eng = 0, se_base = 0, heads = 0, safe = false},
 }
 
 function ENG.Phi(z)
@@ -1051,21 +1093,28 @@ function ENG.Phi(z)
     return 0.5 * (1 + (z >= 0 and t or -t))
 end
 
-local function EngCell(E, arm)
-    local c = E[arm]
-    if not c then c = {s = 0, f = 0}; E[arm] = c end
+local function EngCell(T, arm)
+    local c = T[arm]
+    if not c then c = {s = 0, f = 0}; T[arm] = c end
     return c
 end
 
--- Posterior mean, variance and own-evidence count for one arm of one
--- player. Global evidence minus this player's own (already counted
--- directly) is folded into the prior, capped at GLOBAL_CAP counts.
-function ENG.Post(E, arm)
-    local pr  = ENG.PRIOR[arm]
-    local a   = pr[1] * pr[2]
-    local b   = (1 - pr[1]) * pr[2]
-    local own = E[arm]
+-- Fresh per-player engine state. all = the player's totals per arm,
+-- st[state] = the same split by movement state.
+function ENG.New()
+    return {all = {}, st = {}}
+end
+
+-- Posterior mean, variance and the player's own evidence count for one
+-- arm, through the four-level hierarchy described above. state may be nil
+-- (then the player's totals count in full).
+function ENG.Post(E, arm, state)
+    local pr = ENG.PRIOR[arm]
+    local k  = pr[2] * ENG.PRIOR_SCALE
+    local a, b = pr[1] * k, (1 - pr[1]) * k
+    local own = E.all[arm]
     local os, of = own and own.s or 0, own and own.f or 0
+
     local g = ENG.G[arm]
     if g then
         local gs, gf = math.max(0, g.s - os), math.max(0, g.f - of)
@@ -1075,22 +1124,36 @@ function ENG.Post(E, arm)
             a, b = a + gs * w, b + gf * w
         end
     end
-    a, b = a + os, b + of
+
+    local sc = state and E.st[state] and E.st[state][arm]
+    if state then
+        local ss, sf = sc and sc.s or 0, sc and sc.f or 0
+        local ps, pf = math.max(0, os - ss), math.max(0, of - sf)
+        local pn = ps + pf
+        if pn > 0 then
+            local w = math.min(1, ENG.STATE_POOL / pn)
+            a, b = a + ps * w, b + pf * w
+        end
+        a, b = a + ss, b + sf
+    else
+        a, b = a + os, b + of
+    end
     local n = a + b
     return a / n, a * b / (n * n * (n + 1)), os + of
 end
 
--- cands[1..n] = {arm, val, meth}; d = index of the legacy pick.
--- Returns the index to apply and P(it beats the legacy pick).
-function ENG.Decide(rec, cands, n, d)
+-- cands[1..n] = {arm, val, meth}; d = index of the chain's pick.
+-- Returns the index to apply and P(it beats the chain's pick).
+function ENG.Decide(rec, cands, n, d, state)
     local E = rec.E
-    local dm, dv, dn = ENG.Post(E, cands[d].arm)
+    if ENG.AUD.safe then rec.eng_hold = nil; return d, 0 end
+    local dm, dv, dn = ENG.Post(E, cands[d].arm, state)
     local hold = rec.eng_hold
     local best, bestp = d, 0
     for i = 1, n do
         if i ~= d then
             local arm = cands[i].arm
-            local m, v, on = ENG.Post(E, arm)
+            local m, v, on = ENG.Post(E, arm, state)
             if on >= ENG.MIN_OWN or dn >= ENG.MIN_DEFAULT then
                 local p = ENG.Phi((m - dm) / math.sqrt(v + dv))
                 local need = (arm == hold) and ENG.HOLD or ENG.SWITCH_IN
@@ -1102,24 +1165,60 @@ function ENG.Decide(rec, cands, n, d)
     return best, bestp
 end
 
-local function EngAdd(E, arm, ds, df)
-    local c = EngCell(E, arm)
+local function EngScale(T, k)
+    for _, c in pairs(T) do c.s, c.f = c.s * k, c.f * k end
+end
+
+-- Multiply every count the player holds (totals and per state) by k.
+function ENG.Fade(E, k)
+    k = k or ENG.DECAY
+    EngScale(E.all, k)
+    for _, T in pairs(E.st) do EngScale(T, k) end
+end
+
+local function EngAdd(E, state, arm, ds, df)
+    local c = EngCell(E.all, arm)
     c.s, c.f = c.s + ds, c.f + df
+    if state then
+        local T = E.st[state]
+        if not T then T = {}; E.st[state] = T end
+        c = EngCell(T, arm)
+        c.s, c.f = c.s + ds, c.f + df
+    end
     local g = EngCell(ENG.G, arm)
     g.s, g.f = g.s + ds, g.f + df
 end
 
+-- Session-wide Brier audit of the prediction made at fire time.
+local function EngAudit(p, head)
+    local y = head and 1 or 0
+    local A = ENG.AUD
+    local base = (A.heads + 1) / (A.n + 2)     -- running head rate, Laplace
+    A.n, A.heads = A.n + 1, A.heads + y
+    A.se_eng  = A.se_eng  + (p - y) * (p - y)
+    A.se_base = A.se_base + (base - y) * (base - y)
+    if A.n >= ENG.AUDIT_MIN then
+        local worse = (A.se_eng - A.se_base) / A.n
+        -- Hysteresis: enter above the margin, leave only once at par.
+        if A.safe then A.safe = worse > 0 else A.safe = worse > ENG.AUDIT_MARGIN end
+    end
+end
+
 -- snap = {arm = applied arm, sign = applied sign (0 for built-in),
---         signs = {[source] = as-is sign of every candidate at fire time}}
+--         signs = {[source] = as-is sign of every candidate at fire time},
+--         state = movement state at fire time, p = predicted head chance}
 -- head = true for a head/neck hit, false for a resolver miss.
 function ENG.Credit(rec, snap, head)
-    local E = rec.E
+    local E, state = rec.E, snap.state
+    if snap.p then EngAudit(snap.p, head) end
+    if ENG.FORGET < 1 then ENG.Fade(E, ENG.FORGET) end
+
     if snap.arm == "builtin" or snap.sign == 0 then
-        if head then EngAdd(E, "builtin", 1, 0) else EngAdd(E, "builtin", 0, 1) end
+        if head then EngAdd(E, state, "builtin", 1, 0) else EngAdd(E, state, "builtin", 0, 1) end
         return
     end
     local sigma, spill = snap.sign, ENG.MISS_SPILL
-    if not head then EngAdd(E, snap.arm, 0, 1) end
+    if not head then EngAdd(E, state, snap.arm, 0, 1) end
     for src, sg in pairs(snap.signs) do
         local arms = ENG.ARM[src]
         if arms and sg ~= 0 then
@@ -1127,47 +1226,77 @@ function ENG.Credit(rec, snap, head)
                 local arm = arms[o]
                 local s   = (o == 1) and sg or -sg
                 if head then
-                    if s == sigma then EngAdd(E, arm, 1, 0) else EngAdd(E, arm, 0, 1) end
+                    if s == sigma then EngAdd(E, state, arm, 1, 0) else EngAdd(E, state, arm, 0, 1) end
                 elseif arm ~= snap.arm then
-                    if s == sigma then EngAdd(E, arm, 0, spill) else EngAdd(E, arm, spill, 0) end
+                    if s == sigma then EngAdd(E, state, arm, 0, spill) else EngAdd(E, state, arm, spill, 0) end
                 end
             end
         end
     end
 end
 
--- A soft reset means the opponent likely changed config: halve what the
--- engine knows about them rather than forgetting it outright.
-function ENG.Fade(E)
-    for _, c in pairs(E) do c.s, c.f = c.s * ENG.DECAY, c.f * ENG.DECAY end
-end
-
-function ENG.Load(t)
-    local E = {}
-    if type(t) ~= "table" then return E end
+local function EngLoadCells(dst, t)
+    if type(t) ~= "table" then return end
     for arm, c in pairs(t) do
         if ENG.PRIOR[arm] and type(c) == "table" and isnum(c.s, 0) and isnum(c.f, 0) then
-            E[arm] = {s = c.s * ENG.DECAY, f = c.f * ENG.DECAY}
+            dst[arm] = {s = c.s * ENG.DECAY, f = c.f * ENG.DECAY}
         end
+    end
+end
+
+-- Accepts both the v7.3 layout {all=..., st=...} and v7.2's flat
+-- {[arm] = {s, f}} (loaded as totals).
+function ENG.Load(t)
+    local E = ENG.New()
+    if type(t) ~= "table" then return E end
+    if type(t.all) == "table" or type(t.st) == "table" then
+        EngLoadCells(E.all, t.all)
+        if type(t.st) == "table" then
+            for state, T in pairs(t.st) do
+                if type(state) == "string" then
+                    local dst = {}
+                    EngLoadCells(dst, T)
+                    E.st[state] = dst
+                end
+            end
+        end
+    else
+        EngLoadCells(E.all, t)
     end
     return E
 end
 
-function ENG.Save(E)
-    local t = {}
-    for arm, c in pairs(E) do
-        if c.s + c.f > 0.01 then t[arm] = {s = c.s, f = c.f} end
+local function EngSaveCells(T)
+    local out = {}
+    for arm, c in pairs(T) do
+        if c.s + c.f > 0.01 then out[arm] = {s = c.s, f = c.f} end
     end
-    return t
+    return out
+end
+
+-- Only the player's totals are saved. Per-state votes would make each DB
+-- profile ~100 small tables -- over a megabyte serialized on every 60 s
+-- autosave at the 500-profile cap -- for a layer that measured neutral.
+-- They live for the session; Load still reads an st table if one exists.
+function ENG.Save(E)
+    return {all = EngSaveCells(E.all)}
+end
+
+function ENG.SaveGlobal()
+    return EngSaveCells(ENG.G)
 end
 
 function ENG.Trials(E)
     local n = 0
-    for _, c in pairs(E) do n = n + c.s + c.f end
+    for _, c in pairs(E.all) do n = n + c.s + c.f end
     return n
 end
 
-ENG.G = ENG.Load(database.read(ENG.DB_KEY))
+do
+    local G = ENG.New()
+    EngLoadCells(G.all, database.read(ENG.DB_KEY))
+    ENG.G = G.all
+end
 
 -- Short label for an arm: "pose:inv" -> "POSE INV", for the panel and log.
 function ENG.Label(arm)
@@ -1379,9 +1508,8 @@ local function DetectAA(hist)
     -- newest samples (not adjacent), inflating conf by up to 1/15 on jitter.
     -- Adjacent pairs are 0..cnt-2. Single pass, no per-index RGet calls.
     local b, h, n = hist.b, hist.h, hist.n
-    local pose_sum, flips = 0, 0
     local prev = b[((h - 1) % n) + 1].p
-    pose_sum = prev
+    local pose_sum, flips = prev, 0
     for i = 1, cnt-1 do
         local p = b[((h - i - 1) % n) + 1].p
         pose_sum = pose_sum + p
@@ -1860,7 +1988,7 @@ local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
     -- drowns out higher-quality UNK and LBY corrections. Cap at 1 DCK per 10 ticks.
     local dn, dp = as.duck_amount or 0, rec.prev_duck or 0
     local cross  = 0.5
-    if (rec._dck_cooldown or 0) > 0 then
+    if (rec._dck_cooldown or 0) > 0 then  -- luacheck: ignore 542
         -- cooldown ticking — decrement only, no DCK this tick
     elseif (dp < cross and dn >= cross) or (dp >= cross and dn < cross) then
         local torso = as.torso_yaw or safe_eye
@@ -1950,7 +2078,13 @@ local BOT_KEYS = {}
 local function GetS64(player)
     local s64 = entity.get_steam64(player)
     if s64 and s64 ~= 0 then
-        local k = tostring(s64); EIDX_S64[player] = k; return k
+        -- %.0f, never tostring: gamesense returns the 32-bit account id
+        -- (real logs: s64=1888056751), for which both print the same
+        -- digits. But a full 64-bit id held in a double prints as
+        -- "7.6561198e+16" through tostring -- every player would share one
+        -- profile and one DB entry. Found when the harness ran on LuaJIT.
+        local k = (type(s64) == "number") and string.format("%.0f", s64) or tostring(s64)
+        EIDX_S64[player] = k; return k
     end
     local n = entity.get_player_name(player)
     if n and n ~= "" and n ~= "unknown" then
@@ -2143,7 +2277,7 @@ FlushDB = function()
         info("db", "pruned %d stale profiles", #keys - DB_MAX)
     end
     database.write(DB_KEY, DB)
-    database.write(ENG.DB_KEY, ENG.Save(ENG.G))
+    database.write(ENG.DB_KEY, ENG.SaveGlobal())
     info("db", "written %d entries", math.min(#keys, DB_MAX))
 end
 
@@ -2212,7 +2346,7 @@ local function EngineStep(rec, player, legacy_arm, legacy_val, legacy_meth,
     for i = 1, n do if C[i].arm == legacy_arm then d = i; break end end
     if not d then n = EngPush(C, n, legacy_arm, legacy_val, legacy_meth); d = n end
 
-    local pick, p = ENG.Decide(rec, C, n, d)
+    local pick, p = ENG.Decide(rec, C, n, d, rec.state)
     rec.eng_pick, rec.eng_by, rec.eng_arm = pick, pick ~= d, C[pick].arm
     if DET.verbose and rec._eng_logged ~= (rec.eng_by and rec.eng_arm or false) then
         rec._eng_logged = rec.eng_by and rec.eng_arm or false
@@ -2353,12 +2487,22 @@ local function ProcessPlayer(player, ctx)
             end
         end
 
-        -- Sample
-        local praw = entity.get_prop(player, "m_flPoseParameter", 11) or 0
+        -- Sample. Input boundary: everything below is stored in the history
+        -- buffers and fed to Clamp, so non-finite values stop here (found by
+        -- the v7.3 fuzzer: a NaN eye yaw was landing in rec.tm). A missing
+        -- or broken pose reads as centre, i.e. no side evidence -- it used
+        -- to default to 0, which is a full -60 desync read.
+        local praw = entity.get_prop(player, "m_flPoseParameter", 11)
+        praw = Finite(praw) and Clamp(praw, 0, 1) or 0.5
         pose = praw * CFG.POSE_SCALE - 60
         local _, eyy = entity.get_prop(player, "m_angEyeAngles")
-        local eye_y  = as.eye_angles_y or eyy or 0
-        duck      = as.duck_amount or 0
+        local eye_y  = as.eye_angles_y
+        if not Finite(eye_y) then eye_y = eyy end
+        if not Finite(eye_y) then
+            local last = RLen(rec.hist) > 0 and RGet(rec.hist, 1)
+            eye_y = (last and Finite(last.e)) and last.e or 0
+        end
+        duck      = Finite(as.duck_amount) and as.duck_amount or 0
         on_ground = as.on_ground
 
         -- ORIGIN-JUMP SHIFT CHECK: a >64-unit origin teleport on a clean
@@ -3017,19 +3161,23 @@ local function EngTag(d)
     local e = d.eng
     if not e then return "" end
     -- eng=<arm>[*]: * marks a shot where the engine overrode the chain
-    return string.format(" eng=%s%s", e.arm, e.by and "*" or "")
+    return string.format(" eng=%s%s p=%.2f", e.arm, e.by and "*" or "", e.p or 0)
 end
 
 local function EngSnap(r)
     local signs = {}
     for src, sg in pairs(r.eng_sig) do signs[src] = sg end
-    return {arm = r.eng_arm, by = r.eng_by, sign = Sign(r.last_val or 0), signs = signs}
+    -- p: the engine's predicted head chance for the arm being fired, the
+    -- number the audit and the drift test score against the outcome.
+    local p = ENG.Post(r.E, r.eng_arm, r.state)
+    return {arm = r.eng_arm, by = r.eng_by, sign = Sign(r.last_val or 0), signs = signs,
+            state = r.state, p = p}
 end
 
 local function BacktrackTicks(v)
-    if not isnum(v, 0) or v == 0 then return 0 end
+    if not Finite(v) or v <= 0 then return 0 end
     if v < 1 then return TT(v) end
-    return math.floor(v + 0.5)
+    return math.min(64, math.floor(v + 0.5))   -- sv_maxunlag caps real values far below 64
 end
 
 local function on_aim_fire(e)
@@ -3191,7 +3339,8 @@ local function on_aim_hit(e)
 
     info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d%s%s",
         entity.get_player_name(e.target) or "?",
-        HG[e.hitgroup + 1] or "?", e.damage or 0,
+        HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
+        Finite(tonumber(e.damage)) and math.floor(e.damage) or 0,
         d.meth, d.val, d.bt,
         d.in_vuln and (" !" .. d.vuln_t) or "", EngTag(d))
     SHOTS[e.id] = nil
@@ -3636,6 +3785,7 @@ local function BuildOverlay(OV, threat)
         if LAST_SPIKE          then tags[#tags+1] = "SPIKE" end
         if rec.meta_aggressive then tags[#tags+1] = "AGG" end
         if rec.eng_by          then tags[#tags+1] = "ENG " .. ENG.Label(rec.eng_arm) end
+        if DET.engine and ENG.AUD.safe then tags[#tags+1] = "ENG SAFE" end
         if #tags > 0 then
             n = n + 1
             PanelRow(OV, n, "INFO", table.concat(tags, "  \xc2\xb7  "), "-", C_DIM, nil, nil)
