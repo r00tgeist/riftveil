@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v7.4  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v7.5  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · config recognition · vulnerability windows
 --  Adaptive decision engine · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
@@ -22,7 +22,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "7.4"
+local RV_VERSION = "7.5"
 
 local ffi = require "ffi"
 
@@ -947,16 +947,37 @@ end
 -- ══════════════════════════════════════════════════════════════════
 -- (MaxDesync removed — was used to compute max_d which was dead after pick chain refactor)
 
-local function ClassifyState(player, as, spd)
+-- Movement state, matched to how AA builders pick their per-condition
+-- config (v7.5 audit of the builders in the reference set):
+--   * moving vs still at 5 u/s (builders: 2, 3.63, 10), for standing and
+--     for crouching alike (was 20 for crouch-moving: slow crouch-walks
+--     read as a still crouch);
+--   * slow walk is a KEY in every builder, never a speed band. We can only
+--     see speed, so the 5-100 band alone also caught every runner
+--     accelerating into a peek or braking out of one -- 38% of a rifle
+--     peek-and-stop read as slow walk. Source movement physics separates
+--     them: acceleration scales with the target speed (sv_accelerate 5.5:
+--     a full run gains 18-21 u/s per tick, a slow walk capped under 100
+--     gains at most ~8.6), and friction braking loses 6.5-8 u/s per tick.
+--     So inside the band: gaining > 10 u/s/tick is a run; losing > 2
+--     u/s/tick keeps the state it is braking from; otherwise slow walk.
+-- dv = speed change per tick since the previous sample (nil if unknown).
+local function ClassifyState(player, as, spd, dv, prev_state)
     local flags = entity.get_prop(player, "m_fFlags") or 0
     local og    = bit.band(flags, 1) ~= 0
     local duck  = as and (as.duck_amount or 0) > 0.5
     spd = spd or 0
     if not og   then return duck and STATE.AIR_CROUCH  or STATE.AIR           end
-    if duck     then return spd > 20 and STATE.CROUCH_MOVING or STATE.CROUCH  end
-    if spd > 5 and spd < 100 then return STATE.SLOWMOTION                     end
-    if spd >= 100             then return STATE.RUNNING                        end
-    return STATE.STANDING
+    if duck     then return spd > 5 and STATE.CROUCH_MOVING or STATE.CROUCH   end
+    if spd >= 100 then return STATE.RUNNING                                    end
+    if spd <= 5   then return STATE.STANDING                                   end
+    if dv then
+        if dv > 10 then return STATE.RUNNING end
+        if dv < -2 then
+            return (prev_state == STATE.SLOWMOTION) and STATE.SLOWMOTION or STATE.RUNNING
+        end
+    end
+    return STATE.SLOWMOTION
 end
 
 -- TrustedCfg: only hand a recognized config_type to CfgAngle once
@@ -2828,7 +2849,11 @@ local function ProcessPlayer(player, ctx)
         spd = (isnum(vx0) and isnum(vy0)) and math.sqrt(vx0*vx0 + vy0*vy0) or 0
 
         -- State
-        local state_key = ClassifyState(player, as, spd)
+        local dv
+        if isnum(rec.prev_spd) and rec.prev_spd_st and st > rec.prev_spd_st then
+            dv = (spd - rec.prev_spd) / (st - rec.prev_spd_st)   -- per tick, fakelag-safe
+        end
+        local state_key = ClassifyState(player, as, spd, dv, rec.state)
         rec.state = state_key
         if rec.conf == 0 then rec.conf = CFG.STATE_SEED[state_key] or 0.25 end
 
@@ -3143,6 +3168,7 @@ local function ProcessPlayer(player, ctx)
     rec.prev_pose     = pose
     rec.prev_spd2     = rec.prev_spd  -- shift: spd2 = last tick's spd before this update
     rec.prev_spd      = spd
+    if spd then rec.prev_spd_st = st end
     rec.prev_duck     = duck or 0
     rec.prev_onground = on_ground
     -- Decrement DCK cooldown each tick (set to 10 when DCK fires, counts down to 0)
@@ -3439,11 +3465,11 @@ local function on_aim_hit(e)
         end
     end
 
-    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d%s%s",
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s%s%s",
         entity.get_player_name(e.target) or "?",
         HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
         Finite(tonumber(e.damage)) and math.floor(e.damage) or 0,
-        d.meth, d.val, d.bt,
+        d.meth, d.val, d.bt, d.state or "?",
         d.in_vuln and (" !" .. d.vuln_t) or "", EngTag(d))
     SHOTS[e.id] = nil
 end
@@ -3517,9 +3543,9 @@ local function on_aim_miss(e)
     local is_resolver = (reason == "?" or reason == "")
                         and not d.extrapolated and not d.teleported
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%%%s%s%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s%s%s%s",
         entity.get_player_name(e.target) or "?",
-        reason, d.meth, d.val, d.bt, d.hc,
+        reason, d.meth, d.val, d.bt, d.hc, d.state or "?",
         d.in_vuln and (" !" .. d.vuln_t) or "",
         (d.extrapolated and " [extrap]" or "") .. (d.teleported and " [tele]" or ""),
         EngTag(d))

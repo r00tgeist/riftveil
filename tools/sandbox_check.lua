@@ -755,6 +755,52 @@ end
 -- DB cap: 600 profiles through the real FlushDB must leave exactly 500,
 -- keeping the most recently stamped ones.
 local UNIT_FAIL, UNIT_OK = {}, nil
+-- ClassifyState against Source movement physics (sv_accelerate 5.5,
+-- friction 5.2, stopspeed 80, 64 tick): a peek-and-stop must read as
+-- running, not slow walk; a capped slow walk must read as slow walk; a
+-- slow crouch-walk must read as crouch-moving.
+do
+    local CS = probe("ClassifyState")
+    if not CS then
+        UNIT_FAIL[#UNIT_FAIL + 1] = "ClassifyState: not reachable through upvalues"
+    else
+        local TI_, ACC, FRIC, STOP = 1 / 64, 5.5, 5.2, 80
+        local function run(profile, duck)
+            local counts, prev, state = {}, nil, "standing"
+            for _, v in ipairs(profile) do
+                local dv = prev and (v - prev) or nil
+                state = CS(101, {duck_amount = duck and 1 or 0}, v, dv, state)
+                counts[state] = (counts[state] or 0) + 1
+                prev = v
+            end
+            return counts
+        end
+        local function peek(wish)
+            local p, v = {}, 0
+            for _ = 1, 20 do v = math.min(wish, v + ACC * wish * TI_); p[#p + 1] = v end
+            for _ = 1, 30 do v = math.max(0, v - math.max(v, STOP) * FRIC * TI_); p[#p + 1] = v end
+            return p
+        end
+        local function capped(cap, n)
+            local p, v = {}, 0
+            for _ = 1, n do v = math.min(cap, v + ACC * cap * TI_); p[#p + 1] = v end
+            return p
+        end
+        local knife, rifle = run(peek(250)), run(peek(215))
+        local slow, crouch = run(capped(82, 40)), run(capped(40, 30), true)
+        if (knife.slowmotion or 0) > 1 or (rifle.slowmotion or 0) > 1 then
+            UNIT_FAIL[#UNIT_FAIL + 1] = string.format("ClassifyState: peeks read as slow walk on %d/%d ticks",
+                knife.slowmotion or 0, rifle.slowmotion or 0)
+        end
+        if (slow.slowmotion or 0) < 38 then
+            UNIT_FAIL[#UNIT_FAIL + 1] = string.format("ClassifyState: slow walk read as slow walk on only %d/40 ticks", slow.slowmotion or 0)
+        end
+        if (crouch.crouch_moving or 0) < 29 then
+            UNIT_FAIL[#UNIT_FAIL + 1] = string.format("ClassifyState: crouch-walk read as crouch-moving on only %d/30 ticks", crouch.crouch_moving or 0)
+        end
+    end
+end
+
 -- ENG.Fade (soft reset): halves totals and per-state votes, nothing else.
 do
     local E_ = probe("ENG")

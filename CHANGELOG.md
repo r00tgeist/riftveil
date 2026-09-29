@@ -3,6 +3,17 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v7.5 – Enemy state detection audited against the AA builders
+          (docs/STATE_AUDIT.md). Builders pick slow walk by key; we read
+          it from a 5-100 u/s speed band, which also caught every runner
+          accelerating into or braking out of a peek (38% of a rifle
+          peek-and-stop, by Source movement physics). ClassifyState now
+          uses the speed change per tick (fakelag-normalized): gaining
+          > 10 u/s/tick is a run, braking keeps its state; misread peek
+          ticks 18-19 -> 1, a real slow walk unchanged. Crouch-move
+          threshold 20 -> 5 u/s (builders: 2 / 3.63 / 10). Movement state
+          on every [hit]/[miss] line (st=) and a per-state table in
+          tools/log_report.lua. Physics-profile regression check added.
   v7.4 – Bug hunt, engine interplay, ProcessPlayer split.
           ENGINE INTERPLAY: the chain's own adaptive habits fought the
           engine. Under Adaptive engine the legacy flip no longer inverts
