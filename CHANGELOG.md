@@ -3,6 +3,27 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v7.9 – Enemy-cheat engine layer; vuln windows scored on real evidence.
+          LOG: the v7.6 match (51 shots) hit the head on 42% of
+          informative shots vs ~63% over all earlier logs. Two opponents
+          account for it (2 heads / 11 resolver-decided shots), both on
+          jittering 5-way/3-way AA, mostly through vuln_unk and suppress.
+          Window age (0.2 s vs > 1 s since detection) showed no effect,
+          so the window length stays.
+          FIX: vuln_profile scored every shot in a window as a trial and
+          every hit, body included, as a success -- body hits land from
+          either side, so the per-player trust gate could never fire.
+          Now only an applied window's head hits and resolver misses
+          count; the unk miss streak follows the same rule.
+          CHEAT LAYER: with the cheat revealer script loaded, each
+          enemy's cheat id (read from its gamesense/cheat_revealer
+          module once a second) keys a new engine level between global
+          and player, pooled over every player on that cheat and saved
+          (riftveil_engine_cheat); 6 same-cheat votes let an arm act on a
+          player with no shots yet. Cheat saved per profile. Shot lines
+          log cht=, log_report adds BY ENEMY CHEAT, rv_engine lists the
+          layer. tools/cheat_sim.lua: +0.4 points when the cheat decides
+          the AA, +0.15 on average across worlds, worst -0.01.
   v7.8 – Per-weapon aim policy: model and data, no behaviour change.
           tools/aim_model.lua derives when head, head-on-safe-points or
           prefer-body kills fastest, per weapon, enemy HP, body exposure

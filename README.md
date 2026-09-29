@@ -38,6 +38,12 @@ per-player arm beliefs),
    base-rate model. While it decides, the chain's own adaptive habits
    (flipping the tracked side after misses, wiping hit memory on a soft
    reset) stand down -- measured to fight the engine.
+4. **Enemy cheat.** If the cheat revealer script is loaded next to
+   RIFTVEIL, each enemy's detected cheat (gs, nl, nw, ot, ...) keys an
+   extra engine level: evidence pooled over every player met on that
+   cheat, saved across sessions. A new enemy then starts from what worked
+   against that cheat, not from the lobby average. Without the revealer
+   nothing changes. Shot lines log `cht=`; `rv_engine` lists the layer.
 
 Full reasoning, including what was tried and cut, is in the comment blocks
 of `riftveil.lua` (search for `DECISION ENGINE`). History: `CHANGELOG.md`.
@@ -68,6 +74,7 @@ QUICK=1 bash tools/check_all.sh  # 2 fuzz seeds, short soak
 | Tool | Checks |
 |---|---|
 | `tools/sandbox_check.lua` | Loads the script against a mock gamesense and plays a scripted match: global leaks, undeclared reads, swallowed errors, required code paths, unit checks. `RV_FUZZ=<seed>` adds a hostile randomized phase (NaN/inf inputs, churn, out-of-order events) with plist range checks and a memory soak. `RV_PLIST_OUT`, `RV_NO_ENGINE`, `RV_TARGET` enable differential tests. |
+| `tools/cheat_sim.lua` | Careers of 12 matches against new opponents: measures the cheat layer against the global layer alone, in worlds where the cheat decides the AA fully, partly, or not at all. |
 | `tools/engine_sim.lua` | Runs the real engine code against 10 modeled opponents vs the chain alone; checks the no-evidence guarantee. `RV_ENG="KEY=value,..."` overrides constants for ablations. |
 | `tools/log_report.lua` | Real-match analysis (above). |
 | `tools/preview/` | Renders the info panel from its own drawing code (needs Pillow). |

@@ -62,12 +62,16 @@ echo "7. Decision engine simulation (LuaJIT)"
 luajit tools/engine_sim.lua > "$TMP/sim.txt" 2>&1 && pass "$(grep 'average gain' "$TMP/sim.txt"); $(grep -o 'kept the chain.s pick in [0-9/]* random cases' "$TMP/sim.txt")" \
     || { fail "engine sim"; tail -4 "$TMP/sim.txt"; }
 
+echo "7b. Cheat layer simulation (LuaJIT)"
+luajit tools/cheat_sim.lua > "$TMP/csim.txt" 2>&1 && pass "$(grep 'average gain' "$TMP/csim.txt" | sed 's/^CHEAT_CAP [0-9]* (\*): //')" \
+    || { fail "cheat sim"; tail -4 "$TMP/csim.txt"; }
+
 echo "8. Log analyzer smoke test"
 printf '%s\n' '[00:00:00.000][INF][init] RIFTVEIL v7.8 loaded' \
-    '[00:00:01.000][INF][hit] player=a b group=head dmg=100 meth=suppress val=-29 bt=0 st=running eng=pose:inv p=0.61' \
+    '[00:00:01.000][INF][hit] player=a b group=head dmg=100 meth=suppress val=-29 bt=0 st=running cht=nl eng=pose:inv p=0.61' \
     '[00:00:02.000][WRN][miss] player=a b reason=? meth=hit_mem val=31 bt=0 hc=80% eng=hitmem:inv* p=0.55' > "$TMP/log.txt"
-lua5.3 tools/log_report.lua "$TMP/log.txt" > "$TMP/rep.txt" 2>&1 && grep -q "Brier" "$TMP/rep.txt" \
-    && pass "parses hit/miss/eng/p lines" || fail "log_report"
+lua5.3 tools/log_report.lua "$TMP/log.txt" > "$TMP/rep.txt" 2>&1 && grep -q "Brier" "$TMP/rep.txt" && grep -q "BY ENEMY CHEAT" "$TMP/rep.txt" \
+    && pass "parses hit/miss/eng/p/cht lines" || fail "log_report"
 
 echo "9. Performance on LuaJIT (2v2: net update + 4 paint frames per tick)"
 line=$(RV_BENCH=2 luajit tools/sandbox_check.lua 2>&1 | grep "^Bench")

@@ -292,7 +292,29 @@ local mock = {
     pcall = pcall, setmetatable = setmetatable, error = error, next = next,
     os = os, unpack = table.unpack or unpack,
 }
-mock.require = function() return mock.ffi end
+-- A stand-in for the cheat revealer script's module (RV_NO_REVEALER=1
+-- leaves it out). Entity 1 has no data, entity 2's get_cheat throws like
+-- the real one does on a missing table, the rest report a cheat, "wh"
+-- (no signature) included.
+local REVEALER = {
+    has_data  = function(ent) return ent ~= 1 end,
+    get_cheat = function(ent)
+        if ent == 2 then error("attempt to index a nil value") end
+        local ids = {"nl", "gs", "wh", "ot"}
+        return {cheat_id = ids[ent % 4 + 1], cheat_long = "?"}
+    end,
+}
+mock.package = {loaded = {}, preload = {}}
+if not os.getenv("RV_NO_REVEALER") then
+    mock.package.preload["gamesense/cheat_revealer"] = function() return REVEALER end
+end
+mock.require = function(name)
+    local f = mock.package.preload[name]
+    if f then
+        local m = f(); mock.package.loaded[name] = m; return m
+    end
+    return mock.ffi
+end
 
 -- RV_COUNT_API: count every game API call during the benchmark (per tick
 -- and per paint frame), to compare versions by how much they ask the game.

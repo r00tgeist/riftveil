@@ -22,7 +22,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "7.8"
+local RV_VERSION = "7.9"
 
 local ffi = require "ffi"
 
@@ -103,11 +103,16 @@ local function DBNum(v, lo, hi)
     if type(v) ~= "number" or v ~= v or v < lo or v > hi then return nil end
     return v
 end
+-- Enemy cheat ids as gamesense/cheat_revealer reports them ("wh" there
+-- means no signature seen yet and is not an id).
+local CHEAT_IDS = {gs = true, nl = true, nw = true, pd = true, pr = true, ot = true,
+                   ft = true, pl = true, ev = true, r7 = true, af = true}
 local function CleanDBEntry(e)
     if type(e) ~= "table" then return nil end
     return {
         config_type = type(e.config_type) == "string" and e.config_type or nil,
         vuln_pref   = type(e.vuln_pref)   == "string" and e.vuln_pref   or nil,
+        cheat       = CHEAT_IDS[e.cheat] and e.cheat or nil,
         bt_pref     = DBNum(e.bt_pref, 0, 64),
         hit_rate    = DBNum(e.hit_rate, 0, 1),
         samples     = DBNum(e.samples, 0, 1e9),
@@ -470,8 +475,23 @@ client.set_event_callback("console_input", function(text)
             A.safe and "SAFE MODE: chain only" or "overrides allowed",
             A.n, A.n > 0 and A.se_eng / A.n or 0, A.n > 0 and A.se_base / A.n or 0)}
         for s64, rec in pairs(REC) do
-            out[#out+1] = string.format("  %-20s %s", (entity.get_player_name(rec.eidx or 0) or s64):sub(1, 20),
-                EngSummary(rec))
+            out[#out+1] = string.format("  %-20s %-3s %s", (entity.get_player_name(rec.eidx or 0) or s64):sub(1, 20),
+                rec.cheat or "-", EngSummary(rec))
+        end
+        -- Cheat layer: votes pooled per enemy cheat, all matches.
+        local ids = {}
+        for id in pairs(ENG.C) do ids[#ids + 1] = id end
+        table.sort(ids)
+        for _, id in ipairs(ids) do
+            local parts = {}
+            for arm, c in pairs(ENG.C[id]) do
+                if c.s + c.f >= 1 then
+                    parts[#parts + 1] = string.format("%s=%d%%(%.1f)", arm,
+                        math.floor(100 * (c.s + 1) / (c.s + c.f + 2) + 0.5), c.s + c.f)
+                end
+            end
+            table.sort(parts)
+            out[#out+1] = string.format("  cheat %-3s %s", id, #parts > 0 and table.concat(parts, ",") or "-")
         end
         local s = table.concat(out, "\n")
         client.log(s); log_write("CMD", "engine", s)
@@ -1105,6 +1125,15 @@ end
 --    + other players' evidence       (<= GLOBAL_CAP counts, persisted)
 --    + this player's other states    (<= STATE_POOL counts)
 --    + this player in this state     (full weight)
+--  When the enemy's cheat is known (ENEMY CHEAT below), a level sits
+--  between global and player: other players on the same cheat, <=
+--  CHEAT_CAP votes, persisted. CHEAT_MIN_N of those votes also let an arm
+--  act before this player has shots of its own. tools/cheat_sim.lua, 12
+--  matches of new opponents at 10 shots each (the logs' average): +0.4
+--  points when the cheat decides the AA, +0.15 averaged over worlds where
+--  it decides less or nothing, worst -0.01. Small, because the player
+--  layer learns within a few shots anyway; the logs' cht= field shows
+--  whether real cheats differ more than that.
 --  A fresh state borrows the player's general tendency; a state with its
 --  own shots speaks for itself. Nothing is double counted: each level is
 --  the level above minus what the level below already holds.
@@ -1149,6 +1178,8 @@ ENG = {
     MIN_DEFAULT  = 3,
     MISS_SPILL   = 0.5,
     GLOBAL_CAP   = 12,
+    CHEAT_CAP    = 12,    -- votes a player borrows from others on the same cheat
+    CHEAT_MIN_N  = 6,     -- same-cheat votes that let an arm act without own shots
     STATE_POOL   = 8,     -- votes a state borrows from the player's other states
     FORGET       = 1,     -- per credited shot; 1 = off (see above)
     AUDIT_MIN    = 20,
@@ -1156,6 +1187,7 @@ ENG = {
     PRIOR_SCALE  = 1,
     DECAY        = 0.5,   -- saved counts on load, and on a soft reset
     DB_KEY       = "riftveil_engine",
+    CHEAT_KEY    = "riftveil_engine_cheat",
     -- {prior mean, prior weight} per arm
     PRIOR = {
         ["vuln_delta:as"] = {0.62, 8}, ["vuln_delta:inv"] = {0.38, 4},
@@ -1178,6 +1210,7 @@ ENG = {
     VULN_SRC = {unk = "vuln_delta", stp = "vuln_delta", pka = "vuln_delta",
                 dck = "vuln_delta", lby = "vuln_lby"},
     G   = {},   -- global evidence: [arm] = {s, f}
+    C   = {},   -- per enemy cheat: [cheat id] = {[arm] = {s, f}}
     AUD = {n = 0, se_eng = 0, se_base = 0, heads = 0, safe = false},
 }
 
@@ -1209,13 +1242,30 @@ function ENG.Post(E, arm, state)
     local own = E.all[arm]
     local os, of = own and own.s or 0, own and own.f or 0
 
+    -- Same cheat, other players: E.cheat is set once the enemy's cheat is
+    -- known (CheatOf). Their evidence is taken out of the global level so
+    -- it is not counted twice.
+    local cc = E.cheat and ENG.C[E.cheat]
+    local c  = cc and cc[arm]
+    local cs, cf = c and c.s or 0, c and c.f or 0
+
     local g = ENG.G[arm]
     if g then
-        local gs, gf = math.max(0, g.s - os), math.max(0, g.f - of)
+        local gs = math.max(0, g.s - math.max(os, cs))
+        local gf = math.max(0, g.f - math.max(of, cf))
         local gn = gs + gf
         if gn > 0 then
             local w = math.min(1, ENG.GLOBAL_CAP / gn)
             a, b = a + gs * w, b + gf * w
+        end
+    end
+    local xn = 0
+    if c then
+        local xs, xf = math.max(0, cs - os), math.max(0, cf - of)
+        xn = xs + xf
+        if xn > 0 then
+            local w = math.min(1, ENG.CHEAT_CAP / xn)
+            a, b = a + xs * w, b + xf * w
         end
     end
 
@@ -1233,7 +1283,7 @@ function ENG.Post(E, arm, state)
         a, b = a + os, b + of
     end
     local n = a + b
-    return a / n, a * b / (n * n * (n + 1)), os + of
+    return a / n, a * b / (n * n * (n + 1)), os + of, xn
 end
 
 -- cands[1..n] = {arm, val, meth}; d = index of the chain's pick.
@@ -1247,8 +1297,8 @@ function ENG.Decide(rec, cands, n, d, state)
     for i = 1, n do
         if i ~= d then
             local arm = cands[i].arm
-            local m, v, on = ENG.Post(E, arm, state)
-            if on >= ENG.MIN_OWN or dn >= ENG.MIN_DEFAULT then
+            local m, v, on, xn = ENG.Post(E, arm, state)
+            if on >= ENG.MIN_OWN or dn >= ENG.MIN_DEFAULT or xn >= ENG.CHEAT_MIN_N then
                 local p = ENG.Phi((m - dm) / math.sqrt(v + dv))
                 local need = (arm == hold) and ENG.HOLD or ENG.SWITCH_IN
                 if p > need and p > bestp then best, bestp = i, p end
@@ -1281,6 +1331,12 @@ local function EngAdd(E, state, arm, ds, df)
     end
     local g = EngCell(ENG.G, arm)
     g.s, g.f = g.s + ds, g.f + df
+    if E.cheat then
+        local T = ENG.C[E.cheat]
+        if not T then T = {}; ENG.C[E.cheat] = T end
+        c = EngCell(T, arm)
+        c.s, c.f = c.s + ds, c.f + df
+    end
 end
 
 -- Session-wide Brier audit of the prediction made at fire time.
@@ -1380,6 +1436,24 @@ function ENG.SaveGlobal()
     return EngSaveCells(ENG.G)
 end
 
+function ENG.SaveCheat()
+    local out = {}
+    for id, T in pairs(ENG.C) do out[id] = EngSaveCells(T) end
+    return out
+end
+
+function ENG.LoadCheat(t)
+    ENG.C = {}
+    if type(t) ~= "table" then return end
+    for id, T in pairs(t) do
+        if type(id) == "string" then
+            local dst = {}
+            EngLoadCells(dst, T)
+            ENG.C[id] = dst
+        end
+    end
+end
+
 function ENG.Trials(E)
     local n = 0
     for _, c in pairs(E.all) do n = n + c.s + c.f end
@@ -1390,6 +1464,7 @@ do
     local G = ENG.New()
     EngLoadCells(G.all, database.read(ENG.DB_KEY))
     ENG.G = G.all
+    ENG.LoadCheat(database.read(ENG.CHEAT_KEY))
 end
 
 -- Short label for an arm: "pose:inv" -> "POSE INV", for the panel and log.
@@ -2245,6 +2320,7 @@ local function NewRec(player, s64)
         bt_hist={}, preferred_bt=db.bt_pref or 0,
         vuln_profile={}, vuln_pref=db.vuln_pref or nil,
         vuln_ttl=0, vuln_type=nil, vuln_val=0, vuln_conf=0,
+        cheat=db.cheat,   -- enemy cheat id (CheatPoll), saved per steam64
         -- Decision engine (see DECISION ENGINE). E = per-arm evidence,
         -- saved per steam64 and halved on load. eng_arm/eng_sig/eng_by
         -- describe the decision in effect (copied into each shot at
@@ -2296,6 +2372,7 @@ local function GetRec(player)
     local s64 = GetS64(player); if not s64 then return nil end
     if not REC[s64] then
         REC[s64] = NewRec(player, s64)
+        REC[s64].E.cheat = REC[s64].cheat
         info("rec", "new profile player=%s s64=%s",
              entity.get_player_name(player) or "?", s64)
     end
@@ -2308,6 +2385,65 @@ local function ClearEnt(player)
     local s64 = EIDX_S64[player]
     if s64 and REC[s64] then
         REC[s64].active = false; REC[s64].resolved = false
+    end
+end
+
+-- ══════════════════════════════════════════════════════════════════
+--  ENEMY CHEAT  (feeds the engine's cheat layer)
+--
+--  RIFTVEIL does not read voice packets itself. When the cheat revealer
+--  script runs alongside it, it registers package.preload
+--  ["gamesense/cheat_revealer"] with get_cheat(ent) / has_data(ent), and
+--  we read that once a second. Nothing is required unless it is already
+--  registered, so without the revealer this is a table lookup every 10 s.
+--
+--  What the id does: the engine pools evidence per cheat across every
+--  player met on it (ENG.C, persisted), so a new enemy on a cheat whose
+--  AA the engine has already learned starts from that instead of from the
+--  lobby-wide average. No per-cheat angles are hand-coded -- nothing in
+--  the logs says what they would be; the layer learns them.
+-- ══════════════════════════════════════════════════════════════════
+local CHEAT_MODNAME = "gamesense/cheat_revealer"
+local CHEAT_MOD, CHEAT_NEXT_LOOK = nil, 0
+
+local function CheatModule(now)
+    if CHEAT_MOD then return CHEAT_MOD end
+    if now < CHEAT_NEXT_LOOK then return nil end
+    CHEAT_NEXT_LOOK = now + 10
+    if type(package) ~= "table" then return nil end
+    local m = type(package.loaded) == "table" and package.loaded[CHEAT_MODNAME] or nil
+    if not m and type(package.preload) == "table" and package.preload[CHEAT_MODNAME] then
+        local ok, r = pcall(require, CHEAT_MODNAME)
+        if ok then m = r end
+    end
+    if type(m) == "table" and type(m.get_cheat) == "function" and type(m.has_data) == "function" then
+        CHEAT_MOD = m
+        info("cheat", "cheat revealer found -- enemy cheats feed the engine")
+    end
+    return CHEAT_MOD
+end
+
+local function SetCheat(rec, id, player)
+    if not CHEAT_IDS[id] or rec.cheat == id then return end
+    rec.cheat, rec.E.cheat = id, id
+    info("cheat", "player=%s cheat=%s", entity.get_player_name(player) or "?", id)
+end
+
+-- get_cheat indexes the revealer's per-player table without a nil check,
+-- hence has_data first and both under pcall.
+local function CheatPoll(enemies, n, now)
+    local m = CheatModule(now)
+    if not m then return end
+    for i = 1, n do
+        local player = enemies[i]
+        local okh, has = pcall(m.has_data, player)
+        if okh and has then
+            local okc, c = pcall(m.get_cheat, player)
+            if okc and type(c) == "table" and type(c.cheat_id) == "string" then
+                local rec = GetRec(player)
+                if rec then SetCheat(rec, c.cheat_id, player) end
+            end
+        end
     end
 end
 
@@ -2345,6 +2481,7 @@ FlushDB = function()
             DB[s64] = {
                 config_type = rec.config_type or ex.config_type,
                 vuln_pref   = rec.vuln_pref   or ex.vuln_pref,
+                cheat       = rec.cheat       or ex.cheat,
                 bt_pref     = rec.preferred_bt > 0 and rec.preferred_bt or ex.bt_pref,
                 hit_rate    = tot_n > 0
                     and (nhr * this_n + (ex.hit_rate or 0) * prev_n) / tot_n
@@ -2376,6 +2513,7 @@ FlushDB = function()
     end
     database.write(DB_KEY, DB)
     database.write(ENG.DB_KEY, ENG.SaveGlobal())
+    database.write(ENG.CHEAT_KEY, ENG.SaveCheat())
     info("db", "written %d entries", math.min(#keys, DB_MAX))
 end
 
@@ -3266,6 +3404,7 @@ local function Update()
         if not fresh then PL_CACHE = {} end
         client.update_player_list()
         LAST_PL_SYNC = ctx.cur_tc
+        if DET.engine then CheatPoll(LIVE_ENEMIES, n_live, globals.realtime()) end
     end
 
     for i = 1, n_live do
@@ -3377,6 +3516,7 @@ local function on_aim_fire(e)
         teleported   = e.teleported == true,
         hc      = e.hit_chance or 0,
         wpn     = LocalWeaponClass(),
+        cheat   = r and r.cheat or nil,
         -- What the ragebot aimed at and expected to deal (aim_fire fields),
         -- so logs show hit rate per weapon and aimed hitgroup -- the input
         -- the per-weapon aim model needs (docs/WEAPON_PLAN.md).
@@ -3522,12 +3662,13 @@ local function on_aim_hit(e)
         if is_head then VulnCredit(rec, d, true) end
     end
 
-    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s wpn=%s hp=%d ar=%d aim=%s pdmg=%d%s%s",
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s wpn=%s hp=%d ar=%d aim=%s pdmg=%d%s%s%s",
         entity.get_player_name(e.target) or "?",
         HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
         Finite(tonumber(e.damage)) and math.floor(e.damage) or 0,
         d.meth, d.val, d.bt, d.state or "?", d.wpn or "?", d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1,
+        d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "", EngTag(d))
     SHOTS[e.id] = nil
 end
@@ -3601,10 +3742,11 @@ local function on_aim_miss(e)
     local is_resolver = (reason == "?" or reason == "")
                         and not d.extrapolated and not d.teleported
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s wpn=%s hp=%d ar=%d aim=%s pdmg=%d%s%s%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s wpn=%s hp=%d ar=%d aim=%s pdmg=%d%s%s%s%s",
         entity.get_player_name(e.target) or "?",
         reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.wpn or "?", d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1,
+        d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "",
         (d.extrapolated and " [extrap]" or "") .. (d.teleported and " [tele]" or ""),
         EngTag(d))
@@ -3974,6 +4116,7 @@ local function BuildOverlay(OV, threat)
         OV.bar = Clamp(side * cf, -1, 1)
 
         local tags = {}
+        if rec.cheat then tags[#tags+1] = string.upper(rec.cheat) end
         if rec.preferred_bt > 0 then tags[#tags+1] = "BT " .. rec.preferred_bt end
         if rec.config_type and rec.config_conf >= CFG.CFG_THRESH then
             tags[#tags+1] = string.upper((rec.config_type:gsub("_", " ")))
