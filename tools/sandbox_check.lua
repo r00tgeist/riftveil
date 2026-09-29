@@ -33,6 +33,7 @@ local MUST_RUN = {
     "ProcessPlayer", "DetectVuln", "DetectAA", "CanSeeHead", "CfgAngle",
     "LiveCap", "DynamicMaxYaw", "Extract6Lex", "Update", "DrawOverlay",
     "on_aim_fire", "on_aim_hit", "on_aim_miss", "FlushDB",
+    "LearnDecide", "LearnFeedback", "Sticky", "VorDecide", "UpdateEspState",
 }
 
 -- ── Mutable world state the mocks read from ──────────────────────────
@@ -291,6 +292,34 @@ for step = 1, 80 do
         fire("aim_miss", {id = id, target = 101, reason = reason})
     end
 end
+-- Phase 2: quiet play -- no chokes, no LBY collapse, no stop/peek/duck
+-- events -- so no vuln window is open and the adaptive learner (or the
+-- hit_mem/suppress chain) is what's in control when shots land. Mixed
+-- head hits, body hits and resolver misses so every feedback path runs.
+local QUIET = {0.72, 0.30, 0.72, 0.30}
+for step = 81, 240 do
+    W.tick = W.tick + 1
+    W.real = W.real + TI
+    local a = W.players[101]
+    a.sim = W.tick * TI
+    a.pose01 = QUIET[(step % #QUIET) + 1]
+    a.torso = 30
+    local b = W.players[102]
+    b.sim = W.tick * TI
+    b.vx, b.duck = 250, 0
+    fire("net_update_end")
+    fire("paint")
+    for _, cb in ipairs(ESP_FLAGS) do pcall(cb, 101); pcall(cb, 102) end
+    if step % 3 == 0 then
+        local id = 1000 + step
+        fire("aim_fire", {id = id, target = 101, backtrack = 0, hit_chance = 75})
+        local r = step % 9
+        if r == 0 then fire("aim_hit",  {id = id, target = 101, hitgroup = 1, damage = 90})
+        elseif r == 3 then fire("aim_hit", {id = id, target = 101, hitgroup = 3, damage = 30})
+        else fire("aim_miss", {id = id, target = 101, reason = "?"}) end
+    end
+end
+
 for _, cb in ipairs(UI_CALLBACKS) do pcall(cb) end
 fire("console_input", "rv_stats")
 fire("console_input", "rv_db")
