@@ -17,7 +17,8 @@ else in this repository is tooling that runs on a PC, never in the game.
 The accent colour follows gamesense's own *Menu color*. Drag the panel by
 its header while the menu is open.
 
-Console: `rv_stats` (per-player state, engine beliefs, audit score),
+Console: `rv_stats` (per-player state), `rv_engine` (engine audit and
+per-player arm beliefs),
 `rv_db`, `rv_save`, `rv_reset`, `rv_wipe`, `rv_clear`.
 
 ## How it decides
@@ -34,7 +35,9 @@ Console: `rv_stats` (per-player state, engine beliefs, audit score),
    every detector that was present when the shot was fired. What it learns
    carries across players and sessions. A Brier-score self-audit puts it
    in safe mode (chain only) whenever its predictions fall behind a
-   base-rate model.
+   base-rate model. While it decides, the chain's own adaptive habits
+   (flipping the tracked side after misses, wiping hit memory on a soft
+   reset) stand down -- measured to fight the engine.
 
 Full reasoning, including what was tried and cut, is in the comment blocks
 of `riftveil.lua` (search for `DECISION ENGINE`). History: `CHANGELOG.md`.

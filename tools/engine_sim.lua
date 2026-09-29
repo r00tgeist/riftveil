@@ -50,6 +50,12 @@ RUNS = tonumber(os.getenv("RV_RUNS") or "") or RUNS
 
 math.randomseed(20260929)
 local STATS = {safe = 0}
+-- The legacy flip is modelled by default, as the real script has it: the
+-- chain always flips, the engine run doesn't (v7.4 gates flip off while
+-- the engine decides). RV_FLIP=0 removes flip; RV_FLIP_ENGINE=1 restores
+-- the v7.3 behaviour of flipping under the engine.
+FLIP_MODEL = os.getenv("RV_FLIP") ~= "0"
+FLIP_WITH_ENGINE = os.getenv("RV_FLIP_ENGINE") == "1"
 local function side() return (math.random() < 0.5) and 1 or -1 end
 
 -- q_* may be a number or a function(state, shot) for context and drift.
@@ -97,7 +103,9 @@ local function play(sc, use_engine, rec)
             push("hitmem:as", s); push("hitmem:inv", -s)
             legacy = legacy or "hitmem:as"
         end
-        local ps = sgn_for(q(sc.q_pose, st, shot), T); signs.pose = ps
+        local ps = sgn_for(q(sc.q_pose, st, shot), T)
+        if rec.flip then ps = -ps end            -- legacy flip inverts the tracked side
+        signs.pose = ps
         push("pose:as", ps); push("pose:inv", -ps)
         legacy = legacy or "pose:inv"
         push("builtin", 0)
@@ -117,6 +125,29 @@ local function play(sc, use_engine, rec)
             outcome = (r < 0.18) and "head" or ((r < 0.30) and "body" or "miss")
         end
         if outcome == "head" then heads = heads + 1; rec.heads = rec.heads + 1 end
+        -- Legacy flip + soft reset (RV_FLIP=1 models them; RV_FLIP_ENGINE=0
+        -- disables flip while the engine decides). on_aim_miss flips on a
+        -- resolver miss that wasn't a vuln window, hit memory or built-in
+        -- shot and had conf <= 0.65 (modelled as half of them); 3 such
+        -- misses without a hit soft-reset: flip off, hit memory wiped.
+        if FLIP_MODEL then
+            local src = c.arm:match("^([%w_]+)")
+            if outcome == "head" then
+                rec.rmiss = 0
+            elseif outcome == "miss" and src ~= "builtin" and src ~= "vuln_lby" then
+                local flip_ok = not (use_engine and not FLIP_WITH_ENGINE)
+                if src ~= "hitmem" and flip_ok and math.random() < 0.5 then rec.flip = not rec.flip end
+                rec.rmiss = (rec.rmiss or 0) + 1
+                if rec.rmiss >= 3 then
+                    -- v7.4: under the engine the soft reset keeps hit memory
+                    -- and engine evidence (RV_SOFTRESET_ENGINE=1 restores the
+                    -- v7.3 wipe + fade for comparison).
+                    rec.rmiss, rec.flip = 0, false
+                    if not use_engine then rec.heads = 0
+                    elseif os.getenv("RV_SOFTRESET_ENGINE") == "1" then rec.heads = 0; ENG.Fade(rec.E) end
+                end
+            end
+        end
         if outcome ~= "body" then
             local p = ENG.Post(rec.E, c.arm, st)
             ENG.Credit(rec, {arm = c.arm, sign = c.val, signs = signs, state = st, p = p},

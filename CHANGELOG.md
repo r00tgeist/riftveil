@@ -3,6 +3,35 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v7.4 – Bug hunt, engine interplay, ProcessPlayer split.
+          ENGINE INTERPLAY: the chain's own adaptive habits fought the
+          engine. Under Adaptive engine the legacy flip no longer inverts
+          the tracked side, and the soft reset no longer wipes hit memory
+          or engine evidence. tools/engine_sim.lua (flip now modelled):
+          average gain over the chain +0.64 (v7.3 behaviour) -> +1.97,
+          worst scenario -0.60. Engine off: unchanged.
+          BUGS:
+          - A saved profile with a wrong-typed field made NewRec throw on
+            every tick for that player -- no resolver for them all match --
+            and FlushDB throw too. DB entries are now validated against a
+            schema on load and on use (found by a corrupt-data test).
+          - Harness blind spot: rv_clear discarded unflushed [ERR] lines,
+            which had been hiding exactly that crash.
+          STRUCTURE: ProcessPlayer 680 -> 387 lines; side tracking, the
+          legacy chain and applying the decision are now TrackSide,
+          ChainPick and ApplyDecision. Proven behaviour-identical: 12
+          differential runs (both runtimes, engine on/off, scripted + 4
+          fuzz worlds, ~915k plist writes).
+          COVERAGE: every function but the disabled Jitter Prediction now
+          runs in the harness (111 -> 113 of 114): new phase for the
+          lagcomp and yaw-cache sources (late records), torso clustering,
+          origin-jump SHIFT, panel drag, rv_clear, corrupt DB entries; unit
+          checks for ENG.Fade and the DB cap.
+          PERFORMANCE (LuaJIT, first measurement on the game's runtime):
+          2v2 72 us per tick including 4 paint frames, 0.46% of the tick
+          budget; 5 enemies 113 us. No change warranted; added to the suite.
+          DOCS: choke semantics ("record staleness beyond latency") written
+          down where it's computed. NEW: rv_engine console command.
   v7.3 – Engine v2 by measurement, full debugging pass, tooling.
           ENGINE: per-movement-state context (state -> player -> other
           players -> prior, each level a capped prior for the next), a

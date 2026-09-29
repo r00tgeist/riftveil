@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v7.3  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v7.4  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · config recognition · vulnerability windows
 --  Adaptive decision engine · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
@@ -22,7 +22,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "7.3"
+local RV_VERSION = "7.4"
 
 local ffi = require "ffi"
 
@@ -90,7 +90,39 @@ local function err(mod, fmt, ...)  if select("#", ...) > 0 then log_write("ERR",
 --  PER-MATCH STATE  (keyed by steam64, wiped on game_end/level_init)
 -- ══════════════════════════════════════════════════════════════════
 local DB_KEY   = "riftveil_v1"
-local DB       = database.read(DB_KEY) or {}
+
+-- Saved profiles are validated field by field against this schema: a wrong
+-- type (an old version's leftovers, a hand edit, a partial write) used to
+-- make NewRec throw on every tick for that player -- silently no resolver
+-- for them all match -- and FlushDB throw on the same entry. Found by the
+-- v7.4 corrupt-data test. Unknown fields are dropped; a non-table entry
+-- is dropped whole.
+local function DBNum(v, lo, hi)
+    if type(v) ~= "number" or v ~= v or v < lo or v > hi then return nil end
+    return v
+end
+local function CleanDBEntry(e)
+    if type(e) ~= "table" then return nil end
+    return {
+        config_type = type(e.config_type) == "string" and e.config_type or nil,
+        vuln_pref   = type(e.vuln_pref)   == "string" and e.vuln_pref   or nil,
+        bt_pref     = DBNum(e.bt_pref, 0, 64),
+        hit_rate    = DBNum(e.hit_rate, 0, 1),
+        samples     = DBNum(e.samples, 0, 1e9),
+        kills       = DBNum(e.kills, 0, 1e9),
+        gen         = DBNum(e.gen, 0, 1e12),
+        eng         = type(e.eng) == "table" and e.eng or nil,
+    }
+end
+local DB = {}
+do
+    local raw = database.read(DB_KEY)
+    if type(raw) == "table" then
+        for k, e in pairs(raw) do
+            if type(k) == "string" then DB[k] = CleanDBEntry(e) end
+        end
+    end
+end
 -- Load generation: bumped once per script load and stamped on every entry
 -- FlushDB writes, so the DB can drop its least recently seen profiles
 -- instead of growing with every opponent ever met (the whole table is
@@ -329,6 +361,7 @@ local ENG
 --  CONSOLE COMMANDS  (console_input — confirmed cheat event)
 --    rv_stats   match stats per player
 --    rv_db      permanent DB contents
+--    rv_engine  decision engine: audit score, per-player arm beliefs
 --    rv_save    save this match's profiles to the DB now
 --    rv_clear   wipe log file
 --    rv_reset   hard reset match + DB entries for CURRENT enemies only
@@ -422,6 +455,22 @@ client.set_event_callback("console_input", function(text)
         end
         local s = table.concat(out, "\n")
         client.log(s); log_write("CMD","db", s)
+
+    elseif cmd == "rv_engine" then
+        -- The decision engine at a glance: its audit, then per player the
+        -- arms it has evidence on (posterior head chance, votes) and any
+        -- override it is holding against the chain.
+        local A = ENG.AUD
+        local out = {string.format("[RIFTVEIL] === ENGINE === %s | %s | %d shots scored, brier %.3f vs base-rate %.3f",
+            DET.engine and "on" or "off (Detection > Adaptive engine)",
+            A.safe and "SAFE MODE: chain only" or "overrides allowed",
+            A.n, A.n > 0 and A.se_eng / A.n or 0, A.n > 0 and A.se_base / A.n or 0)}
+        for s64, rec in pairs(REC) do
+            out[#out+1] = string.format("  %-20s %s", (entity.get_player_name(rec.eidx or 0) or s64):sub(1, 20),
+                EngSummary(rec))
+        end
+        local s = table.concat(out, "\n")
+        client.log(s); log_write("CMD", "engine", s)
 
     elseif cmd == "rv_save" then
         -- Saves this match's profiles now instead of waiting for match end.
@@ -1021,6 +1070,13 @@ end
 --  A fresh state borrows the player's general tendency; a state with its
 --  own shots speaks for itself. Nothing is double counted: each level is
 --  the level above minus what the level below already holds.
+--
+--  LEGACY ADAPTATION STANDS DOWN. The chain has two adaptive habits of
+--  its own: rec.flip inverts the tracked side after certain misses, and
+--  the soft reset wipes hit memory after 3 resolver misses. Under the
+--  engine both are off (v7.4): with them modelled in engine_sim, the
+--  engine's average gain was +0.64 with flip on, +1.76 without, and +1.97
+--  once the soft reset also kept hit memory (worst case -0.60).
 --
 --  WHAT WAS TRIED AND CUT (tools/engine_sim.lua, 10 opponent models):
 --  per-shot forgetting, a Page-Hinkley config-change detector (fired 0.45
@@ -2096,6 +2152,10 @@ local function GetS64(player)
 end
 
 local function NewRec(player, s64)
+    -- Re-validated here too: DB is also written at runtime (rv_ commands,
+    -- FlushDB), and this is the one place a bad entry would take a player
+    -- out of the resolver.
+    DB[s64] = CleanDBEntry(DB[s64])
     local db = DB[s64] or {}
     -- DB-seeded confidence: a proven prior against this steam64 (3+ confirmed
     -- HITS -- despite the field's name, .kills has counted every confirmed
@@ -2362,6 +2422,341 @@ local function EngineStep(rec, player, legacy_arm, legacy_val, legacy_meth,
 end
 
 -- ══════════════════════════════════════════════════════════════════
+--  DECISION STAGES  -- side tracking, the legacy chain, and applying the
+--  result. Split out of ProcessPlayer in v7.4; the harness checks that
+--  the split changed no plist write on either runtime.
+-- ══════════════════════════════════════════════════════════════════
+-- Which side the enemy is on, and which source said so. Returns nil when
+-- the player was released to the built-in (no side data, no meta hold).
+local function TrackSide(rec, player, ctx, choke, st, six_side, pose_sum, eye_y, aa_type)
+    -- ── SIDE TRACKING ──────────────────────────────────────────────
+    -- Track which side we believe the enemy is on.
+    -- The override block below decides whether to apply it.
+    -- We do NOT compute an angle here — that happens per-case below.
+
+    local tracked_side   = rec.side
+    local tracked_method = METH.RING
+    rec._brute_half       = false  -- set true below only on a true blind-guess tick
+
+    if rec.vuln_ttl == 0 then
+        -- No active vuln window — run the side detection chain
+        if rec.hit_count >= 2 and rec.hit_side ~= 0 then
+            -- Empirical: hit this player on this side this match
+            tracked_side   = rec.hit_side   -- already flip-encoded at storage time
+            tracked_method = METH.HIT_MEM
+
+        elseif six_side ~= 0 and rec.conf > 0.30
+               and (rec.six_disagree or 0) <= (rec.six_agree or 0) + 2 then
+            tracked_side   = six_side
+            tracked_method = METH.SIX_LEX
+
+        elseif FEATURE.JITTER_PRED and #rec.fl >= CFG.PERIOD_MIN then
+            local ps = PredictSide(rec, ctx.cur_tc)
+            if ps ~= 0 then
+                tracked_side   = ps
+                tracked_method = METH.PERIOD
+            end
+
+        elseif not ctx.is_spike and choke == 0 and not rec.def_tickbase then
+            local lco = LCTicks(false, ctx.cur_lat, ctx.avg_lat, ctx.lerp)
+            local h   = rec.tm[st - lco]
+            if h then
+                rec._shift_streak = 0
+                local s = Sign(h.p)
+                if s ~= 0 then
+                    tracked_side   = s
+                    tracked_method = METH.LAGCOMP
+                end
+            else
+                -- SHIFTING GUARD: choke==0 means packets ARE arriving, so a
+                -- missing tm[] slot at this lookback isn't ordinary loss —
+                -- it looks like a shift-style backtrack record break. Track
+                -- it, and stop trusting the PHASE fallback too once it's
+                -- happened repeatedly rather than locking onto a broken window.
+                rec._shift_streak = (rec._shift_streak or 0) + 1
+                if rec._shift_streak < 3 and #rec.fl > 0 and rec.side ~= 0 and rec.period > 0 then
+                    local since = (st - lco) - rec.fl[#rec.fl]
+                    tracked_side   = math.floor(since / rec.period) % 2 == 0
+                                     and rec.side or -rec.side
+                    tracked_method = METH.PHASE
+                end
+            end
+
+        elseif rec.def_tickbase then
+            tracked_side   = six_side ~= 0 and six_side
+                             or (pose_sum ~= 0 and Sign(pose_sum) or rec.side)
+            tracked_method = METH.DEF_TICK
+
+        elseif ctx.is_spike then
+            tracked_side   = pose_sum ~= 0 and Sign(pose_sum) or rec.side
+            tracked_method = METH.RING_SPK
+
+        elseif #rec.yc >= 2 and rec.conf < 0.60 then
+            local ycs = YawSide(rec.yc, eye_y)
+            if ycs ~= 0 then
+                tracked_side   = ycs
+                tracked_method = METH.YAW_CACHE
+            end
+        end
+
+        -- Symmetric fallback: alternate when no signal
+        local is_sym = rec.side == 0 and
+            (aa_type == AA.THREE_WAY or aa_type == AA.FIVE_WAY or aa_type == AA.SKITTER)
+        if tracked_side == 0 and is_sym then
+            tracked_side   = rec.flip and 1 or -1
+            tracked_method = METH.SYM_FLIP
+        end
+
+        -- Apply flip (only when side was NOT from hit_side which encodes it already)
+        if rec.flip and tracked_method ~= METH.HIT_MEM then
+            tracked_side = -tracked_side
+        end
+
+        if tracked_side == 0 then
+            if rec.meta_aggressive then
+                -- Built-in has proven it can't handle this player's meta.
+                -- Never release back to it. Use our best available side.
+                -- Priority: hit_side (confirmed) > ring side > flip guess.
+                -- Note: flip was already applied above so work from rec.side (raw),
+                -- then apply flip manually to avoid double-apply.
+                local base = (rec.hit_side ~= 0 and rec.hit_side)  -- encoded, use direct
+                          or (rec.side ~= 0 and rec.side)           -- raw ring side
+                          or 0
+                if base == 0 then
+                    -- Absolute last resort: no side data at all. Cycle a short
+                    -- candidate sequence (NIXWARE-style shot-cycle fallback:
+                    -- side A full, side A half, side B full, side B half)
+                    -- instead of freezing on one guess -- a sustained
+                    -- no-signal streak shouldn't spam the same wrong angle.
+                    rec._brute_idx = ((rec._brute_idx or 0) + 1) % 4
+                    base = (rec._brute_idx < 2) and 1 or -1
+                    if rec.flip then base = -base end
+                    rec._brute_half = (rec._brute_idx % 2) == 1
+                else
+                    -- Apply flip to raw ring side (hit_side already encodes it)
+                    if base == rec.side and rec.flip then base = -base end
+                end
+                tracked_side   = base ~= 0 and base or 1
+                tracked_method = METH.META_HOLD
+            else
+                ClearEnt(player); return nil
+            end
+        end
+    end
+    return tracked_side, tracked_method
+end
+
+-- The legacy priority chain: vuln > 6lex > hit memory > suppress. Returns
+-- its pick (override flag, value, method), whether suppress is inside its
+-- deliberate pause, and whether a vuln window qualified.
+local function ChainPick(rec, six_side, six_desync, corr_cap, live_cap,
+                         tracked_side, tracked_method, dom_side, aa_type)
+    -- ── ADDITIVE OVERRIDE ──────────────────────────────────────────
+    -- Only take control from the built-in when signal is definitive.
+    -- Priority: vuln > 6lex > hit_mem > meta_hold > suppress > release
+    local should_override = false
+    local override_val    = 0
+    local override_meth   = tracked_method
+    local sup_pausing     = false  -- true only during the suppress streak-cap's pause window
+
+    -- [1] Vulnerability window: correction is deterministic.
+    -- Lower confidence threshold when meta_aggressive — even a weaker
+    -- vuln read beats the known-failing built-in.
+    local vuln_min = rec.meta_aggressive and CFG.VULN_MIN_AGG or CFG.VULN_MIN
+    local vuln_ok  = DET.vuln and rec.vuln_ttl > 0 and rec.conf >= vuln_min
+    if vuln_ok then
+        should_override = true
+        override_val    = rec.vuln_val
+        override_meth   = "vuln_" .. rec.vuln_type
+
+    -- [2] 6lex: animlayer digit read — direct, no guessing. Gated by
+    -- per-player calibration: once it's been proven wrong against
+    -- confirmed hits more than a small margin above how often it's
+    -- been right for THIS player, stop trusting it for them and fall
+    -- through to hit-mem/suppress instead (see on_aim_hit).
+    elseif DET.six and six_side ~= 0 and rec.conf > 0.25
+           and (rec.six_disagree or 0) <= (rec.six_agree or 0) + 2 then
+        should_override = true
+        override_val    = six_desync > 0
+                          and (six_side * six_desync)
+                          or CfgAngle(six_side, rec.state, TrustedCfg(rec), corr_cap)
+        override_meth   = METH.SIX_LEX
+
+    -- [3] Hit-side memory: confirmed hit this match. Per-CONDITION
+    -- memory (this exact movement state) takes priority over the
+    -- global scalar -- an enemy desyncing a different side while
+    -- standing vs. moving means the state-specific record is strictly
+    -- more accurate whenever it exists; the global one is only a
+    -- fallback for states we haven't confirmed a hit in yet this match.
+    -- NOTE: hit_mem is confirmed data (an actual prior hit on this player
+    -- in this state), not a static guess -- so it's capped by live_cap
+    -- (the engine's real desync bound) rather than corr_cap (VelCap's
+    -- velocity-scaled cap). corr_cap is meant only for CfgAngle's static
+    -- guesses per the comment above VelCap's call site; it linearly falls
+    -- to exactly 0 at CFG.VEL_CAP_SPD (580u/s), and a bhopping/fast-moving
+    -- enemy crosses that constantly. Using corr_cap here was clamping a
+    -- confirmed correction to literally val=0.0 -- aim dead-center, worse
+    -- than a coin flip -- every time the target's speed spiked, which is
+    -- exactly when hit_mem should matter most (fast movement is when
+    -- static guesses are least trustworthy, not when confirmed data should
+    -- be thrown out). Seen directly in a debug log: a hit_mem correction
+    -- logged val=0.0 for a fast-moving target.
+    elseif DET.hitmem and rec.state
+           and (rec.hit_count_by_state[rec.state] or 0) >= 2
+           and (rec.hit_side_by_state[rec.state] or 0) ~= 0 then
+        should_override = true
+        override_val    = CfgAngle(rec.hit_side_by_state[rec.state], rec.state, TrustedCfg(rec), live_cap)
+        override_meth   = METH.HIT_MEM
+
+    elseif DET.hitmem and rec.hit_count >= 2 and rec.hit_side ~= 0 then
+        should_override = true
+        override_val    = CfgAngle(rec.hit_side, rec.state, TrustedCfg(rec), live_cap)
+        override_meth   = METH.HIT_MEM
+
+    -- [4] Suppress (FEATURE.SUPPRESS): force wrong angle to gate aimbot hit-chance.
+    -- When meta_aggressive, lower threshold aggressively — fewer shots =
+    -- fewer bullet_impact events near the enemy = testarossa AB starved.
+    -- STREAK CAP: suppress that runs for >8 consecutive ticks means we're stuck.
+    -- Log analysis showed hxlw1ss at 375/914 suppress — mid-conf lock-in pattern
+    -- where conf hovers above threshold permanently with no vuln ever firing.
+    -- After 8 ticks suppress, pause 4 ticks and let a shot through. If we hit,
+    -- great; if we miss, the correction data resets the stuck loop.
+    --
+    -- BUG FIXED: the old single-counter version reset _sup_streak to 0 in
+    -- the non-suppress branches below the instant the streak cap blocked
+    -- suppress for even one tick -- so streak_ok's "streak >= 12" arm was
+    -- unreachable dead code; suppress actually resumed on the very next
+    -- tick instead of pausing for 4. Fixed with a dedicated pause counter
+    -- (_sup_pause) and sup_pausing, which tells the bookkeeping below not
+    -- to blow the counters away while a deliberate pause is in progress.
+    elseif FEATURE.SUPPRESS and rec.vuln_ttl == 0 then
+        local sup_thresh = rec.meta_aggressive and CFG.SUP_MIN_AGG or CFG.SUP_MIN
+        if JITTER_AA[aa_type] and rec.conf > sup_thresh then
+            local streak = rec._sup_streak or 0
+            if streak < CFG.SUP_STREAK then
+                should_override = true
+                local bs = tracked_side ~= 0 and tracked_side or dom_side
+                if bs == 0 then bs = 1 end
+                override_val  = -CfgAngle(bs, rec.state, TrustedCfg(rec), corr_cap)
+                override_meth = METH.SUPPRESS
+            else
+                local pause = (rec._sup_pause or 0) + 1
+                rec._sup_pause = pause
+                sup_pausing = true
+                if pause >= CFG.SUP_PAUSE then
+                    rec._sup_streak = 0
+                    rec._sup_pause  = 0
+                end
+            end
+        end
+    end
+    return should_override, override_val, override_meth, sup_pausing, vuln_ok
+end
+
+-- Engine arbitration over the chain's pick, the plist write (or meta hold,
+-- or release), and decision logging.
+local function ApplyDecision(rec, player, should_override, override_val, override_meth,
+                             sup_pausing, vuln_ok, six_side, six_desync, tracked_side,
+                             tracked_method, dom_side, corr_cap, live_cap, aa_type)
+    -- ── DECISION ENGINE ────────────────────────────────────────────
+    -- The chain above made its pick (or will hold/release below). Put
+    -- every candidate that could apply this tick next to it and let the
+    -- engine decide; with no evidence it returns the chain's own pick.
+    local legacy_arm
+    if should_override then
+        legacy_arm = (override_meth == METH.SUPPRESS and "pose:inv")
+            or (override_meth == METH.SIX_LEX and "six:as")
+            or (override_meth == METH.HIT_MEM and "hitmem:as")
+            or ((ENG.VULN_SRC[rec.vuln_type] or "vuln_other") .. ":as")
+    elseif rec.meta_aggressive and tracked_side ~= 0 then
+        legacy_arm = "pose:as"
+    else
+        legacy_arm = "builtin"
+    end
+    local eng_release = false
+    rec.eng_arm = legacy_arm
+    if DET.engine then
+        eng_release = EngineStep(rec, player, legacy_arm, override_val, override_meth,
+            vuln_ok, six_side, six_desync, tracked_side, tracked_method, dom_side,
+            corr_cap, live_cap)
+        local pick = rec.eng_by and rec.eng_c[rec.eng_pick] or nil
+        if pick then
+            if pick.arm == "builtin" then
+                should_override = false
+            else
+                should_override = true
+                override_val, override_meth = pick.val, pick.meth
+            end
+        end
+    end
+
+    if should_override then
+        -- High priority (set last inside PApply): confirmed via a real
+        -- resolver's usage, not the docs -- hints the LC/backtrack system
+        -- not to deprioritize this target while we're correcting them.
+        PApply(player, true, override_val, true)
+        rec.active = true; rec.resolved = true
+        rec.last_val = override_val; rec.last_meth = override_meth
+        -- Track suppress streak for the streak-cap logic above
+        if override_meth == METH.SUPPRESS then
+            rec._sup_streak = (rec._sup_streak or 0) + 1
+        else
+            rec._sup_streak = 0   -- any non-suppress override resets the streak
+        end
+        rec._sup_pause = 0
+
+    elseif not eng_release and rec.meta_aggressive and tracked_side ~= 0 then
+        -- META_HOLD: built-in has failed this player's meta (serenity ways(),
+        -- ambani torpedo, aesthetic records — patterns the 2022-era built-in
+        -- has no answer for). Hold our best tracked_side correction rather than
+        -- releasing to a resolver that's already proven it can't handle this AA.
+        -- Same corr_cap-zeroing bug as the [3] hit_mem branch (see v5.8):
+        -- tracked_side can be sourced from METH.HIT_MEM here too (the
+        -- unconditional side-tracking chain above sets tracked_method =
+        -- HIT_MEM off rec.hit_side whenever hit_count>=2, regardless of
+        -- whether the "Hit Memory" checkbox is even on) -- so a fast-
+        -- moving target would still get its confirmed correction clamped
+        -- to literal 0 right here, via this second call site, even after
+        -- the [3] branch itself was fixed. Use live_cap for that case.
+        local meta_cap = (tracked_method == METH.HIT_MEM) and live_cap or corr_cap
+        local meta_val = CfgAngle(tracked_side, rec.state, TrustedCfg(rec), meta_cap)
+        if rec._brute_half then meta_val = meta_val * 0.5 end
+        PApply(player, true, meta_val, true)
+        rec.active = true; rec.resolved = true
+        rec.last_val = meta_val; rec.last_meth = METH.META_HOLD
+        -- Don't blow away a suppress streak/pause in progress -- this
+        -- branch fires DURING the deliberate 4-tick pause window (should_
+        -- override is false while paused), not just when suppress is
+        -- genuinely irrelevant. See sup_pausing above.
+        if not sup_pausing then rec._sup_streak = 0; rec._sup_pause = 0 end
+
+    else
+        PApply(player, false, 0, false)
+        rec.active = false; rec.resolved = false
+        rec.last_val = 0; rec.last_meth = "builtin"
+        -- Same sup_pausing guard as the meta_aggressive branch above.
+        if not sup_pausing then rec._sup_streak = 0; rec._sup_pause = 0 end
+    end
+
+    -- Only log when the correction method or value actually CHANGES.
+    -- Log analysis showed 35k+ [corr] lines for 453 hits — 98% were
+    -- stale TTL echoes (same val repeated for 11+ ticks). This gate
+    -- cuts the log to only meaningful resolver decisions.
+    if DET.verbose then
+        local val_changed  = math.abs((rec.last_val  or 0) - (rec._prev_log_val  or 0)) > 1.0
+        local meth_changed = rec.last_meth ~= rec._prev_log_meth
+        if val_changed or meth_changed then
+            dbg("corr", "player=%s aa=%s side=%d meth=%s val=%.1f override=%s",
+                entity.get_player_name(player) or "?",
+                aa_type, tracked_side, rec.last_meth, rec.last_val,
+                tostring(should_override))
+            rec._prev_log_val  = rec.last_val
+            rec._prev_log_meth = rec.last_meth
+        end
+    end
+end
+
+-- ══════════════════════════════════════════════════════════════════
 --  PROCESSPLAYER  — all per-player resolver logic
 --  Called from Update() inside a pcall, so crashes are caught and
 --  logged without stalling the rest of the player loop.
@@ -2378,6 +2773,13 @@ local function ProcessPlayer(player, ctx)
 
     TrackDT(s64, st_raw)
 
+    -- "choke" is record staleness in ticks beyond our latency, measured
+    -- BEFORE the fresh-record gate below: it counts up on every tick the
+    -- enemy chokes (those ticks return at the gate), and drops to ~0 on the
+    -- update that ends the choke -- which is how was_choked/cur_choke detect
+    -- an unchoke. On the processed (fresh) ticks further down it is
+    -- therefore nonzero only when a record arrived late (latency jitter,
+    -- loss): that is what the lagcomp/yaw-cache split below keys on.
     local choke = ChokedPkts(st_raw, ctx.cur_lat)
     rec.was_choked   = rec.cur_choke > 0
     rec.cur_choke    = choke
@@ -2723,317 +3125,17 @@ local function ProcessPlayer(player, ctx)
         -- We do NOT manipulate cl_interp here — restricting it to preferred_bt
         -- caps the aimbot's maximum backtrack window and kills deeper opportunities.
 
-        -- ── SIDE TRACKING ──────────────────────────────────────────────
-        -- Track which side we believe the enemy is on.
-        -- The override block below decides whether to apply it.
-        -- We do NOT compute an angle here — that happens per-case below.
+        local tracked_side, tracked_method =
+            TrackSide(rec, player, ctx, choke, st, six_side, pose_sum, eye_y, aa_type)
+        if not tracked_side then break end
 
-        local tracked_side   = rec.side
-        local tracked_method = METH.RING
-        rec._brute_half       = false  -- set true below only on a true blind-guess tick
+        local should_override, override_val, override_meth, sup_pausing, vuln_ok =
+            ChainPick(rec, six_side, six_desync, corr_cap, live_cap,
+                      tracked_side, tracked_method, dom_side, aa_type)
 
-        if rec.vuln_ttl == 0 then
-            -- No active vuln window — run the side detection chain
-            if rec.hit_count >= 2 and rec.hit_side ~= 0 then
-                -- Empirical: hit this player on this side this match
-                tracked_side   = rec.hit_side   -- already flip-encoded at storage time
-                tracked_method = METH.HIT_MEM
-
-            elseif six_side ~= 0 and rec.conf > 0.30
-                   and (rec.six_disagree or 0) <= (rec.six_agree or 0) + 2 then
-                tracked_side   = six_side
-                tracked_method = METH.SIX_LEX
-
-            elseif FEATURE.JITTER_PRED and #rec.fl >= CFG.PERIOD_MIN then
-                local ps = PredictSide(rec, ctx.cur_tc)
-                if ps ~= 0 then
-                    tracked_side   = ps
-                    tracked_method = METH.PERIOD
-                end
-
-            elseif not ctx.is_spike and choke == 0 and not rec.def_tickbase then
-                local lco = LCTicks(false, ctx.cur_lat, ctx.avg_lat, ctx.lerp)
-                local h   = rec.tm[st - lco]
-                if h then
-                    rec._shift_streak = 0
-                    local s = Sign(h.p)
-                    if s ~= 0 then
-                        tracked_side   = s
-                        tracked_method = METH.LAGCOMP
-                    end
-                else
-                    -- SHIFTING GUARD: choke==0 means packets ARE arriving, so a
-                    -- missing tm[] slot at this lookback isn't ordinary loss —
-                    -- it looks like a shift-style backtrack record break. Track
-                    -- it, and stop trusting the PHASE fallback too once it's
-                    -- happened repeatedly rather than locking onto a broken window.
-                    rec._shift_streak = (rec._shift_streak or 0) + 1
-                    if rec._shift_streak < 3 and #rec.fl > 0 and rec.side ~= 0 and rec.period > 0 then
-                        local since = (st - lco) - rec.fl[#rec.fl]
-                        tracked_side   = math.floor(since / rec.period) % 2 == 0
-                                         and rec.side or -rec.side
-                        tracked_method = METH.PHASE
-                    end
-                end
-
-            elseif rec.def_tickbase then
-                tracked_side   = six_side ~= 0 and six_side
-                                 or (pose_sum ~= 0 and Sign(pose_sum) or rec.side)
-                tracked_method = METH.DEF_TICK
-
-            elseif ctx.is_spike then
-                tracked_side   = pose_sum ~= 0 and Sign(pose_sum) or rec.side
-                tracked_method = METH.RING_SPK
-
-            elseif #rec.yc >= 2 and rec.conf < 0.60 then
-                local ycs = YawSide(rec.yc, eye_y)
-                if ycs ~= 0 then
-                    tracked_side   = ycs
-                    tracked_method = METH.YAW_CACHE
-                end
-            end
-
-            -- Symmetric fallback: alternate when no signal
-            local is_sym = rec.side == 0 and
-                (aa_type == AA.THREE_WAY or aa_type == AA.FIVE_WAY or aa_type == AA.SKITTER)
-            if tracked_side == 0 and is_sym then
-                tracked_side   = rec.flip and 1 or -1
-                tracked_method = METH.SYM_FLIP
-            end
-
-            -- Apply flip (only when side was NOT from hit_side which encodes it already)
-            if rec.flip and tracked_method ~= METH.HIT_MEM then
-                tracked_side = -tracked_side
-            end
-
-            if tracked_side == 0 then
-                if rec.meta_aggressive then
-                    -- Built-in has proven it can't handle this player's meta.
-                    -- Never release back to it. Use our best available side.
-                    -- Priority: hit_side (confirmed) > ring side > flip guess.
-                    -- Note: flip was already applied above so work from rec.side (raw),
-                    -- then apply flip manually to avoid double-apply.
-                    local base = (rec.hit_side ~= 0 and rec.hit_side)  -- encoded, use direct
-                              or (rec.side ~= 0 and rec.side)           -- raw ring side
-                              or 0
-                    if base == 0 then
-                        -- Absolute last resort: no side data at all. Cycle a short
-                        -- candidate sequence (NIXWARE-style shot-cycle fallback:
-                        -- side A full, side A half, side B full, side B half)
-                        -- instead of freezing on one guess -- a sustained
-                        -- no-signal streak shouldn't spam the same wrong angle.
-                        rec._brute_idx = ((rec._brute_idx or 0) + 1) % 4
-                        base = (rec._brute_idx < 2) and 1 or -1
-                        if rec.flip then base = -base end
-                        rec._brute_half = (rec._brute_idx % 2) == 1
-                    else
-                        -- Apply flip to raw ring side (hit_side already encodes it)
-                        if base == rec.side and rec.flip then base = -base end
-                    end
-                    tracked_side   = base ~= 0 and base or 1
-                    tracked_method = METH.META_HOLD
-                else
-                    ClearEnt(player); break
-                end
-            end
-        end
-
-        -- ── ADDITIVE OVERRIDE ──────────────────────────────────────────
-        -- Only take control from the built-in when signal is definitive.
-        -- Priority: vuln > 6lex > hit_mem > meta_hold > suppress > release
-        local should_override = false
-        local override_val    = 0
-        local override_meth   = tracked_method
-        local sup_pausing     = false  -- true only during the suppress streak-cap's pause window
-
-        -- [1] Vulnerability window: correction is deterministic.
-        -- Lower confidence threshold when meta_aggressive — even a weaker
-        -- vuln read beats the known-failing built-in.
-        local vuln_min = rec.meta_aggressive and CFG.VULN_MIN_AGG or CFG.VULN_MIN
-        local vuln_ok  = DET.vuln and rec.vuln_ttl > 0 and rec.conf >= vuln_min
-        if vuln_ok then
-            should_override = true
-            override_val    = rec.vuln_val
-            override_meth   = "vuln_" .. rec.vuln_type
-
-        -- [2] 6lex: animlayer digit read — direct, no guessing. Gated by
-        -- per-player calibration: once it's been proven wrong against
-        -- confirmed hits more than a small margin above how often it's
-        -- been right for THIS player, stop trusting it for them and fall
-        -- through to hit-mem/suppress instead (see on_aim_hit).
-        elseif DET.six and six_side ~= 0 and rec.conf > 0.25
-               and (rec.six_disagree or 0) <= (rec.six_agree or 0) + 2 then
-            should_override = true
-            override_val    = six_desync > 0
-                              and (six_side * six_desync)
-                              or CfgAngle(six_side, rec.state, TrustedCfg(rec), corr_cap)
-            override_meth   = METH.SIX_LEX
-
-        -- [3] Hit-side memory: confirmed hit this match. Per-CONDITION
-        -- memory (this exact movement state) takes priority over the
-        -- global scalar -- an enemy desyncing a different side while
-        -- standing vs. moving means the state-specific record is strictly
-        -- more accurate whenever it exists; the global one is only a
-        -- fallback for states we haven't confirmed a hit in yet this match.
-        -- NOTE: hit_mem is confirmed data (an actual prior hit on this player
-        -- in this state), not a static guess -- so it's capped by live_cap
-        -- (the engine's real desync bound) rather than corr_cap (VelCap's
-        -- velocity-scaled cap). corr_cap is meant only for CfgAngle's static
-        -- guesses per the comment above VelCap's call site; it linearly falls
-        -- to exactly 0 at CFG.VEL_CAP_SPD (580u/s), and a bhopping/fast-moving
-        -- enemy crosses that constantly. Using corr_cap here was clamping a
-        -- confirmed correction to literally val=0.0 -- aim dead-center, worse
-        -- than a coin flip -- every time the target's speed spiked, which is
-        -- exactly when hit_mem should matter most (fast movement is when
-        -- static guesses are least trustworthy, not when confirmed data should
-        -- be thrown out). Seen directly in a debug log: a hit_mem correction
-        -- logged val=0.0 for a fast-moving target.
-        elseif DET.hitmem and rec.state
-               and (rec.hit_count_by_state[rec.state] or 0) >= 2
-               and (rec.hit_side_by_state[rec.state] or 0) ~= 0 then
-            should_override = true
-            override_val    = CfgAngle(rec.hit_side_by_state[rec.state], rec.state, TrustedCfg(rec), live_cap)
-            override_meth   = METH.HIT_MEM
-
-        elseif DET.hitmem and rec.hit_count >= 2 and rec.hit_side ~= 0 then
-            should_override = true
-            override_val    = CfgAngle(rec.hit_side, rec.state, TrustedCfg(rec), live_cap)
-            override_meth   = METH.HIT_MEM
-
-        -- [4] Suppress (FEATURE.SUPPRESS): force wrong angle to gate aimbot hit-chance.
-        -- When meta_aggressive, lower threshold aggressively — fewer shots =
-        -- fewer bullet_impact events near the enemy = testarossa AB starved.
-        -- STREAK CAP: suppress that runs for >8 consecutive ticks means we're stuck.
-        -- Log analysis showed hxlw1ss at 375/914 suppress — mid-conf lock-in pattern
-        -- where conf hovers above threshold permanently with no vuln ever firing.
-        -- After 8 ticks suppress, pause 4 ticks and let a shot through. If we hit,
-        -- great; if we miss, the correction data resets the stuck loop.
-        --
-        -- BUG FIXED: the old single-counter version reset _sup_streak to 0 in
-        -- the non-suppress branches below the instant the streak cap blocked
-        -- suppress for even one tick -- so streak_ok's "streak >= 12" arm was
-        -- unreachable dead code; suppress actually resumed on the very next
-        -- tick instead of pausing for 4. Fixed with a dedicated pause counter
-        -- (_sup_pause) and sup_pausing, which tells the bookkeeping below not
-        -- to blow the counters away while a deliberate pause is in progress.
-        elseif FEATURE.SUPPRESS and rec.vuln_ttl == 0 then
-            local sup_thresh = rec.meta_aggressive and CFG.SUP_MIN_AGG or CFG.SUP_MIN
-            if JITTER_AA[aa_type] and rec.conf > sup_thresh then
-                local streak = rec._sup_streak or 0
-                if streak < CFG.SUP_STREAK then
-                    should_override = true
-                    local bs = tracked_side ~= 0 and tracked_side or dom_side
-                    if bs == 0 then bs = 1 end
-                    override_val  = -CfgAngle(bs, rec.state, TrustedCfg(rec), corr_cap)
-                    override_meth = METH.SUPPRESS
-                else
-                    local pause = (rec._sup_pause or 0) + 1
-                    rec._sup_pause = pause
-                    sup_pausing = true
-                    if pause >= CFG.SUP_PAUSE then
-                        rec._sup_streak = 0
-                        rec._sup_pause  = 0
-                    end
-                end
-            end
-        end
-
-        -- ── DECISION ENGINE ────────────────────────────────────────────
-        -- The chain above made its pick (or will hold/release below). Put
-        -- every candidate that could apply this tick next to it and let the
-        -- engine decide; with no evidence it returns the chain's own pick.
-        local legacy_arm
-        if should_override then
-            legacy_arm = (override_meth == METH.SUPPRESS and "pose:inv")
-                or (override_meth == METH.SIX_LEX and "six:as")
-                or (override_meth == METH.HIT_MEM and "hitmem:as")
-                or ((ENG.VULN_SRC[rec.vuln_type] or "vuln_other") .. ":as")
-        elseif rec.meta_aggressive and tracked_side ~= 0 then
-            legacy_arm = "pose:as"
-        else
-            legacy_arm = "builtin"
-        end
-        local eng_release = false
-        rec.eng_arm = legacy_arm
-        if DET.engine then
-            eng_release = EngineStep(rec, player, legacy_arm, override_val, override_meth,
-                vuln_ok, six_side, six_desync, tracked_side, tracked_method, dom_side,
-                corr_cap, live_cap)
-            local pick = rec.eng_by and rec.eng_c[rec.eng_pick] or nil
-            if pick then
-                if pick.arm == "builtin" then
-                    should_override = false
-                else
-                    should_override = true
-                    override_val, override_meth = pick.val, pick.meth
-                end
-            end
-        end
-
-        if should_override then
-            -- High priority (set last inside PApply): confirmed via a real
-            -- resolver's usage, not the docs -- hints the LC/backtrack system
-            -- not to deprioritize this target while we're correcting them.
-            PApply(player, true, override_val, true)
-            rec.active = true; rec.resolved = true
-            rec.last_val = override_val; rec.last_meth = override_meth
-            -- Track suppress streak for the streak-cap logic above
-            if override_meth == METH.SUPPRESS then
-                rec._sup_streak = (rec._sup_streak or 0) + 1
-            else
-                rec._sup_streak = 0   -- any non-suppress override resets the streak
-            end
-            rec._sup_pause = 0
-
-        elseif not eng_release and rec.meta_aggressive and tracked_side ~= 0 then
-            -- META_HOLD: built-in has failed this player's meta (serenity ways(),
-            -- ambani torpedo, aesthetic records — patterns the 2022-era built-in
-            -- has no answer for). Hold our best tracked_side correction rather than
-            -- releasing to a resolver that's already proven it can't handle this AA.
-            -- Same corr_cap-zeroing bug as the [3] hit_mem branch (see v5.8):
-            -- tracked_side can be sourced from METH.HIT_MEM here too (the
-            -- unconditional side-tracking chain above sets tracked_method =
-            -- HIT_MEM off rec.hit_side whenever hit_count>=2, regardless of
-            -- whether the "Hit Memory" checkbox is even on) -- so a fast-
-            -- moving target would still get its confirmed correction clamped
-            -- to literal 0 right here, via this second call site, even after
-            -- the [3] branch itself was fixed. Use live_cap for that case.
-            local meta_cap = (tracked_method == METH.HIT_MEM) and live_cap or corr_cap
-            local meta_val = CfgAngle(tracked_side, rec.state, TrustedCfg(rec), meta_cap)
-            if rec._brute_half then meta_val = meta_val * 0.5 end
-            PApply(player, true, meta_val, true)
-            rec.active = true; rec.resolved = true
-            rec.last_val = meta_val; rec.last_meth = METH.META_HOLD
-            -- Don't blow away a suppress streak/pause in progress -- this
-            -- branch fires DURING the deliberate 4-tick pause window (should_
-            -- override is false while paused), not just when suppress is
-            -- genuinely irrelevant. See sup_pausing above.
-            if not sup_pausing then rec._sup_streak = 0; rec._sup_pause = 0 end
-
-        else
-            PApply(player, false, 0, false)
-            rec.active = false; rec.resolved = false
-            rec.last_val = 0; rec.last_meth = "builtin"
-            -- Same sup_pausing guard as the meta_aggressive branch above.
-            if not sup_pausing then rec._sup_streak = 0; rec._sup_pause = 0 end
-        end
-
-        -- Only log when the correction method or value actually CHANGES.
-        -- Log analysis showed 35k+ [corr] lines for 453 hits — 98% were
-        -- stale TTL echoes (same val repeated for 11+ ticks). This gate
-        -- cuts the log to only meaningful resolver decisions.
-        if DET.verbose then
-            local val_changed  = math.abs((rec.last_val  or 0) - (rec._prev_log_val  or 0)) > 1.0
-            local meth_changed = rec.last_meth ~= rec._prev_log_meth
-            if val_changed or meth_changed then
-                dbg("corr", "player=%s aa=%s side=%d meth=%s val=%.1f override=%s",
-                    entity.get_player_name(player) or "?",
-                    aa_type, tracked_side, rec.last_meth, rec.last_val,
-                    tostring(should_override))
-                rec._prev_log_val  = rec.last_val
-                rec._prev_log_meth = rec.last_meth
-            end
-        end
+        ApplyDecision(rec, player, should_override, override_val, override_meth,
+                      sup_pausing, vuln_ok, six_side, six_desync, tracked_side,
+                      tracked_method, dom_side, corr_cap, live_cap, aa_type)
 
     until true  -- end of repeat block; break exits without running save
 
@@ -3491,7 +3593,13 @@ local function on_aim_miss(e)
                 should_flip = false   -- high confidence = prediction error, not wrong side
             end
 
-            if should_flip then
+            -- The legacy flip stands down while the engine decides: both
+            -- adapt the tracked side, and flipping it underneath the engine
+            -- mixes two conventions into its pose evidence. In
+            -- tools/engine_sim.lua (flip modelled) the engine's average gain
+            -- over the chain is +0.64 points with flip and +1.76 without;
+            -- stale hit memory recovers +11.5 instead of +5.1.
+            if should_flip and not DET.engine then
                 rec.flip = not rec.flip
             end
 
@@ -3509,9 +3617,16 @@ local function on_aim_miss(e)
                     warn("reset", "soft reset player=%s",
                          entity.get_player_name(e.target) or "?")
                     rec.conf = 0.22; rec.resolver_misses = 0
-                    ENG.Fade(rec.E); rec.eng_hold = nil
-                    rec.flip = false; rec.hit_side = 0; rec.hit_count = 0
-                    rec.hit_side_by_state = {}; rec.hit_count_by_state = {}
+                    rec.flip = false
+                    -- Under the engine, hit memory and engine evidence are
+                    -- kept: the engine already demotes stale hit memory
+                    -- through its hitmem arms, and wiping both threw that
+                    -- evidence away. tools/engine_sim.lua: average gain
+                    -- +1.76 -> +1.97, worst scenario -1.12 -> -0.60.
+                    if not DET.engine then
+                        rec.hit_side = 0; rec.hit_count = 0
+                        rec.hit_side_by_state = {}; rec.hit_count_by_state = {}
+                    end
                     -- Clear torso history so old cluster readings don't persist.
                     -- A soft reset means our corrections were wrong — the player likely
                     -- switched configs. Stale cluster = wrong correction for new config.
@@ -4051,5 +4166,5 @@ client.set_event_callback("level_init",  EndMatch)
 client.set_event_callback("shutdown",    FullShutdown)
 client.set_event_callback("disconnect",  FullShutdown)
 
-info("init", "RIFTVEIL v" .. RV_VERSION .. " loaded -- commands: rv_stats  rv_db  rv_save  rv_clear  rv_reset  rv_wipe")
+info("init", "RIFTVEIL v" .. RV_VERSION .. " loaded -- commands: rv_stats  rv_engine  rv_db  rv_save  rv_clear  rv_reset  rv_wipe")
 flush_log()

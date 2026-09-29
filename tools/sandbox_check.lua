@@ -50,6 +50,8 @@ local MUST_RUN = {
     "BuildOverlay", "DrawPanel", "FitText", "UpdateDrag", "DrawShiftMarkers",
     "on_aim_fire", "on_aim_hit", "on_aim_miss", "FlushDB", "UpdateEspState",
     "EngineStep", "ENG.Decide", "ENG.Credit", "ENG.Post", "EngSnap",
+    "TorsoCluster", "YawSide", "ExtrapolateOrigin", "LCTicks", "clear_log", "SetPanelPos",
+    "TrackSide", "ChainPick", "ApplyDecision",
 }
 
 -- ── Mutable world state the mocks read from ──────────────────────────
@@ -136,7 +138,7 @@ local mock = {
         if k == "latency"            then return function() return 0.03 end end
         if k == "screen_size"        then return function() return 1920, 1080 end end
         if k == "current_threat"     then return function() return W.threat end end
-        if k == "key_state"          then return function() return false end end
+        if k == "key_state"          then return function(key) return key == 0x01 and W.m1 == true end end
         if k == "trace_line"         then return function() return 1.0, -1 end end
         if k == "eye_position"       then return function() return 0, 0, 64 end end
         if k == "register_esp_flag"  then return function(_, _, _, _, cb) ESP_FLAGS[#ESP_FLAGS + 1] = cb end end
@@ -171,7 +173,7 @@ local mock = {
         end end
         if k == "get_origin"       then return function(p)
             local s = W.players[p]
-            return s and (W.tick * 0.5) or 0, 0, 0
+            return s and (W.tick * 0.5 + (s.jump or 0)) or 0, 0, 0
         end end
         if k == "hitbox_position"  then return function() return 100, 0, 64 end end
         if k == "get_prop" then
@@ -219,7 +221,7 @@ local mock = {
         if k == "set" then return function(el, v) if type(el) == "table" then el.a = v end end end
         if k == "set_callback" then return function(el, cb) UI_CALLBACKS[#UI_CALLBACKS + 1] = cb end end
         if k == "is_menu_open"   then return function() return W.menu_open end end
-        if k == "mouse_position" then return function() return 0, 0 end end
+        if k == "mouse_position" then return function() return W.mx or 0, W.my or 0 end end
         return function() end
     end}),
     cvar = setmetatable({}, {__index = function()
@@ -600,10 +602,173 @@ if FUZZ_SEED then
     debug.sethook(hook, "l")
 end
 
+-- ── Benchmark (RV_BENCH=<enemies>) ───────────────────────────────────
+-- Clean, realistic play (no hostile inputs), debug log off, coverage hook
+-- off. Times net_update_end and paint separately; with LuaJIT, also runs
+-- jit.profile and prints the hottest functions.
+local BENCH
+if os.getenv("RV_BENCH") then
+    debug.sethook()
+    local N = tonumber(os.getenv("RV_BENCH")) or 2
+    local TICKS = tonumber(os.getenv("RV_TICKS") or "") or 20000
+    for _, el in ipairs(UI_ELEMS) do
+        if el.kind == "checkbox" then el.a = true end          -- resolver, tight interp ...
+    end
+    -- debug log off: it's the last checkbox created in the menu block
+    local cbs = {}
+    for _, el in ipairs(UI_ELEMS) do if el.kind == "checkbox" then cbs[#cbs + 1] = el end end
+    cbs[#cbs].a = false
+    if os.getenv("RV_NO_ENGINE") then
+        for _, el in ipairs(UI_ELEMS) do
+            if el.kind == "multi" and el.items[1] == "Vulnerability" then
+                el.a = {"Vulnerability", "Hit memory", "Desync angle"}
+            end
+        end
+    end
+    for _, cb in ipairs(UI_CALLBACKS) do pcall(cb) end
+    W.live = {}
+    for i = 1, N do
+        local p = 200 + i
+        W.live[i] = p
+        W.players[p] = {sim = W.tick * TI, vx = (i % 2) * 250, vy = 0, pose01 = 0.5,
+                        eye = i * 30, duck = 0, torso = 40, gfy = 36}
+    end
+    local prof_counts = {}
+    local ok_prof, profile = pcall(require, "jit.profile")
+    if ok_prof and os.getenv("RV_PROFILE") then
+        profile.start("f", function(th, samples)
+            local where = profile.dumpstack(th, "F", 1)
+            prof_counts[where] = (prof_counts[where] or 0) + samples
+        end)
+    end
+    local t_net, t_paint, id = 0, 0, 90000
+    for step = 1, TICKS do
+        W.tick = W.tick + 1
+        W.real = W.real + TI
+        for i, p in ipairs(W.live) do
+            local c = W.players[p]
+            if (step + i) % 4 ~= 0 then c.sim = W.tick * TI end    -- light fakelag
+            c.pose01 = ((step + i) % 2 == 0) and 0.78 or 0.24      -- 2-way jitter
+            c.eye = (c.eye + 3) % 360 - 180
+        end
+        W.threat = W.live[1 + step % N]
+        local t0 = os.clock()
+        fire("net_update_end")
+        local t1 = os.clock()
+        for _ = 1, 4 do fire("paint") end                        -- ~256 fps at 64 tick
+        local t2 = os.clock()
+        t_net, t_paint = t_net + (t1 - t0), t_paint + (t2 - t1)
+        if step % 8 == 0 then
+            id = id + 1
+            fire("aim_fire", {id = id, target = W.live[1], backtrack = 1, hit_chance = 80})
+            if step % 16 == 0 then fire("aim_hit", {id = id, target = W.live[1], hitgroup = 1, damage = 90})
+            else fire("aim_miss", {id = id, target = W.live[1], reason = "?"}) end
+        end
+    end
+    if ok_prof and os.getenv("RV_PROFILE") then profile.stop() end
+    BENCH = {n = N, ticks = TICKS, net = t_net / TICKS * 1e6, paint = t_paint / (TICKS * 4) * 1e6,
+             prof = prof_counts}
+    W.live = nil
+    for i = 1, N do W.players[200 + i] = nil end
+    debug.sethook(hook, "l")
+end
+
+-- Phase 3: paths phases 1-2 never reach. 6lex off and a fresh opponent
+-- (103, no hit history) so the lagcomp and yaw-cache side sources decide;
+-- an unchoke that exposes a large torso offset (UNK window + torso
+-- cluster); a 200-unit origin teleport (SHIFT check + extrapolation); a
+-- panel drag with the menu open; and rv_clear.
+do
+    for _, el in ipairs(UI_ELEMS) do
+        if el.kind == "multi" and el.items and el.items[1] == "Vulnerability" then
+            el.a = {"Vulnerability", "Hit memory", "Adaptive engine"}
+        end
+    end
+    for _, cb in ipairs(UI_CALLBACKS) do pcall(cb) end
+    -- A clean match first, so this phase doesn't depend on what the fuzz
+    -- phase left behind (a leftover profile sharing 104's id and holding
+    -- hit history would route it to hit memory instead of the yaw cache).
+    -- Then rv_clear: it drops log lines not yet flushed to disk, which
+    -- would hide any [ERR] raised in this phase from the check below.
+    fire("game_end")
+    fire("console_input", "rv_clear")
+    -- Corrupt saved data for 103 and 104: wrong types everywhere, and one
+    -- entry that isn't a table at all. The resolver must still run them.
+    local DB_T = probe("DB")
+    if DB_T then
+        DB_T["1888056103"] = {kills = "x", hit_rate = {}, config_type = 5, bt_pref = "a",
+                              vuln_pref = 7, eng = "bad", samples = "q", gen = "z"}
+        DB_T["1888056104"] = "garbage"
+    end
+    W.live = {101, 102, 103}
+    W.players[103] = {sim = W.tick * TI, vx = 0, vy = 0, pose01 = 0.5, eye = 10, duck = 0,
+                      torso = 70, gfy = 66}
+    for step = 1, 90 do
+        W.tick = W.tick + 1
+        W.real = W.real + TI
+        local c = W.players[103]
+        -- choke 3 of every 5 ticks, then a clean unchoke
+        local choked = (step % 5) < 3
+        c.sim = choked and c.sim or (W.tick * TI)
+        c.pose01 = (step % 2 == 0) and 0.78 or 0.24
+        c.eye = 10 + (step % 7) * 9            -- turning: fills the yaw cache
+        c.torso = (step % 10 < 5) and 70 or 62  -- two nearby positions: a cluster
+        c.gfy = c.torso - 4
+        c.jump = (step >= 60) and 200 or 0     -- teleport at step 60
+        for _, p in ipairs({101, 102}) do W.players[p].sim = W.tick * TI end
+        W.threat = 103
+        W.menu_open = step >= 40 and step <= 44
+        W.m1 = step >= 41 and step <= 43
+        W.mx, W.my = 1310 + (step - 41) * 10, 155
+        fire("net_update_end")
+        fire("paint")
+        if step % 9 == 0 then
+            local id = 3000 + step
+            fire("aim_fire", {id = id, target = 103, backtrack = 1, hit_chance = 70})
+            if step % 18 == 0 then fire("aim_hit", {id = id, target = 103, hitgroup = 1, damage = 100})
+            else fire("aim_miss", {id = id, target = 103, reason = "?"}) end
+        end
+    end
+    -- 104: brand-new jittering opponent, small torso offset (no UNK
+    -- window), whose records arrive late (simtime 4 ticks old on arrival,
+    -- 2 beyond our latency). On late records the lagcomp source is skipped
+    -- and the yaw cache decides while confidence is still below 0.60.
+    W.live = {101, 102, 104}
+    W.players[104] = {sim = W.tick * TI, vx = 0, vy = 0, pose01 = 0.5, eye = 0, duck = 0,
+                      torso = 3, gfy = 3}
+    for step = 1, 12 do
+        W.tick = W.tick + 3
+        W.real = W.real + 3 * TI
+        local c = W.players[104]
+        c.sim = (W.tick - 4) * TI
+        c.pose01 = (step % 2 == 0) and 0.8 or 0.2
+        c.eye = (step % 2 == 0) and 60 or -60
+        for _, p in ipairs({101, 102}) do W.players[p].sim = W.tick * TI end
+        W.threat = 104
+        fire("net_update_end")
+        fire("paint")
+    end
+    W.live, W.players[103], W.players[104], W.m1, W.menu_open = nil, nil, nil, false, false
+end
+
 -- ── Targeted unit checks on the live script state ────────────────────
 -- DB cap: 600 profiles through the real FlushDB must leave exactly 500,
 -- keeping the most recently stamped ones.
 local UNIT_FAIL, UNIT_OK = {}, nil
+-- ENG.Fade (soft reset): halves totals and per-state votes, nothing else.
+do
+    local E_ = probe("ENG")
+    if E_ then
+        local E = E_.New()
+        E.all["pose:inv"] = {s = 4, f = 2}
+        E.st.standing = {["pose:inv"] = {s = 2, f = 1}}
+        E_.Fade(E)
+        local a, b = E.all["pose:inv"], E.st.standing["pose:inv"]
+        if not (a.s == 2 and a.f == 1 and b.s == 1 and b.f == 0.5) then
+            UNIT_FAIL[#UNIT_FAIL + 1] = string.format("ENG.Fade: got all %g/%g state %g/%g, expected 2/1 and 1/0.5", a.s, a.f, b.s, b.f)
+        end
+    end
+end
 do
     local REC_T, FLUSH, DB_T = probe("REC"), probe("FlushDB"), probe("DB")
     local ENG_T = probe("ENG")
@@ -633,6 +798,7 @@ for _, cb in ipairs(UI_CALLBACKS) do pcall(cb) end
 fire("console_input", "rv_stats")
 fire("console_input", "rv_db")
 fire("console_input", "rv_save")
+fire("console_input", "rv_engine")
 fire("round_start")
 fire("game_end")
 fire("shutdown")
@@ -671,6 +837,16 @@ if #cb_errors > 0 then
 end
 
 local err_lines = ERR_LINES
+if BENCH then
+    print(string.format("Bench: %d enemies, %d ticks: net_update %.1f us/tick, paint %.1f us/frame, total at 4 frames/tick %.1f us/tick",
+        BENCH.n, BENCH.ticks, BENCH.net, BENCH.paint, BENCH.net + 4 * BENCH.paint))
+    local rows, total = {}, 0
+    for k, v in pairs(BENCH.prof) do rows[#rows + 1] = {k, v}; total = total + v end
+    table.sort(rows, function(a, b) return a[2] > b[2] end)
+    for i = 1, math.min(12, #rows) do
+        print(string.format("  %5.1f%%  %s", 100 * rows[i][2] / total, rows[i][1]))
+    end
+end
 if UNIT_OK then print("Unit: " .. UNIT_OK) end
 if #UNIT_FAIL > 0 then
     failed = true

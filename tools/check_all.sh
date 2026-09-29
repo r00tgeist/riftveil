@@ -63,11 +63,16 @@ luajit tools/engine_sim.lua > "$TMP/sim.txt" 2>&1 && pass "$(grep 'average gain'
     || { fail "engine sim"; tail -4 "$TMP/sim.txt"; }
 
 echo "8. Log analyzer smoke test"
-printf '%s\n' '[00:00:00.000][INF][init] RIFTVEIL v7.3 loaded' \
+printf '%s\n' '[00:00:00.000][INF][init] RIFTVEIL v7.4 loaded' \
     '[00:00:01.000][INF][hit] player=a b group=head dmg=100 meth=suppress val=-29 bt=0 eng=pose:inv p=0.61' \
     '[00:00:02.000][WRN][miss] player=a b reason=? meth=hit_mem val=31 bt=0 hc=80% eng=hitmem:inv* p=0.55' > "$TMP/log.txt"
 lua5.3 tools/log_report.lua "$TMP/log.txt" > "$TMP/rep.txt" 2>&1 && grep -q "Brier" "$TMP/rep.txt" \
     && pass "parses hit/miss/eng/p lines" || fail "log_report"
+
+echo "9. Performance on LuaJIT (2v2: net update + 4 paint frames per tick)"
+line=$(RV_BENCH=2 luajit tools/sandbox_check.lua 2>&1 | grep "^Bench")
+us=$(echo "$line" | grep -o 'total at 4 frames/tick [0-9.]*' | grep -o '[0-9.]*$')
+if [ -n "$us" ] && awk "BEGIN{exit !($us < 500)}"; then pass "$us us/tick (ceiling 500; tick budget 15625)"; else fail "bench: ${line:-no output}"; fi
 
 echo
 [ $FAILS = 0 ] && printf "\033[32mALL CHECKS PASSED\033[0m\n" || printf "\033[31m%d CHECK(S) FAILED\033[0m\n" "$FAILS"
