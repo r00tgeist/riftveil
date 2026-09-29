@@ -29,17 +29,19 @@ local TARGET     = SCRIPT_DIR .. "../riftveil.lua"
 
 -- Functions the scenario is designed to reach. If any of these show zero
 -- executed lines, the harness itself is broken and the run fails.
+-- The adaptive learner is off since v7.1 (FEATURE.LEARNING); its code is
+-- exercised by tools/learner_sim.lua instead.
 local MUST_RUN = {
     "ProcessPlayer", "DetectVuln", "DetectAA", "CanSeeHead", "CfgAngle",
-    "LiveCap", "DynamicMaxYaw", "Extract6Lex", "Update", "DrawOverlay",
-    "on_aim_fire", "on_aim_hit", "on_aim_miss", "FlushDB",
-    "LearnDecide", "LearnFeedback", "Sticky", "VorDecide", "UpdateEspState",
+    "LiveCap", "DynamicMaxYaw", "Extract6Lex", "Update", "SyncFlags",
+    "BuildOverlay", "DrawPanel", "FitText", "UpdateDrag", "DrawShiftMarkers",
+    "on_aim_fire", "on_aim_hit", "on_aim_miss", "FlushDB", "UpdateEspState",
 }
 
 -- ── Mutable world state the mocks read from ──────────────────────────
 local TI = 1 / 64
 local W = {
-    tick = 100, real = 0, srv_hits = 0,
+    tick = 100, real = 0, srv_hits = 0, threat = 101, menu_open = false,
     players = {
         [101] = {sim = 0, vx = 0, vy = 0, pose01 = 0.5, eye = 45, duck = 0,
                  torso = 70, gfy = 60},
@@ -105,7 +107,7 @@ local mock = {
         if k == "system_time"        then return function() return 12, 0, 0, 0 end end
         if k == "latency"            then return function() return 0.03 end end
         if k == "screen_size"        then return function() return 1920, 1080 end end
-        if k == "current_threat"     then return function() return 101 end end
+        if k == "current_threat"     then return function() return W.threat end end
         if k == "key_state"          then return function() return false end end
         if k == "trace_line"         then return function() return 1.0, -1 end end
         if k == "eye_position"       then return function() return 0, 0, 64 end end
@@ -121,7 +123,11 @@ local mock = {
         if k == "is_alive"         then return function() return true end end
         if k == "get_local_player" then return function() return 1 end end
         if k == "get_steam64"      then return function(p) return 76561198000000000 + p end end
-        if k == "get_player_name"  then return function(p) return "bot" .. tostring(p) end end
+        -- 102 gets a long Cyrillic name so the panel's UTF-8 width fit runs.
+        if k == "get_player_name"  then return function(p)
+            if p == 102 then return "Тимур Пшеничный the second" end
+            return "bot" .. tostring(p)
+        end end
         if k == "get_origin"       then return function(p)
             local s = W.players[p]
             return s and (W.tick * 0.5) or 0, 0, 0
@@ -147,6 +153,13 @@ local mock = {
     end}),
     ui = setmetatable({}, {__index = function(_, k)
         if k == "new_checkbox"     then return function() return ui_el("checkbox", true) end end
+        -- Multiselects start with every item selected, so each module runs.
+        if k == "new_multiselect"  then return function(_, _, _, items)
+            local sel = {}
+            for i, v in ipairs(items) do sel[i] = v end
+            return ui_el("multi", sel)
+        end end
+        if k == "reference"        then return function() return ui_el("color", 150, 200, 60, 255) end end
         if k == "new_slider"       then return function(_, _, _, _, _, def) return ui_el("slider", def or 0) end end
         if k == "new_color_picker" then return function(_, _, _, r, g, b, a) return ui_el("color", r, g, b, a) end end
         if k == "new_label" or k == "new_button" then return function() return ui_el("static") end end
@@ -159,7 +172,7 @@ local mock = {
         end
         if k == "set" then return function(el, v) if type(el) == "table" then el.a = v end end end
         if k == "set_callback" then return function(el, cb) UI_CALLBACKS[#UI_CALLBACKS + 1] = cb end end
-        if k == "is_menu_open"   then return function() return false end end
+        if k == "is_menu_open"   then return function() return W.menu_open end end
         if k == "mouse_position" then return function() return 0, 0 end end
         return function() end
     end}),
@@ -188,7 +201,7 @@ local mock = {
     end}),
     plist    = setmetatable({}, {__index = function() return function() end end}),
     renderer = setmetatable({}, {__index = function(_, k)
-        if k == "measure_text"   then return function() return 60, 12 end end
+        if k == "measure_text"   then return function(_, text) return #tostring(text or "") * 6, 12 end end
         if k == "world_to_screen" then return function() return 500, 500 end end
         return function() end
     end}),
@@ -293,9 +306,10 @@ for step = 1, 80 do
     end
 end
 -- Phase 2: quiet play -- no chokes, no LBY collapse, no stop/peek/duck
--- events -- so no vuln window is open and the adaptive learner (or the
--- hit_mem/suppress chain) is what's in control when shots land. Mixed
--- head hits, body hits and resolver misses so every feedback path runs.
+-- events -- so no vuln window is open and the hit_mem/suppress chain is
+-- what's in control when shots land. Mixed head hits, body hits and
+-- resolver misses so every feedback path runs. Midway the menu opens (drag
+-- outline) and the threat drops for a stretch (panel eases shut).
 local QUIET = {0.72, 0.30, 0.72, 0.30}
 for step = 81, 240 do
     W.tick = W.tick + 1
@@ -307,6 +321,8 @@ for step = 81, 240 do
     local b = W.players[102]
     b.sim = W.tick * TI
     b.vx, b.duck = 250, 0
+    W.menu_open = step >= 150 and step < 170
+    W.threat = (step >= 190 and step < 205) and nil or ((step >= 120 and step < 140) and 102 or 101)
     fire("net_update_end")
     fire("paint")
     for _, cb in ipairs(ESP_FLAGS) do pcall(cb, 101); pcall(cb, 102) end
@@ -323,6 +339,7 @@ end
 for _, cb in ipairs(UI_CALLBACKS) do pcall(cb) end
 fire("console_input", "rv_stats")
 fire("console_input", "rv_db")
+fire("console_input", "rv_save")
 fire("round_start")
 fire("game_end")
 fire("shutdown")
