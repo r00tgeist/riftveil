@@ -34,13 +34,10 @@ done
 
 echo "4. Determinism: identical plist writes across runtimes"
 norm() { awk -F'\t' '{v=$4; if (v ~ /^-?[0-9.e+-]+$/) v=sprintf("%.6f", v+0); if (v=="-0.000000") v="0.000000"; print $1"\t"$2"\t"$3"\t"v}' "$1"; }
-for eng in on off; do
-    envx=""; [ $eng = off ] && envx="RV_NO_ENGINE=1"
-    for rt in lua5.3 luajit; do env $envx RV_PLIST_OUT="$TMP/p_${eng}_$rt.txt" $rt tools/sandbox_check.lua >/dev/null 2>&1; done
-    if cmp -s <(norm "$TMP/p_${eng}_lua5.3.txt") <(norm "$TMP/p_${eng}_luajit.txt"); then
-        pass "engine $eng: $(wc -l < "$TMP/p_${eng}_luajit.txt") writes identical"
-    else fail "engine $eng: runtimes diverge"; fi
-done
+for rt in lua5.3 luajit; do RV_PLIST_OUT="$TMP/p_$rt.txt" $rt tools/sandbox_check.lua >/dev/null 2>&1; done
+if cmp -s <(norm "$TMP/p_lua5.3.txt") <(norm "$TMP/p_luajit.txt"); then
+    pass "$(wc -l < "$TMP/p_luajit.txt") writes identical"
+else fail "runtimes diverge"; fi
 
 echo "5. Fuzz: hostile worlds, cross-runtime (seeds: $SEEDS)"
 for seed in $SEEDS; do
@@ -58,20 +55,30 @@ RV_FUZZ=99 RV_TICKS=$SOAK timeout 1800 luajit tools/sandbox_check.lua > "$TMP/so
 line=$(grep "net heap peak" "$TMP/soak.txt" | sed 's/^ *//')
 grep -q "^PASS" "$TMP/soak.txt" && pass "$line" || { fail "soak"; grep FAIL "$TMP/soak.txt" | head -3; }
 
-echo "7. Decision engine simulation (LuaJIT)"
-luajit tools/engine_sim.lua > "$TMP/sim.txt" 2>&1 && pass "$(grep 'average gain' "$TMP/sim.txt"); $(grep -o 'kept the chain.s pick in [0-9/]* random cases' "$TMP/sim.txt")" \
-    || { fail "engine sim"; tail -4 "$TMP/sim.txt"; }
+echo "7. v6.2 parity: v8.0 forces the same side and value as v6.2 on every tick v6.2 runs"
+# v5.2-v6.2 measured 74% head (100/135 resolver-decided shots, 10/10
+# opponents >= 57%); v6.7+ 49%. v8.0 restores the v6.2 decisions: with no
+# cheat data it must match v6.2's effective player-list state exactly.
+if git show 72b408b:riftveil.lua > "$TMP/v62.lua" 2>/dev/null; then
+    RV_TARGET="$TMP/v62.lua" RV_PLIST_OUT="$TMP/p62.txt" lua5.3 tools/sandbox_check.lua >/dev/null 2>&1
+    RV_PLIST_OUT="$TMP/p80.txt" lua5.3 tools/sandbox_check.lua >/dev/null 2>&1
+    par=$(lua5.3 tools/plist_parity.lua "$TMP/p62.txt" "$TMP/p80.txt")
+    echo "$par" | grep -q "OPPOSITE=0 .*onlyA=0" && echo "$par" | grep -q "mean |dmag| 0.0" \
+        && pass "$par" || fail "parity: $par"
+else
+    echo "  skip  v6.2 not in git history"
+fi
 
-echo "7b. Cheat layer simulation (LuaJIT)"
-luajit tools/cheat_sim.lua > "$TMP/csim.txt" 2>&1 && pass "$(grep 'average gain' "$TMP/csim.txt" | sed 's/^CHEAT_CAP [0-9]* (\*): //')" \
-    || { fail "cheat sim"; tail -4 "$TMP/csim.txt"; }
+echo "7b. Cheat revealer detectors (LuaJIT, real FFI packets)"
+luajit tools/cheat_detect_test.lua > "$TMP/cd.txt" 2>&1 && pass "$(grep -c PASS "$TMP/cd.txt") checks: every signature detected, real voice never labelled" \
+    || { fail "cheat detectors"; grep FAIL "$TMP/cd.txt" | head -4; }
 
 echo "8. Log analyzer smoke test"
-printf '%s\n' '[00:00:00.000][INF][init] RIFTVEIL v7.8 loaded' \
-    '[00:00:01.000][INF][hit] player=a b group=head dmg=100 meth=suppress val=-29 bt=0 st=running cht=nl eng=pose:inv p=0.61' \
-    '[00:00:02.000][WRN][miss] player=a b reason=? meth=hit_mem val=31 bt=0 hc=80% eng=hitmem:inv* p=0.55' > "$TMP/log.txt"
-lua5.3 tools/log_report.lua "$TMP/log.txt" > "$TMP/rep.txt" 2>&1 && grep -q "Brier" "$TMP/rep.txt" && grep -q "BY ENEMY CHEAT" "$TMP/rep.txt" \
-    && pass "parses hit/miss/eng/p/cht lines" || fail "log_report"
+printf '%s\n' '[00:00:00.000][INF][init] RIFTVEIL v8.0 loaded' \
+    '[00:00:01.000][INF][hit] player=a b group=head dmg=100 meth=suppress val=-29 bt=0 st=running cht=nl' \
+    '[00:00:02.000][WRN][miss] player=a b reason=? meth=hit_mem val=31 bt=0 hc=80% st=air cht=nl' > "$TMP/log.txt"
+lua5.3 tools/log_report.lua "$TMP/log.txt" > "$TMP/rep.txt" 2>&1 && grep -q "BY ENEMY CHEAT" "$TMP/rep.txt" \
+    && pass "parses hit/miss/st/cht lines" || fail "log_report"
 
 echo "9. Performance on LuaJIT (2v2: net update + 4 paint frames per tick)"
 line=$(RV_BENCH=2 luajit tools/sandbox_check.lua 2>&1 | grep "^Bench")

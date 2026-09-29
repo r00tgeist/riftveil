@@ -44,7 +44,9 @@ local PLIST_LOG = {}
 
 -- Functions the scenario is designed to reach. If any of these show zero
 -- executed lines, the harness itself is broken and the run fails.
-local MUST_RUN = {
+-- v8.0 is the v6.2 decision core (see CHANGELOG); RV_MUST_RUN_V7=1 checks
+-- the v7.x function set when running an old version through RV_TARGET.
+local MUST_RUN = os.getenv("RV_MUST_RUN_V7") and {
     "ProcessPlayer", "DetectVuln", "DetectAA", "CanSeeHead", "CfgAngle",
     "LiveCap", "DynamicMaxYaw", "Extract6Lex", "Update", "SyncFlags",
     "BuildOverlay", "DrawPanel", "FitText", "UpdateDrag", "DrawShiftMarkers",
@@ -52,6 +54,11 @@ local MUST_RUN = {
     "EngineStep", "ENG.Decide", "ENG.Credit", "ENG.Post", "EngSnap",
     "TorsoCluster", "YawSide", "ExtrapolateOrigin", "LCTicks", "clear_log", "SetPanelPos",
     "TrackSide", "ChainPick", "ApplyDecision",
+} or {
+    "ProcessPlayer", "DetectVuln", "DetectAA", "CanSeeHead", "CfgAngle",
+    "LiveCap", "Extract6Lex", "Update", "DrawOverlay",
+    "on_aim_fire", "on_aim_hit", "on_aim_miss", "FlushDB",
+    "TorsoCluster", "ExtrapolateOrigin", "clear_log",
 }
 
 -- ── Mutable world state the mocks read from ──────────────────────────
@@ -195,7 +202,14 @@ local mock = {
         return function() return nil end
     end}),
     ui = setmetatable({}, {__index = function(_, k)
-        if k == "new_checkbox"     then return function() return ui_el("checkbox", true) end end
+        -- Old versions (RV_TARGET) had [EXP] switches; the real logs show
+        -- jitter prediction and adaptive learning never fired in game, so
+        -- they start off, as the user ran them.
+        if k == "new_checkbox"     then return function(_, _, name)
+            local off = type(name) == "string" and (name:find("Jitter Prediction", 1, true)
+                or name:find("Adaptive Learning", 1, true))
+            return ui_el("checkbox", not off)
+        end end
         -- Multiselects start with every item selected, so each module runs.
         if k == "new_multiselect"  then return function(_, _, _, items)
             local sel = {}
@@ -802,7 +816,10 @@ local UNIT_FAIL, UNIT_OK = {}, nil
 -- slow crouch-walk must read as crouch-moving.
 do
     local CS = probe("ClassifyState")
-    if not CS then
+    if not os.getenv("RV_MUST_RUN_V7") then
+        -- v8.0 restored v6.2's speed-band classifier on purpose; the
+        -- physics check below tests the v7.5 one.
+    elseif not CS then
         UNIT_FAIL[#UNIT_FAIL + 1] = "ClassifyState: not reachable through upvalues"
     else
         local TI_, ACC, FRIC, STOP = 1 / 64, 5.5, 5.2, 80
@@ -859,7 +876,9 @@ end
 do
     local REC_T, FLUSH, DB_T = probe("REC"), probe("FlushDB"), probe("DB")
     local ENG_T = probe("ENG")
-    if not (REC_T and FLUSH and DB_T and ENG_T) then
+    if not probe("DB_MAX") then
+        -- no DB cap in this version
+    elseif not (REC_T and FLUSH and DB_T) then
         UNIT_FAIL[#UNIT_FAIL + 1] = "DB cap: could not reach REC/FlushDB/DB/ENG through upvalues"
     else
         for k in pairs(DB_T) do DB_T[k] = nil end
@@ -868,7 +887,7 @@ do
         end
         for i = 1, 10 do
             REC_T["new" .. i] = {hit_count = 2, resolver_misses = 1, kills = 1, preferred_bt = 0,
-                                 E = ENG_T.New(), db_base = nil}
+                                 E = ENG_T and ENG_T.New() or nil, db_base = nil}
         end
         local ok, e = pcall(FLUSH)
         if not ok then UNIT_FAIL[#UNIT_FAIL + 1] = "DB cap: FlushDB raised " .. tostring(e) end
@@ -878,6 +897,37 @@ do
         if fresh ~= 10 then UNIT_FAIL[#UNIT_FAIL + 1] = string.format("DB cap: pruned %d of this match's 10 profiles", 10 - fresh) end
         for i = 1, 10 do REC_T["new" .. i] = nil end
         if n == 500 and fresh == 10 then UNIT_OK = "DB cap: 610 profiles -> 500, this match's 10 kept" end
+    end
+end
+
+-- CHEAT PROFILES: a method at <= 30% on >= 8 shots against a cheat is
+-- skipped for that cheat except on every 4th shot; nothing changes for
+-- an unknown cheat or too little data; gamesense presets only for gs.
+do
+    local CT, STATS, TC = probe("CheatTrusts"), probe("CHEAT_STATS"), probe("TrustedCfg")
+    if CT and STATS and TC then
+        STATS.nl = {suppress = {h = 1, m = 9}, hit_mem = {h = 7, m = 3}}
+        STATS.gs = {suppress = {h = 0, m = 3}}
+        local cases = {
+            {{cheat = "nl", shots_fired = 1}, "suppress", false},
+            {{cheat = "nl", shots_fired = 4}, "suppress", true},
+            {{cheat = "nl", shots_fired = 1}, "hit_mem", true},
+            {{cheat = "gs", shots_fired = 1}, "suppress", true},
+            {{shots_fired = 1}, "suppress", true},
+        }
+        for i, c in ipairs(cases) do
+            if CT(c[1], c[2]) ~= c[3] then
+                UNIT_FAIL[#UNIT_FAIL + 1] = string.format("CheatTrusts case %d: expected %s", i, tostring(c[3]))
+            end
+        end
+        STATS.nl, STATS.gs = nil, nil
+        if TC({cheat = "nl", config_conf = 1, config_type = "luasense_beta"}) ~= nil
+           or TC({cheat = "gs", config_conf = 1, config_type = "luasense_beta"}) ~= "luasense_beta"
+           or TC({config_conf = 1, config_type = "luasense_beta"}) ~= "luasense_beta" then
+            UNIT_FAIL[#UNIT_FAIL + 1] = "TrustedCfg: gamesense presets must apply to gs and unknown only"
+        end
+    elseif not os.getenv("RV_MUST_RUN_V7") and not os.getenv("RV_TARGET") then
+        UNIT_FAIL[#UNIT_FAIL + 1] = "CheatTrusts/CHEAT_STATS/TrustedCfg not reachable"
     end
 end
 

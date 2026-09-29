@@ -3,6 +3,39 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.0 – Back to the v6.2 resolver; cheat revealer built in; per-cheat
+          resolving.
+          WHY: across every uploaded log, resolver-decided shots hit the
+          head 74% of the time on v5.2-v6.2 (100/135, 10 of 10 opponents
+          at 57% or better) and 49% on v6.7-v7.9 (54/111, 9 of 12 at 60%
+          or worse), v7.9 alone 32%. Every method dropped. v6.3-v6.7
+          changed vuln values, the desync cap and 6lex confidence; v7.x
+          added the engine, turned off the miss flip and changed hit
+          memory. No single change can be proven guilty from the logs, so
+          the whole decision path goes back to v6.2.
+          KEPT FROM LATER (no decision changes): bounded NA (inf froze the
+          game), type-checked latency read, %.0f steam ids, DB entries
+          validated on load, DB autosave no longer re-adds the match, DB
+          capped at 500 profiles, rec.tm pruned by age (leak), bounded
+          logger (512 KB roll, flushed every round and autosave), every
+          callback in an error guard, NaN/out-of-range yaw never written,
+          backtrack ticks range-checked, st= and cht= on shot lines.
+          PROOF: tools/check_all.sh step 7 -- on the harness match v8.0
+          forces the same side with the same value as v6.2 on every tick
+          v6.2 runs (352/352, 0 opposite); the extra ticks are ones where
+          v6.2 itself crashes.
+          CHEAT REVEALER built in: the voice-packet detectors from the
+          cheat revealer script (gs, nl, nw, pd, ot, ft, pl, ev, r7, af),
+          ESP flag, panel line, saved per profile.
+          tools/cheat_detect_test.lua checks them on real FFI packets.
+          CHEAT PROFILES: gamesense Lua AA presets apply to gamesense
+          users only; per (cheat, method) head hits and resolver misses
+          are learned across players and sessions, and a method at <= 30%
+          after 8+ shots against a cheat is skipped for it (probed every
+          4th shot). Unknown cheat: exactly v6.2.
+          REMOVED: the decision engine, its cheat layer, engine_sim,
+          cheat_sim, the v7 menu and panel (the v6.2 menu is back, so
+          saved v6.2 settings apply again).
   v7.9 – Enemy-cheat engine layer; vuln windows scored on real evidence.
           LOG: the v7.6 match (51 shots) hit the head on 42% of
           informative shots vs ~63% over all earlier logs. Two opponents
