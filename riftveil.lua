@@ -3103,10 +3103,8 @@ local function ProcessPlayer(player, ctx)
         -- match against maybe a dozen actual shots), crushing the hit
         -- ratio to near-zero regardless of true accuracy and risking the
         -- trust gate below distrusting a perfectly good vuln type just
-        -- because it rarely got fired at. seen is now credited in
-        -- on_aim_fire, once per actual shot taken during an open vuln
-        -- window -- the same definition of "trial" that on_aim_hit
-        -- already uses for hit.
+        -- because it rarely got fired at. seen is credited by VulnCredit,
+        -- once per informative shot outcome in an open window.
         if vtype and VulnTrusted(rec, vtype) then
             local lc_ttl = math.floor(CFG.LC_WINDOW_S / ctx.ti) - 1
             local base_ttl = CFG.VULN_TTL[vtype] or 1
@@ -3402,11 +3400,30 @@ local function on_aim_fire(e)
         fire_time  = globals.realtime(),
         srv_hits = me and (entity.get_prop(me, "m_totalHitsOnServer") or 0) or 0,
     }
-    -- Credit a vuln_profile "seen" (trial) here, once per actual shot fired
-    -- during an open vuln window -- not once per detection (see the
-    -- comment at the DetectVuln call site in ProcessPlayer for why).
-    if r and r.vuln_ttl > 0 and r.vuln_type and r.vuln_profile[r.vuln_type] then
-        r.vuln_profile[r.vuln_type].seen = r.vuln_profile[r.vuln_type].seen + 1
+end
+
+-- A vuln window shot is a trial of that vuln type only when its value was
+-- the one applied (the engine may have picked another candidate inside an
+-- open window), and it is scored only on an outcome that says something
+-- about the side: a head/neck hit (success) or a resolver miss (failure).
+-- v7.8 counted every shot fired in the window as seen and every hit, body
+-- included, as a success -- a body hit lands from either side, so a type
+-- that never found the head still read ~50% and the trust gate could not
+-- fire. In the v7.6 match log vuln_unk went 0 heads / 5 resolver misses
+-- with 4 body hits, which v7.8 scored as 4/10.
+local function VulnCredit(rec, d, head)
+    if not (d.in_vuln and d.vuln_t and d.meth == "vuln_" .. d.vuln_t) then return end
+    local vp = rec.vuln_profile[d.vuln_t]
+    if not vp then vp = {seen = 0, hit = 0}; rec.vuln_profile[d.vuln_t] = vp end
+    vp.seen = vp.seen + 1
+    if head then
+        vp.hit = vp.hit + 1
+        rec.vuln_pref = d.vuln_t
+        -- A head hit proves the torso read was right -- reset the unk streak
+        if d.vuln_t == "unk" then rec.unk_miss_streak = 0 end
+    elseif d.vuln_t == "unk" then
+        -- Scales back unreliable unchokes (DetectVuln raises min_d)
+        rec.unk_miss_streak = (rec.unk_miss_streak or 0) + 1
     end
 end
 
@@ -3502,13 +3519,7 @@ local function on_aim_hit(e)
             end
             rec.preferred_bt = best_bt
         end
-        if d.in_vuln and d.vuln_t then
-            local vp = rec.vuln_profile
-            if vp[d.vuln_t] then vp[d.vuln_t].hit = (vp[d.vuln_t].hit or 0) + 1 end
-            rec.vuln_pref = d.vuln_t
-            -- Successful unk hit means torso_yaw was reliable — reset unk streak
-            if d.vuln_t == "unk" then rec.unk_miss_streak = 0 end
-        end
+        if is_head then VulnCredit(rec, d, true) end
     end
 
     info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s wpn=%s hp=%d ar=%d aim=%s pdmg=%d%s%s",
@@ -3645,11 +3656,6 @@ local function on_aim_miss(e)
             if d.in_vuln then
                 should_flip = false   -- absolute angle, flip is meaningless
                 rec.vuln_ttl = 0
-                -- seen was already credited once for this shot in
-                -- on_aim_fire -- crediting it again here would double-count
-                -- every miss (but not hits, which only increment hit in
-                -- on_aim_hit), artificially crushing the ratio below what
-                -- it actually is.
             elseif d.meth == METH.HIT_MEM then
                 should_flip = false   -- confirmed side, don't flip it away
                 -- This specific movement state's memory just proved wrong
@@ -3680,10 +3686,7 @@ local function on_aim_miss(e)
             -- Only count non-vuln misses toward soft reset.
             -- Most vuln misses are prediction errors, not resolver failures.
             -- Counting them wipes hit_mem data prematurely.
-            -- Track per-player unk miss streak to scale back unreliable unchokes
-            if d.vuln_t == "unk" then
-                rec.unk_miss_streak = (rec.unk_miss_streak or 0) + 1
-            end
+            VulnCredit(rec, d, false)
 
             if not d.in_vuln then
                 rec.resolver_misses = rec.resolver_misses + 1
