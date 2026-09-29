@@ -1,9 +1,55 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v6.7  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v6.8  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
+--    v6.8 – API-grounded review against docs.gamesense.gs (entity, client,
+--            globals, aim_fire, aim_miss pages).
+--            (1) 'prediction error' misses no longer blame the resolver.
+--            The aim_miss docs list four reasons: 'spread', 'prediction
+--            error', 'death', and '?' ("unknown cause or resolver-related
+--            miss"). is_resolver included 'prediction error', so each one
+--            flipped the tracked side and counted toward the soft reset
+--            that wipes hit memory. Rare (2 of 78 misses across two real
+--            logs), but every one corrupted side state for a miss caused
+--            by movement prediction. It still drives the backtrack-depth
+--            penalty, which is what it's actually evidence of.
+--            (2) Shots the aimbot flagged extrapolated or teleported
+--            (aim_fire fields, "breaking lag compensation") are now
+--            snapshotted and excluded from resolver blame on a miss --
+--            the position was a guess, so the miss says nothing about yaw.
+--            (3) Backtrack is read unit-agnostically. The aim_fire docs
+--            contradict themselves: the field says "Amount of ticks", the
+--            example wraps it in globals.toticks() (seconds). v4.2
+--            followed the example; if the description is right, TT()
+--            turned every nonzero tick count into ticks*64, failing the
+--            1..16 check so backtrack learning could never learn. The two
+--            readings can't overlap -- seconds are capped by sv_maxunlag
+--            (<= 0.2, always < 1), nonzero ticks are whole numbers >= 1 --
+--            so (0,1) is converted as seconds and >= 1 taken as ticks.
+--            Logs can't settle it: all 257 hits / 78 misses logged bt=0.
+--            (4) CanSeeHead's source is now client.eye_position() (the
+--            local player's real eye position per the client docs)
+--            instead of origin + m_vecViewOffset.z.
+--            (5) tools/sandbox_check.lua rebuilt. The old harness's
+--            ui.get mock returned false for everything, so Update() bailed
+--            at `if not ui.get(ui_on)` and ProcessPlayer -- the whole
+--            resolver -- executed zero lines while it still printed PASS.
+--            It now uses element-aware UI mocks, a stateful animstate
+--            mock with real numeric fields, and an 80-tick scenario
+--            (jitter, LBY snaps, choke/unchoke, stop/peek/duck, hits and
+--            every miss reason). It also flags undeclared global READS and
+--            [ERR] lines swallowed by riftveil's own pcalls, prints
+--            per-function coverage, and fails if a core function never
+--            runs. Verified by reintroducing a real out-of-scope-local bug
+--            from this pass (mvz in CanSeeHead) -- the new harness flags
+--            it; the old one passed it.
+--            Flagged, not changed: TrackDT compares enemy simtime against
+--            globals.tickcount(); globals.servertickcount() ("most recently
+--            received tick from the server") may be the more correct
+--            baseline for def-tickbase detection, but the docs don't pin
+--            down how far tickcount leads it, so no change without data.
 --    v6.7 – Explored 3 uploaded reference resolver/AA scripts for
 --            genuinely useful, verifiable techniques (not invented).
 --            Found the same formula independently in all three: a
@@ -834,7 +880,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "6.7"
+local RV_VERSION = "6.8"
 
 local ffi = require "ffi"
 
@@ -2023,11 +2069,24 @@ end
 -- the old approximation only if the hitbox query itself fails (dormant/
 -- not-yet-resolved entity this tick) -- same fail-open philosophy as the
 -- rest of this function.
+-- Source point: client.eye_position() (docs.gamesense.gs/docs/api/client:
+-- "x, y, z world coordinates of the local player's eye position") -- the
+-- engine's actual eye position, instead of rebuilding it from origin +
+-- m_vecViewOffset.z. Same reasoning as the target end: an approximation
+-- where the API hands over the real value. Old reconstruction kept as the
+-- fallback if the call fails.
 local function CanSeeHead(me, target)
     if not me or not target then return true end
-    local mx, my, mz = entity.get_origin(me)
-    if not isnum(mx) then return true end
-    local _, _, mvz = entity.get_prop(me, "m_vecViewOffset")
+    local mx, my, mz
+    local ok_eye, ex, ey, ez = pcall(client.eye_position)
+    if ok_eye and isnum(ex) and isnum(ey) and isnum(ez) then
+        mx, my, mz = ex, ey, ez
+    else
+        local ox, oy, oz = entity.get_origin(me)
+        if not isnum(ox) then return true end
+        local _, _, mvz = entity.get_prop(me, "m_vecViewOffset")
+        mx, my, mz = ox, oy, oz + (isnum(mvz) and mvz or 64)
+    end
 
     local tx, ty, tz
     local ok_hb, hx, hy, hz = pcall(entity.hitbox_position, target, 0)
@@ -2040,9 +2099,7 @@ local function CanSeeHead(me, target)
         tx, ty, tz = ox, oy, oz + (isnum(tvz) and tvz or 64)
     end
 
-    local ok, frac, hit = pcall(client.trace_line, me,
-        mx, my, mz + (isnum(mvz) and mvz or 64),
-        tx, ty, tz)
+    local ok, frac, hit = pcall(client.trace_line, me, mx, my, mz, tx, ty, tz)
     if not ok or not isnum(frac) then return true end
     return frac >= 0.98 or hit == target
 end
@@ -3227,10 +3284,27 @@ local function on_aim_fire(e)
         conf    = r and r.conf      or 0,
         aa      = r and r.aa_type   or AA.UNKNOWN,
         state   = r and r.state     or nil,  -- movement state at fire time, for per-condition hit_mem
-        -- e.backtrack is a TIME value (seconds), not a tick count -- must
-        -- go through TT() before comparing against the 1..16 tick range
-        -- used everywhere else (bt_hist/preferred_bt/log output).
-        bt      = TT(e.backtrack),
+        -- Unit-agnostic on purpose. docs.gamesense.gs/docs/events/aim_fire
+        -- contradicts itself: the field is described as "Amount of ticks
+        -- the player was backtracked", but the page's own example wraps it
+        -- in globals.toticks(), which only makes sense for seconds. v4.2
+        -- trusted the example and always ran it through TT() -- if the
+        -- description is right, every nonzero value became ticks*64 and
+        -- failed the 1..16 range check below, so backtrack learning could
+        -- never learn anything. The two readings can't overlap: seconds are
+        -- capped by sv_maxunlag (<= 0.2, always < 1), while a nonzero tick
+        -- count is a whole number >= 1. So (0,1) can only be seconds and
+        -- >= 1 can only be ticks -- correct under either interpretation.
+        bt      = (function(v)
+                      if not isnum(v, 0) or v == 0 then return 0 end
+                      if v < 1 then return TT(v) end
+                      return math.floor(v + 0.5)
+                  end)(e.backtrack),
+        -- The aimbot's own record-quality flags (aim_fire docs). A miss on
+        -- an extrapolated or teleporting (LC-breaking) record was aimed at
+        -- a guessed position, so on_aim_miss doesn't blame the yaw for it.
+        extrapolated = e.extrapolated == true,
+        teleported   = e.teleported == true,
         hc      = e.hit_chance or 0,
         in_vuln = r and r.vuln_ttl > 0 or false,
         vuln_t  = r and r.vuln_type or nil,
@@ -3401,12 +3475,37 @@ local function on_aim_miss(e)
         if rec then rec.total_misses = rec.total_misses + 1 end
     end
 
-    local is_resolver = reason == "?" or reason == "" or reason == "prediction error"
+    -- docs.gamesense.gs/docs/events/aim_miss lists exactly four reasons:
+    -- 'spread', 'prediction error', 'death', and '?' ("unknown cause or
+    -- resolver-related miss"). Only '?' belongs to the resolver. 'prediction
+    -- error' used to be lumped in here, so every one flipped the tracked side
+    -- and counted toward a soft reset that wipes hit memory -- blaming the
+    -- resolver for the aimbot's movement prediction. It still feeds the
+    -- backtrack-depth penalty below, which is what it's actually evidence of.
+    -- Shots the aimbot itself flagged as extrapolated or teleported (target
+    -- breaking lag compensation) are excluded too: when the position itself
+    -- was a guess, a miss says nothing about whether our yaw was right.
+    local is_resolver = (reason == "?" or reason == "")
+                        and not d.extrapolated and not d.teleported
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%%%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%%%s%s",
         entity.get_player_name(e.target) or "?",
         reason, d.meth, d.val, d.bt, d.hc,
-        d.in_vuln and (" !" .. d.vuln_t) or "")
+        d.in_vuln and (" !" .. d.vuln_t) or "",
+        (d.extrapolated and " [extrap]" or "") .. (d.teleported and " [tele]" or ""))
+
+    if reason == "prediction error" then
+        local rec = d.s64 and REC[d.s64]
+        if rec and rec.preferred_bt > 0 then
+            rec.bt_hist[rec.preferred_bt] =
+                math.max(0, (rec.bt_hist[rec.preferred_bt] or 0) - 1)
+            local best_bt, best_c = 0, 0
+            for depth, count in pairs(rec.bt_hist) do
+                if count > best_c then best_c = count; best_bt = depth end
+            end
+            rec.preferred_bt = best_bt
+        end
+    end
 
     if is_resolver then
         local rec = d.s64 and REC[d.s64]
@@ -3474,15 +3573,6 @@ local function on_aim_miss(e)
 
             if not d.in_vuln then
                 rec.resolver_misses = rec.resolver_misses + 1
-                if reason == "prediction error" and rec.preferred_bt > 0 then
-                    rec.bt_hist[rec.preferred_bt] =
-                        math.max(0, (rec.bt_hist[rec.preferred_bt] or 0) - 1)
-                    local best_bt, best_c = 0, 0
-                    for depth, count in pairs(rec.bt_hist) do
-                        if count > best_c then best_c = count; best_bt = depth end
-                    end
-                    rec.preferred_bt = best_bt
-                end
                 if rec.resolver_misses >= 3 then
                     warn("reset", "soft reset player=%s",
                          entity.get_player_name(e.target) or "?")
