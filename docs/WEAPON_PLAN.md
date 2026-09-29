@@ -1,6 +1,6 @@
 # Per-weapon aim policy — implementation plan (v2)
 
-Status: **plan, not implemented.** v7.8 logs every input the policy needs
+Status: **step 1 built (v8.2): the override fields are probed and logged as `[aimfield]`.** v8.2 logs every input the policy needs
 (`wpn=`, `hp=`, `ar=`, `aim=`, `pdmg=` on every shot line). One match of
 that data plus an in-game check of the player-list fields come first.
 

@@ -1,17 +1,7 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v8.2  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v6.2  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
---  Vulnerability windows · cheat revealer · per-cheat method trust
--- ════════════════════════════════════════════════════════════════════
---  v8.0 – The v6.2 decision code (74% head on resolver-decided shots
---          in the logs, against 49% for v6.7-v7.9), plus fixes that
---          change no decision, a built-in cheat revealer and learned
---          per-cheat method trust. Full notes: CHANGELOG.md. The v6.2
---          notes below describe the decision code as it is.
---  v8.1 – The v7.9 menu and info panel back on top of that core.
---  v8.2 – Condition detection by physics, cached player-list writes,
---          rv_perf, weapon/target logging, aim-field probe. Status and
---          next steps: docs/ROADMAP.md.
+--  Vulnerability windows · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
 --    v6.2 – Senior resolver-review pass #3, focused on resolver-domain
@@ -691,7 +681,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.2"
+local RV_VERSION = "6.2"
 
 local ffi = require "ffi"
 
@@ -701,51 +691,31 @@ local ffi = require "ffi"
 --  Output: %localappdata%\gamesense\riftveil_debug.txt (append).
 --  Structured format: [HH:MM:SS.mmm][LVL][MOD] key=val ...
 -- ══════════════════════════════════════════════════════════════════
-local LOG_FILE      = "riftveil_debug.txt"
-local LOG_PREV_FILE = "riftveil_debug_prev.txt"
--- writefile() only overwrites, so appending means rewriting the whole file.
--- The old logger also re-READ the whole file on every flush, and never
--- capped it (it grew across sessions -- one uploaded log spanned v2.3 to
--- v6.2). Benchmarked: 49.7 MB written to disk to produce a 1.9 MB log over
--- ~5 minutes of play, growing quadratically with session length, all
--- synchronous on the game thread. Now: the file is read once at load and
--- cached (log_disk), flushes are bigger, and once the file passes
--- LOG_ROLL_BYTES it's moved to riftveil_debug_prev.txt and restarted, so
--- the most recent history is always in those two files and every write is
--- bounded by the cap instead of by how long you've been playing.
-local LOG_FLUSH_LINES = 2048
--- 512 KB: every flush rewrites the whole file (writefile can't append), so
--- this bounds the size of each synchronous disk write.
-local LOG_ROLL_BYTES  = 512000
+local LOG_FILE  = "riftveil_debug.txt"
 local log_buf   = {}
 local log_total = 0
-local log_disk  = readfile(LOG_FILE) or ""
 
 local function ts()
     local h, m, s, ms = client.system_time()
     return string.format("%02d:%02d:%02d.%03d", h, m, s, ms)
 end
 
+local function log_write(level, mod, msg)
+    local line = string.format("[%s][%s][%s] %s", ts(), level, mod, msg)
+    log_buf[#log_buf + 1] = line
+    log_total = log_total + 1
+    if #log_buf >= 512 then
+        local existing = readfile(LOG_FILE) or ""
+        writefile(LOG_FILE, existing .. table.concat(log_buf, "\n") .. "\n")
+        log_buf = {}
+    end
+end
+
 local function flush_log()
     if #log_buf == 0 then return end
-    log_disk = log_disk .. table.concat(log_buf, "\n") .. "\n"
+    local existing = readfile(LOG_FILE) or ""
+    writefile(LOG_FILE, existing .. table.concat(log_buf, "\n") .. "\n")
     log_buf = {}
-    if #log_disk > LOG_ROLL_BYTES then
-        writefile(LOG_PREV_FILE, log_disk)
-        log_disk = ""
-    end
-    writefile(LOG_FILE, log_disk)
-end
-
-local function clear_log()
-    writefile(LOG_FILE, "")
-    log_disk = ""; log_buf = {}; log_total = 0
-end
-
-local function log_write(level, mod, msg)
-    log_buf[#log_buf + 1] = string.format("[%s][%s][%s] %s", ts(), level, mod, msg)
-    log_total = log_total + 1
-    if #log_buf >= LOG_FLUSH_LINES then flush_log() end
 end
 
 -- Module-scoped emit helpers. Use: dbg("6lex", "side=%d", side)
@@ -761,35 +731,7 @@ local function err(mod, fmt, ...)  if select("#", ...) > 0 then log_write("ERR",
 --  PER-MATCH STATE  (keyed by steam64, wiped on game_end/level_init)
 -- ══════════════════════════════════════════════════════════════════
 local DB_KEY   = "riftveil_v1"
--- Saved profiles are validated field by field: a wrong type (an old
--- version's leftovers, a partial write) made NewRec throw on every tick
--- for that player -- no resolver for them all match. Unknown fields drop.
-local function DBNum(v, lo, hi)
-    if type(v) ~= "number" or v ~= v or v < lo or v > hi then return nil end
-    return v
-end
-local function CleanDBEntry(e)
-    if type(e) ~= "table" then return nil end
-    return {
-        config_type = type(e.config_type) == "string" and e.config_type or nil,
-        vuln_pref   = type(e.vuln_pref)   == "string" and e.vuln_pref   or nil,
-        cheat       = type(e.cheat)       == "string" and e.cheat       or nil,
-        gen         = DBNum(e.gen, 0, 1e12),
-        bt_pref     = DBNum(e.bt_pref, 0, 64),
-        hit_rate    = DBNum(e.hit_rate, 0, 1),
-        samples     = DBNum(e.samples, 0, 1e9),
-        kills       = DBNum(e.kills, 0, 1e9),
-    }
-end
-local DB = {}
-do
-    local raw = database.read(DB_KEY)
-    if type(raw) == "table" then
-        for k, e in pairs(raw) do
-            if type(k) == "string" then DB[k] = CleanDBEntry(e) end
-        end
-    end
-end
+local DB       = database.read(DB_KEY) or {}
 local REC      = {}   -- per-player resolver records this match
 local EIDX_S64 = {}   -- [entity_index] = steam64_str, refreshed each tick
 local SHOTS    = {}   -- [shot_id] = context snapshot at aim_fire
@@ -800,20 +742,6 @@ local DT_HIST  = {}   -- [s64] = simtime-delta samples for DT detection
 -- than net updates, so anything DrawOverlay can read instead of recompute is
 -- a real, multiplicative FPS win, not a micro-optimization).
 local LIVE_ENEMIES = {}   -- array of live enemy entindexes, this net_update
-
--- Player-list writes go through a per-entity cache: a field is only sent
--- when its value changes (v6.2 sent all four fields for every enemy every
--- tick). The cache is dropped once a second and on every reset, so a value
--- the game changed behind our back is re-sent within a second.
-local PL_CACHE, PL_KNOWN = {}, {}
-local LAST_PL_SYNC, PL_RESYNC_TICKS = 0, 64
-local function PSet(ent, field, value)
-    local c = PL_CACHE[ent]
-    if not c then c = {}; PL_CACHE[ent] = c end
-    if c[field] == value then return end
-    c[field] = value
-    plist.set(ent, field, value)
-end
 local LAST_SPIKE    = false
 
 -- Periodic DB autosave state. FlushDB previously only ran on match-end/
@@ -831,147 +759,119 @@ local ORIG_RATIO   = cvar.cl_interp_ratio:get_int()
 local ORIG_IPOLATE = cvar.cl_interpolate:get_int()
 
 -- ══════════════════════════════════════════════════════════════════
---  FEATURE SET
---  v7.1 removed the four [EXP] switches. Each feature is now fixed on or
---  off from the match-log evidence below; every code path is kept, so a
---  decision is a one-word change here, not a rewrite.
+--  UI  —  skeet / deutsch style, LUA "B" container
+--
+--  Philosophy: built-in resolver runs by default.
+--  We only take control when our signal is stronger than its guess.
+--  [SAFE] = tested, additive, won't break the built-in
+--  [EXP]  = experimental, disable if resolver feels worse
 -- ══════════════════════════════════════════════════════════════════
-local FEATURE = {
-    -- On in all 9 match logs, and the best head rate of any method there:
-    -- 50 head hits against 14 resolver misses (78.1%).
-    SUPPRESS    = true,
-    -- Every logged match (v2.3 to v5.2) ran the per-side L/R table: the
-    -- switch did nothing until v5.5, so all recorded results include it.
-    ASYMMETRIC  = true,
-    -- Off. PredictSide takes its phase from globals.tickcount() minus an
-    -- enemy simtime tick, two different clocks, so our own latency shifts
-    -- the prediction. And once 4 flips are recorded its elseif shadows
-    -- lagcomp, def-tick, spike and yaw-cache even on ticks where it
-    -- predicts nothing.
-    JITTER_PRED = false,
-    -- v7.5 condition detection (see ClassifyState): on. It only changes
-    -- which state table a moving enemy reads; shot lines log st= so the
-    -- next match shows whether it helps.
-    STATE_PHYSICS = true,
-    -- These three are the v6.2 [EXP] switches as the logs show them
-    -- running when the resolver hit 74% (suppress fired in every v6.2
-    -- match; jitter prediction never did).
+local _h0      = ui.new_label("LUA","B","\xe2\x97\x86 RIFTVEIL")
+local ui_on    = ui.new_checkbox("LUA","B","  Enable")
+
+-- SAFE — these only override when signal is definitive
+-- Display names were internal codenames until now (e.g. "6lex extraction"
+-- means nothing to someone opening this menu cold -- it's the animation-
+-- layer digit-read technique's internal nickname). Renamed to describe
+-- what each one actually does; the underlying ui_* variable names are
+-- unchanged (purely internal, never shown), so no logic moved.
+local _h1      = ui.new_label("LUA","B","\xe2\x96\xb8 SAFE")
+local ui_6lex  = ui.new_checkbox("LUA","B","  [SAFE] Desync Angle Detection")
+local ui_vuln  = ui.new_checkbox("LUA","B","  [SAFE] Vulnerability Detection")
+local ui_hitmem= ui.new_checkbox("LUA","B","  [SAFE] Hit Memory")
+
+-- EXPERIMENTAL — disable if things feel worse
+local _h2      = ui.new_label("LUA","B","\xe2\x96\xb8 EXPERIMENTAL")
+local ui_per   = ui.new_checkbox("LUA","B","  [EXP] Jitter Prediction")
+local ui_asym  = ui.new_checkbox("LUA","B","  [EXP] Asymmetric Angles")
+local ui_sup   = ui.new_checkbox("LUA","B","  [EXP] Suppress Shots")
+
+-- INTERFACE
+local _h3      = ui.new_label("LUA","B","\xe2\x96\xb8 INTERFACE")
+local ui_tight = ui.new_checkbox("LUA","B","  Tight Interpolation")
+local ui_esp   = ui.new_checkbox("LUA","B","  ESP Indicators")
+local ui_verb  = ui.new_checkbox("LUA","B","  Verbose Logging")
+-- Accent picker: only tints the panel's idle/neutral chrome (header text,
+-- idle top-strip). Never touches the vuln/resolved/building colors in
+-- DrawOverlay -- those carry meaning (red/green/amber = state), not taste,
+-- so they stay fixed regardless of this setting.
+local ui_accent = ui.new_color_picker("LUA","B","  Panel Accent Color", 90, 150, 255, 255)
+
+local _h4      = ui.new_label("LUA","B","\xe2\x96\xb8 CONTROLS")
+
+-- Forward-declare FlushDB so button callbacks can reference it
+local FlushDB
+
+-- Renamed from "Flush DB" -- that name reads as a clear/reset action but
+-- does the opposite: it PERSISTS the current match's stats into the
+-- permanent DB (merging with existing entries), which is exactly what
+-- EndMatch already does automatically. This button is only useful for
+-- saving early mid-match; it has never cleared anything. "Reset match"
+-- below is the actual clear control.
+local _btn_flush = ui.new_button("LUA","B","  Save match to DB", function()
+    if FlushDB then FlushDB() end
+    client.log("[RIFTVEIL] match stats saved to DB")
+end)
+local _btn_reset = ui.new_button("LUA","B","  Reset match + DB", function()
+    local n = 0
+    for s64 in pairs(REC) do DB[s64] = nil; n = n + 1 end
+    REC = {}; DT_HIST = {}; SHOTS = {}; EIDX_S64 = {}
+    client.log(string.format("[RIFTVEIL] reset %d profiles", n))
+    info("reset", "manual reset, %d profiles cleared", n)
+end)
+-- "Reset match + DB" above can only clear DB[s64] for players CURRENTLY in
+-- REC -- it has no way to touch a profile from an opponent not loaded into
+-- this session yet. That looks like "old players keep coming back after I
+-- reset" when it's really just DB persistence working outside that
+-- button's scope. This is the actual full wipe.
+local _btn_wipe = ui.new_button("LUA","B","  Wipe ALL saved DB", function()
+    local n = 0; for _ in pairs(DB) do n = n + 1 end
+    DB = {}
+    database.write(DB_KEY, DB)
+    REC = {}; DT_HIST = {}; SHOTS = {}; EIDX_S64 = {}
+    client.log(string.format("[RIFTVEIL] wiped entire DB (%d entries)", n))
+    info("reset", "full DB wipe, %d entries cleared", n)
+end)
+local _btn_clr = ui.new_button("LUA","B","  Clear log", function()
+    writefile(LOG_FILE, "")
+    log_buf = {}; log_total = 0
+    client.log("[RIFTVEIL] log cleared")
+end)
+
+local SUB_ITEMS = {
+    _h1, ui_6lex, ui_vuln, ui_hitmem,
+    _h2, ui_per, ui_asym, ui_sup,
+    _h3, ui_tight, ui_esp, ui_verb, ui_accent,
+    _h4, _btn_flush, _btn_reset, _btn_wipe, _btn_clr,
 }
-
--- ══════════════════════════════════════════════════════════════════
---  MENU  (LUA > B)
---
---  Six rows: title, master switch, detection modules, interpolation,
---  indicators, debug log. Maintenance moved to the console (rv_stats,
---  rv_db, rv_save, rv_reset, rv_wipe, rv_clear), where a misclick
---  can't wipe a profile mid-round.
---
---  Every name carries a hidden "\nriftveil" suffix. gamesense keys saved
---  config values by element name, so a bare "Resolver" in LUA > B would
---  share its value with any other script's element of that name; text
---  after "\n" is never drawn.
---
---  The accent follows gamesense's own Menu color instead of a separate
---  picker: the title and panel always match the rest of the menu.
--- ══════════════════════════════════════════════════════════════════
-local MENU_COLOR = (function()
-    local ok, ref = pcall(ui.reference, "MISC", "Settings", "Menu color")
-    return ok and ref or nil
-end)()
-
-local ACCENT = {150, 200, 60}   -- only used if the Menu color reference is missing
-local function ReadAccent()
-    if not MENU_COLOR then return false end
-    local r, g, b = ui.get(MENU_COLOR)
-    if type(r) ~= "number" then return false end
-    if r == ACCENT[1] and g == ACCENT[2] and b == ACCENT[3] then return false end
-    ACCENT[1], ACCENT[2], ACCENT[3] = r, g, b
-    return true
+local function RefreshVis()
+    local on = ui.get(ui_on)
+    for _, item in ipairs(SUB_ITEMS) do ui.set_visible(item, on) end
 end
-ReadAccent()
+ui.set_callback(ui_on, RefreshVis)
+RefreshVis()
 
-local function TitleText()
-    return string.format("\aCDCDCDFFrift\a%02X%02X%02XFFveil\a5C5C5CFF   %s",
-        ACCENT[1], ACCENT[2], ACCENT[3], RV_VERSION)
-end
-
-local DET_KEYS  = {["Vulnerability"] = "vuln", ["Hit memory"] = "hitmem", ["Desync angle"] = "six",
-                   ["Cheat profiles"] = "cheat"}
-local IND_KEYS  = {["Info panel"] = "panel", ["ESP flags"] = "esp", ["Shift marker"] = "shift"}
-
-local ui_title  = ui.new_label      ("LUA", "B", TitleText())
-local ui_on     = ui.new_checkbox   ("LUA", "B", "Resolver\nriftveil")
-local ui_detect = ui.new_multiselect("LUA", "B", "Detection\nriftveil", {"Vulnerability", "Hit memory", "Desync angle", "Cheat profiles"})
-local ui_tight  = ui.new_checkbox   ("LUA", "B", "Tight interpolation\nriftveil")
-local ui_ind    = ui.new_multiselect("LUA", "B", "Indicators\nriftveil", {"Info panel", "ESP flags", "Shift marker"})
-local ui_verb   = ui.new_checkbox   ("LUA", "B", "Debug log\nriftveil")
-
--- First run of the v7.1 layout only. The renamed elements start empty, and
--- the one-time flag keeps this from overriding a choice the user saved
--- into a config afterwards. Desync angle stays off by default: it never
--- produced a single override in the 9 logs, and when it does fire it
--- outranks hit memory and suppress, so turning it on is the user's call.
-if not database.read("riftveil_ui_defaults_v71") then
-    ui.set(ui_on, true)
-    ui.set(ui_detect, {"Vulnerability", "Hit memory"})
-    ui.set(ui_tight, true)
-    ui.set(ui_ind, {"Info panel", "ESP flags", "Shift marker"})
-    database.write("riftveil_ui_defaults_v71", true)
-end
--- v8.1: "Cheat profiles" (CHEAT PROFILES) is added to whatever Detection
--- selection already exists, once. With no cheat data it changes nothing.
-if not database.read("riftveil_ui_defaults_v81") then
-    local sel, has = ui.get(ui_detect), false
-    sel = type(sel) == "table" and sel or {}
-    local copy = {}
-    for i = 1, #sel do
-        if sel[i] == "Cheat profiles" then has = true end
-        if sel[i] ~= "Adaptive engine" then copy[#copy + 1] = sel[i] end
-    end
-    if not has then copy[#copy + 1] = "Cheat profiles" end
-    ui.set(ui_detect, copy)
-    database.write("riftveil_ui_defaults_v81", true)
-end
-
--- Multiselect values cached as booleans: ui.get on a multiselect builds a
--- fresh table, and ProcessPlayer/paint would otherwise pay for that on
--- every read. Refreshed by the callbacks below and once per net update.
-local DET = {vuln = false, hitmem = false, six = false, cheat = false, verbose = false}
-local IND = {panel = false, esp = false, shift = false}
-local function ReadMulti(ref, keys, out)
-    for _, k in pairs(keys) do out[k] = false end
-    local sel = ui.get(ref)
-    if type(sel) ~= "table" then return end
-    for i = 1, #sel do
-        local k = keys[sel[i]]
-        if k then out[k] = true end
-    end
-end
-local function SyncFlags()
-    ReadMulti(ui_detect, DET_KEYS, DET)
-    ReadMulti(ui_ind, IND_KEYS, IND)
-    DET.verbose = DET.verbose == true
-end
-
--- ui.set_callback only fires on a change, never for a value already
--- restored from a saved config when the script loads, so everything with
--- a callback is also run once by hand right after registration.
-local TIGHT_APPLIED = nil
+-- BUG (senior gamesense-review pass, previously undetected): ui.set_callback
+-- only fires on a CHANGE event -- it does not run just because a checkbox
+-- loads already-checked from a saved config, the same reason RefreshVis()
+-- above has to be called manually once right after its own registration.
+-- ui_tight never got that same treatment: if "Tight Interpolation" was left
+-- checked from a prior session, gamesense restores the checkbox to checked
+-- on reload, but the actual cl_interp*/cl_interpolate cvars stay at
+-- whatever ORIG_* captured at THIS load -- silently desynced from what the
+-- UI displays as enabled, with no toggle needed to notice (the checkbox
+-- already reads "on"). Named the function and self-invoke it once after
+-- registration, same pattern as RefreshVis/RefreshVis().
 local function ApplyTightInterp()
-    local want = ui.get(ui_on) and ui.get(ui_tight)
-    if want == TIGHT_APPLIED then return end
-    local first = TIGHT_APPLIED == nil
-    TIGHT_APPLIED = want
-    if want then
+    if not ui.get(ui_on) then return end
+    if ui.get(ui_tight) then
         pcall(function()
             cvar.cl_interpolate:set_int(0)
             cvar.cl_interp_ratio:set_int(1)
             cvar.cl_interp:set_float(0.031)
         end)
         info("interp", "tight ON")
-    elseif not first then
-        -- Nothing to restore on the first call: ORIG_* were read from the
-        -- live cvars moments ago.
+    else
         pcall(function()
             cvar.cl_interpolate:set_int(ORIG_IPOLATE)
             cvar.cl_interp_ratio:set_int(ORIG_RATIO)
@@ -980,26 +880,8 @@ local function ApplyTightInterp()
         info("interp", "tight OFF")
     end
 end
-
-local SUB_ITEMS = {ui_detect, ui_tight, ui_ind, ui_verb}
-local function SyncMenu()
-    SyncFlags()
-    local on = ui.get(ui_on)
-    for i = 1, #SUB_ITEMS do ui.set_visible(SUB_ITEMS[i], on) end
-    ApplyTightInterp()
-end
-ui.set_callback(ui_on,     SyncMenu)
-ui.set_callback(ui_detect, SyncFlags)
-ui.set_callback(ui_ind,    SyncFlags)
-ui.set_callback(ui_verb,   SyncFlags)
-ui.set_callback(ui_tight,  ApplyTightInterp)
-SyncMenu()
-
--- Forward-declared: the rv_save command and EndMatch both call FlushDB;
--- rv_perf reads PERF (see PERFORMANCE PROFILER).
-local FlushDB
-local PERF
-
+ui.set_callback(ui_tight, ApplyTightInterp)
+ApplyTightInterp()
 
 -- ══════════════════════════════════════════════════════════════════
 --  CONSOLE COMMANDS  (console_input — confirmed cheat event)
@@ -1077,26 +959,8 @@ client.set_event_callback("console_input", function(text)
         local s = table.concat(out, "\n")
         client.log(s); log_write("CMD","db", s)
 
-    elseif cmd == "rv_perf" then
-        -- First call starts measuring, the second prints the report.
-        if not PERF.on then
-            PERF.Reset()
-            PERF.on = true
-            client.log(PERF.qpc and "[RIFTVEIL] profiling -- play ~10 s, then run rv_perf again"
-                       or "[RIFTVEIL] profiling errors only (no high-resolution timer) -- run rv_perf again")
-        else
-            PERF.on = false
-            local s = PERF.Report()
-            client.log(s); log_write("CMD", "perf", s)
-        end
-
-    elseif cmd == "rv_save" then
-        -- Saves this match's profiles now instead of waiting for match end.
-        if FlushDB then FlushDB() end
-        client.log("[RIFTVEIL] match profiles saved")
-
     elseif cmd == "rv_clear" then
-        clear_log()
+        writefile(LOG_FILE, ""); log_buf = {}; log_total = 0
         client.log("[RIFTVEIL] log cleared")
 
     elseif cmd == "rv_reset" then
@@ -1304,6 +1168,12 @@ local AA_SHORT = {
     [AA.STATIC]="static",  [AA.UNKNOWN]="?",
 }
 
+local CFG_LABEL = {
+    luasense_beta = "luasense β",
+    luasense_std  = "luasense",
+    symmetric     = "symmetric",
+}
+
 local HG = {
     "generic","head","chest","stomach",
     "left arm","right arm","left leg","right leg","neck","?","gear",
@@ -1396,11 +1266,8 @@ local function GetLat()
     end
     local ok1, cur = pcall(function() return ffi.cast(ncfn, nc[0][9])(nc, 0) end)
     local ok2, avg = pcall(function() return ffi.cast(ncfn, nc[0][10])(nc, 0) end)
-    -- Type-checked: the comparison sits outside the pcall, and LuaJIT (the
-    -- game's runtime) throws on number-vs-cdata comparisons.
-    cur = (ok1 and type(cur) == "number" and cur == cur and cur > 0 and cur < 2) and cur
-          or client.latency()
-    avg = (ok2 and type(avg) == "number" and avg == avg and avg > 0 and avg < 2) and avg or cur
+    cur = (ok1 and cur and cur > 0) and cur or client.latency()
+    avg = (ok2 and avg and avg > 0) and avg or cur
     return cur, avg
 end
 
@@ -1408,22 +1275,10 @@ end
 --  MATH HELPERS + INPUT VALIDATION
 -- ══════════════════════════════════════════════════════════════════
 local function Clamp(v, a, b) return math.min(math.max(v, a), b) end
--- The value written to "Force body yaw value": inside the plist's +-60 and
--- never NaN (a NaN animstate read used to reach the write; math.min/max
--- handle NaN differently in LuaJIT and Lua 5.3). Real reads are unchanged.
-local function SafeYaw(v)
-    if type(v) ~= "number" or v ~= v then return 0 end
-    return Clamp(v, -60, 60)
-end
 local function Sign(x)        return x > 0 and 1 or (x < 0 and -1 or 0) end
--- Bounded: the old two while-loops never ended on inf and took ~1e9
--- iterations on a huge value -- a frozen game on one bad animstate read.
--- Same result on every finite input.
 local function NA(a)
-    if a ~= a or a == math.huge or a == -math.huge then return 0 end
-    if a >= -180 and a <= 180 then return a end
-    a = a % 360
-    if a > 180 then a = a - 360 end
+    while a >  180 do a = a - 360 end
+    while a < -180 do a = a + 360 end
     return a
 end
 local function TT(t) return t and math.floor(t / globals.tickinterval() + 0.5) or 0 end
@@ -1485,7 +1340,7 @@ local function Extract6Lex(ptr, live_cap)
     local s, d = try(al.playback_rate)
     if s ~= 0 then return s, d end
 
-    s = try(al.weight)
+    s, d = try(al.weight)
     if s ~= 0 then return s, math.min(35.0, live_cap) end  -- weight fallback: fixed estimate
     return 0, 0
 end
@@ -1495,33 +1350,12 @@ end
 -- ══════════════════════════════════════════════════════════════════
 -- (MaxDesync removed — was used to compute max_d which was dead after pick chain refactor)
 
--- FEATURE.STATE_PHYSICS (v7.5, audited against the AA builders in
--- docs/STATE_AUDIT.md): the builders pick slow walk by KEY, v6.2 inferred it
--- from a 5-100 u/s band -- which also caught every acceleration into and
--- braking out of a run. Source physics (sv_accelerate 5.5, friction 5.2):
--- 38% of a rifle peek-and-stop read as slow walk. With it: inside the band,
--- gaining > 10 u/s per tick is a run (full-speed acceleration is 18-21),
--- losing > 2 keeps the state being braked from; otherwise slow walk. Crouch-
--- move starts at 5 u/s (builders: 2 / 3.63 / 10) instead of 20.
--- dv = speed change per simtime tick (nil on the first sample).
-local function ClassifyState(player, as, spd, dv, prev_state)
+local function ClassifyState(player, as, spd)
     local flags = entity.get_prop(player, "m_fFlags") or 0
     local og    = bit.band(flags, 1) ~= 0
     local duck  = as and (as.duck_amount or 0) > 0.5
     spd = spd or 0
     if not og   then return duck and STATE.AIR_CROUCH  or STATE.AIR           end
-    if FEATURE.STATE_PHYSICS then
-        if duck       then return spd > 5 and STATE.CROUCH_MOVING or STATE.CROUCH end
-        if spd >= 100 then return STATE.RUNNING                                 end
-        if spd <= 5   then return STATE.STANDING                                end
-        if dv then
-            if dv > 10 then return STATE.RUNNING end
-            if dv < -2 then
-                return (prev_state == STATE.SLOWMOTION) and STATE.SLOWMOTION or STATE.RUNNING
-            end
-        end
-        return STATE.SLOWMOTION
-    end
     if duck     then return spd > 20 and STATE.CROUCH_MOVING or STATE.CROUCH  end
     if spd > 5 and spd < 100 then return STATE.SLOWMOTION                     end
     if spd >= 100             then return STATE.RUNNING                        end
@@ -1537,8 +1371,6 @@ end
 -- match log: one player flipped configs 22 times in 12 minutes, each flip
 -- changing the standing-state angle by up to 6-11 degrees.
 local function TrustedCfg(rec)
-    -- Gamesense Lua presets only for gamesense users (see CHEAT PROFILES)
-    if DET.cheat and rec.cheat and rec.cheat ~= "gs" then return nil end
     return (rec.config_conf >= CFG.CFG_THRESH) and rec.config_type or nil
 end
 
@@ -1588,7 +1420,7 @@ local function CfgAngle(side, state, config_type, cap)
         -- and menu grouping ("disable if things feel worse") imply it was
         -- always meant to do.
         local a = ASYM_FALLBACK[state] or ASYM_FALLBACK[STATE.STANDING]
-        if FEATURE.ASYMMETRIC then
+        if ui.get(ui_asym) then
             raw = side > 0 and a[2] or -a[1]
         else
             local sym = (a[1] + a[2]) / 2
@@ -2167,7 +1999,7 @@ local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
     -- drowns out higher-quality UNK and LBY corrections. Cap at 1 DCK per 10 ticks.
     local dn, dp = as.duck_amount or 0, rec.prev_duck or 0
     local cross  = 0.5
-    if (rec._dck_cooldown or 0) > 0 then -- luacheck: ignore 542
+    if (rec._dck_cooldown or 0) > 0 then
         -- cooldown ticking — decrement only, no DCK this tick
     elseif (dp < cross and dn >= cross) or (dp >= cross and dn < cross) then
         local torso = as.torso_yaw or safe_eye
@@ -2186,274 +2018,6 @@ local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
     end
 
     return nil, 0, 0
-end
-
--- ══════════════════════════════════════════════════════════════════
---  CHEAT REVEALER  — which cheat each enemy runs, from voice packets
---
---  Every HvH cheat sends voice-data packets with its own fingerprint in
---  the xuid / sequence fields (shared-ESP and user-identification
---  traffic, sent without anyone talking). The detectors below are the
---  ones from the cheat revealer script, ported unchanged in logic: each
---  needs a run of 17-45 matching packets before it answers, so a single
---  odd packet never labels anyone. CHEAT_OF[entindex] = "gs" | "nl" |
---  "nw" | "pd" | "ot" | "ft" | "pl" | "ev" | "r7" | "af".
---
---  What the resolver does with it: see CHEAT PROFILES.
--- ══════════════════════════════════════════════════════════════════
-local CHEAT_OF    = {}   -- [entindex] = cheat id
-local CHEAT_NAMES = {gs = "gamesense", nl = "neverlose", nw = "nixware", pd = "pandora",
-                     ot = "onetap", ft = "fatality", pl = "plaguecheat", ev = "ev0lve",
-                     r7 = "rifk7", af = "airflow"}
-
-local voice_data_t = ffi.typeof([[
-    struct {
-        char     pad_0000[8];
-        int32_t  client;
-        int32_t  audible_mask;
-        uint32_t xuid_low;
-        uint32_t xuid_high;
-        void*    voice_data;
-        bool     proximity;
-        bool     caster;
-        char     pad_001E[2];
-        int32_t  format;
-        int32_t  sequence_bytes;
-        uint32_t section_number;
-        uint32_t uncompressed_sample_offset;
-        char     pad_0030[4];
-        uint32_t has_bits;
-    } *
-]])
-
--- 16-bit word at a byte offset of the packet, as the revealer formats it
-local function VWord(packet, off)
-    return ("%.02X"):format(ffi.cast("uint16_t*", ffi.cast("uintptr_t", packet) + off)[0])
-end
-
-local function DupEvery(array, divisor)
-    local visited = {}
-    for i = 1, #array do
-        local v = array[i]
-        if not visited[v] then
-            visited[v] = true
-            for j = i + 4, #array do
-                if i % divisor == 0 then
-                    if array[j] == v then return true end
-                elseif array[j] == v then
-                    return false
-                end
-            end
-        end
-    end
-    return false
-end
-
-local CS = {nl = {sig_count = {}, found = {}, n_found = 0}, nw = {}, pd = {}, ot = {},
-            ft = {}, pl = {}, ev = {}, r7 = {}, af = {}, gs = {}}
-
--- Counts a run of packets where test() holds; true once it exceeds need.
-local function Run(store, target, hit, need)
-    local n = store[target] or 0
-    if n > need then return true end
-    store[target] = hit and n + 1 or 0
-    return false
-end
-
-local DETECT = {
-    nl = function(p, t)
-        if p.xuid_high == 0 then return false end
-        local sig = VWord(p, 22)
-        if sig == CS.nl.current then
-            local c = (CS.nl.sig_count[t] or 0) + 1
-            CS.nl.sig_count[t] = c
-            if c > 24 then
-                if not CS.nl.found[t] then CS.nl.found[t] = true; CS.nl.n_found = CS.nl.n_found + 1 end
-                return true
-            end
-            CS.nl.sig_count[t] = nil
-        end
-        if CS.nl.n_found > 3 then return false end
-        local h = CS.nl[t]
-        if not h then h = {}; CS.nl[t] = h end
-        h[#h + 1] = p.xuid_high
-        if #h > 24 then
-            if DupEvery(h, 4) then
-                CS.nl.current = sig
-                CS.nl[t] = {}
-                return true
-            end
-            table.remove(h, 1)
-        end
-        return false
-    end,
-    nw = function(p, t)
-        local n = CS.nw[t] or 0
-        if n > 34 then CS.nw[t] = nil; return true end
-        CS.nw[t] = (p.xuid_high == 0) and n + 1 or 0
-        return false
-    end,
-    pd = function(p, t) local s = VWord(p, 16); return Run(CS.pd, t, s == "695B" or s == "1B39", 24) end,
-    ot = function(p, t)
-        local h = CS.ot[t]
-        if not h then h = {}; CS.ot[t] = h end
-        -- The revealer compares xuid_low and section_number only (its
-        -- third field was stored under a misspelt key and always matched).
-        h[#h + 1] = {xl = p.xuid_low, sn = p.section_number}
-        if #h > 16 then
-            local o = h[1]
-            for i = 2, #h do
-                if h[i].xl ~= o.xl or h[i].sn ~= o.sn then table.remove(h, 1); return false end
-            end
-            table.remove(h, 1)
-            return true
-        end
-        return false
-    end,
-    ft = function(p, t)
-        local n = CS.ft[t] or 0
-        if n > 36 then return true end
-        local s = VWord(p, 16)
-        if s == "7FFA" or s == "7FFB" then CS.ft[t] = n + 1 end
-        return false
-    end,
-    pl = function(p, t) return Run(CS.pl, t, VWord(p, 44) == "7275", 24) end,
-    ev = function(p, t)
-        local h = CS.ev[t]
-        if not h then h = {}; CS.ev[t] = h end
-        h[#h + 1] = p.xuid_high
-        if #h > 44 then
-            for i = 1, #h - 4 do
-                if h[i + 1] + h[i + 2] == h[i] * 2 and h[i + 4] == h[i] + 1 then
-                    CS.ev[t] = {}
-                    return true
-                end
-            end
-            table.remove(h, 1)
-        end
-        return false
-    end,
-    r7 = function(p, t) local s = VWord(p, 16); return Run(CS.r7, t, s == "234" or s == "134", 24) end,
-    af = function(p, t) return Run(CS.af, t, VWord(p, 16) == "AFF1", 24) end,
-    gs = function(p, t)
-        local sig = VWord(p, 22)
-        local bytes = string.sub(tostring(p.sequence_bytes), 1, 4)
-        local g = CS.gs[t]
-        if not g then g = {repeated = 0, packet = sig, bytes = bytes}; CS.gs[t] = g end
-        if bytes ~= g.bytes and sig ~= g.packet then
-            g.packet, g.bytes, g.repeated = sig, bytes, g.repeated + 1
-        else
-            g.repeated = 0
-        end
-        if g.repeated >= 36 then
-            CS.gs[t] = {repeated = 0, packet = sig, bytes = bytes}
-            return true
-        end
-        return false
-    end,
-}
-local DETECT_ORDER = {"nl", "nw", "pd", "ot", "ft", "pl", "ev", "r7", "af", "gs"}
-
--- Which detections may replace an existing one: the revealer's precedence
--- (a neverlose read can't overwrite ev/gs/pl/pd/r7/af/ft, and so on).
-local CHEAT_KEEP = {
-    nl = {ev = true, gs = true, pl = true, pd = true, r7 = true, af = true, ft = true},
-    nw = {nl = true},
-    ev = {pd = true, nl = true, ft = true},
-    gs = {ev = true, ot = true, pl = true, pd = true, r7 = true, ft = true},
-    ot = {nw = true, ft = true, pd = true, pl = true},
-    ft = {nw = true, pd = true},
-}
-
-local function OnVoice(e)
-    if not e or not e.data then return end
-    local packet = ffi.cast(voice_data_t, e.data)
-    local target = (ffi.cast("char*", packet) + 8)[0] + 1
-    for _, id in ipairs(DETECT_ORDER) do
-        local cur = CHEAT_OF[target]
-        if cur ~= id and not (cur and CHEAT_KEEP[id] and CHEAT_KEEP[id][cur])
-           and DETECT[id](packet, target) then
-            CHEAT_OF[target] = id
-            if cur ~= id then
-                info("cheat", "player=%s cheat=%s", entity.get_player_name(target) or "?", CHEAT_NAMES[id])
-            end
-        end
-    end
-end
-
--- A slot's data belongs to whoever held it: cleared when the slot changes
--- hands and on map change.
-local function ForgetCheat(ent)
-    CHEAT_OF[ent] = nil
-    for _, st in pairs(CS) do if type(st) == "table" then st[ent] = nil end end
-    CS.nl.sig_count[ent] = nil
-    if CS.nl.found[ent] then CS.nl.found[ent] = nil; CS.nl.n_found = CS.nl.n_found - 1 end
-end
-local function ForgetAllCheats()
-    for ent in pairs(CHEAT_OF) do CHEAT_OF[ent] = nil end
-    CS = {nl = {sig_count = {}, found = {}, n_found = 0}, nw = {}, pd = {}, ot = {},
-          ft = {}, pl = {}, ev = {}, r7 = {}, af = {}, gs = {}}
-end
-
--- ══════════════════════════════════════════════════════════════════
---  CHEAT PROFILES  — how the resolver changes once the cheat is known
---
---  1. Gamesense AA Lua presets only for gamesense users. KNOWN_CFGS /
---     CFG_COUNTER are fingerprints of gamesense Luas (luasense beta/std
---     and the symmetric builders); a neverlose or nixware player can't
---     run them, so a fingerprint match on one is noise (a real log shows a
---     player switching luasense_beta <-> symmetric four times a match).
---     They get the default L/R table instead, as an unrecognized player.
---
---  2. Per-cheat method trust, learned. Every head hit and resolver miss is
---     credited to (enemy cheat, method) across all players on that cheat
---     and saved between sessions. A method whose head rate on that cheat
---     is <= 30% after >= 8 of those shots (Beta mean (h+1)/(n+2) < 0.35)
---     is skipped for that cheat and the chain falls through to the next
---     method -- except on every 4th shot at the player, so the method can
---     prove itself again. For a method that really hits 70% of the time
---     the chance of being skipped at 8 shots is ~1%; one that hits 30% is
---     caught about half the time by 8 shots and more after.
---     Unknown cheat, or too few shots: exactly the v6.2 chain.
--- ══════════════════════════════════════════════════════════════════
-local CHEAT_DB_KEY = "riftveil_cheat_v1"
-local CP = {MIN_N = 8, MAX_MEAN = 0.35, PROBE_EVERY = 4, CAP = 60}
-local CHEAT_STATS = {}   -- [cheat id][meth] = {h = head hits, m = resolver misses}
-do
-    local raw = database.read(CHEAT_DB_KEY)
-    if type(raw) == "table" then
-        for id, T in pairs(raw) do
-            if CHEAT_NAMES[id] and type(T) == "table" then
-                local dst = {}
-                for meth, c in pairs(T) do
-                    if type(meth) == "string" and type(c) == "table" and isnum(c.h, 0) and isnum(c.m, 0) then
-                        dst[meth] = {h = c.h, m = c.m}
-                    end
-                end
-                CHEAT_STATS[id] = dst
-            end
-        end
-    end
-end
-
-local function CheatTrusts(rec, meth)
-    if not DET.cheat then return true end
-    local c = rec.cheat
-    local st = c and CHEAT_STATS[c] and CHEAT_STATS[c][meth]
-    if not st or st.h + st.m < CP.MIN_N then return true end
-    if (st.h + 1) / (st.h + st.m + 2) >= CP.MAX_MEAN then return true end
-    return ((rec.shots_fired or 0) % CP.PROBE_EVERY) == 0
-end
-
-local function CheatCredit(cheat, meth, head)
-    if not (cheat and CHEAT_NAMES[cheat] and type(meth) == "string") then return end
-    local T = CHEAT_STATS[cheat]
-    if not T then T = {}; CHEAT_STATS[cheat] = T end
-    local st = T[meth]
-    if not st then st = {h = 0, m = 0}; T[meth] = st end
-    if head then st.h = st.h + 1 else st.m = st.m + 1 end
-    -- Halve past CAP so a cheat's AA update can show up within a few matches
-    if st.h + st.m > CP.CAP then st.h, st.m = st.h / 2, st.m / 2 end
 end
 
 -- ══════════════════════════════════════════════════════════════════
@@ -2507,9 +2071,7 @@ end
 local function GetS64(player)
     local s64 = entity.get_steam64(player)
     if s64 and s64 ~= 0 then
-        -- %.0f: tostring prints a 64-bit id held in a double as 7.6e+16
-        local k = (type(s64) == "number") and string.format("%.0f", s64) or tostring(s64)
-        EIDX_S64[player] = k; return k
+        local k = tostring(s64); EIDX_S64[player] = k; return k
     end
     local n = entity.get_player_name(player)
     if n and n ~= "" and n ~= "unknown" then
@@ -2519,7 +2081,7 @@ local function GetS64(player)
 end
 
 local function NewRec(player, s64)
-    local db = CleanDBEntry(DB[s64]) or {}
+    local db = DB[s64] or {}
     -- DB-seeded confidence: a proven prior against this steam64 (3+ confirmed
     -- HITS -- despite the field's name, .kills has counted every confirmed
     -- bullet hit since on_aim_hit was written, not actual eliminations; see
@@ -2533,8 +2095,6 @@ local function NewRec(player, s64)
     end
     return {
         hist=RNew(CFG.HIST_SIZE), tm={}, yc={}, fl={},
-        -- DB entry as this match started: FlushDB merges into it (see there)
-        db_base=CleanDBEntry(DB[s64]), cheat=db.cheat,
         side=0, period=0, conf=seeded_conf,
         aa_type=AA.UNKNOWN, flip=false, lt=-1,
         hit_side=0, hit_count=0, resolver_misses=0,
@@ -2617,19 +2177,15 @@ local function GetRec(player)
         info("rec", "new profile player=%s s64=%s",
              entity.get_player_name(player) or "?", s64)
     end
-    local rec = REC[s64]
-    rec.eidx = player
-    -- A live detection wins over the one saved with the profile
-    local c = CHEAT_OF[player]
-    if c and rec.cheat ~= c then rec.cheat = c end
-    return rec, s64
+    REC[s64].eidx = player
+    return REC[s64], s64
 end
 
 local function ClearEnt(player)
-    PSet(player, "Force body yaw", false)
-    PSet(player, "Force body yaw value", 0)
-    PSet(player, "Correction active", false)
-    PSet(player, "High priority", false)
+    plist.set(player, "Force body yaw", false)
+    plist.set(player, "Force body yaw value", 0)
+    plist.set(player, "Correction active", false)
+    plist.set(player, "High priority", false)
     local s64 = EIDX_S64[player]
     if s64 and REC[s64] then
         REC[s64].active = false; REC[s64].resolved = false
@@ -2640,23 +2196,10 @@ end
 --  DB FLUSH
 --  Called on match end. Blends new match data with existing DB entry.
 -- ══════════════════════════════════════════════════════════════════
--- DB_GEN stamps each saved profile with the session that last saw it, so
--- the cap below drops the stalest first. The whole DB is written on every
--- 60 s autosave; uncapped it grows with every opponent ever met.
-local DB_MAX = 500
-local DB_GEN = 1
-for _, e in pairs(DB) do
-    if e.gen and e.gen >= DB_GEN then DB_GEN = e.gen + 1 end
-end
-
 FlushDB = function()
     for s64, rec in pairs(REC) do
         if rec.hit_count >= 2 then
-            -- Merge into the entry as it was BEFORE this match (db_base,
-            -- snapshotted in NewRec). Merging into the live DB[s64] made
-            -- every 60 s autosave add the whole match again: one player's
-            -- 3 hits were stored as 3, 6, 9 ... 36 over twelve autosaves.
-            local ex   = rec.db_base or {}
+            local ex   = DB[s64] or {}
             -- hit_rate is a running average across matches. It must be
             -- weighted by the sample size that actually PRODUCED nhr
             -- (hit_count+resolver_misses), not by rec.kills -- kills is a
@@ -2682,8 +2225,6 @@ FlushDB = function()
                     or nhr,
                 samples     = tot_n,
                 kills       = (ex.kills or 0) + rec.kills,
-                cheat       = rec.cheat or ex.cheat,
-                gen         = DB_GEN,
             }
             info("db", "flush s64=%s cfg=%s vuln=%s bt=%d hr=%d%% hits=%d",
                  s64,
@@ -2693,24 +2234,9 @@ FlushDB = function()
                  DB[s64].kills)
         end
     end
-    local keys = {}
-    for k in pairs(DB) do keys[#keys + 1] = k end
-    if #keys > DB_MAX then
-        table.sort(keys, function(a, b) return ((DB[a] or {}).gen or 0) < ((DB[b] or {}).gen or 0) end)
-        for i = 1, #keys - DB_MAX do DB[keys[i]] = nil end
-        info("db", "pruned %d stale profiles", #keys - DB_MAX)
-    end
     database.write(DB_KEY, DB)
-    database.write(CHEAT_DB_KEY, CHEAT_STATS)
-    for id, T in pairs(CHEAT_STATS) do
-        local parts = {}
-        for meth, c in pairs(T) do
-            parts[#parts + 1] = string.format("%s=%.0f/%.0f", meth, c.h, c.h + c.m)
-        end
-        table.sort(parts)
-        info("cheat", "learned %s: %s", id, table.concat(parts, " "))
-    end
-    info("db", "written %d entries", math.min(#keys, DB_MAX))
+    local n = 0; for _ in pairs(DB) do n = n + 1 end
+    info("db", "written %d entries", n)
 end
 
 -- ══════════════════════════════════════════════════════════════════
@@ -2768,11 +2294,7 @@ local function ProcessPlayer(player, ctx)
         spd = (isnum(vx0) and isnum(vy0)) and math.sqrt(vx0*vx0 + vy0*vy0) or 0
 
         -- State
-        local dv
-        if isnum(rec.prev_spd) and rec.prev_spd_st and st > rec.prev_spd_st then
-            dv = (spd - rec.prev_spd) / (st - rec.prev_spd_st)   -- per tick, fakelag-safe
-        end
-        local state_key = ClassifyState(player, as, spd, dv, rec.state)
+        local state_key = ClassifyState(player, as, spd)
         rec.state = state_key
         if rec.conf == 0 then rec.conf = CFG.STATE_SEED[state_key] or 0.25 end
 
@@ -2787,7 +2309,7 @@ local function ProcessPlayer(player, ctx)
         -- clamp CfgAngle's static guesses, never the engine-read live_cap.
         local corr_cap = VelCap(spd, live_cap)
 
-        if DET.verbose then
+        if ui.get(ui_verb) then
             if live_cap ~= CFG.DESYNC_CAP then
                 dbg("dcap", "player=%s live=[%.1f .. %.1f] cap=%.1f",
                     entity.get_player_name(player) or "?", live_mn, live_mx, live_cap)
@@ -2811,7 +2333,7 @@ local function ProcessPlayer(player, ctx)
         do
             local ptr = GetPtr(player)
             if ptr then
-                if DET.six then
+                if ui.get(ui_6lex) then
                     six_side, six_desync = Extract6Lex(ptr, live_cap)
                     rec.six_side   = six_side
                     rec.six_desync = six_desync
@@ -2862,20 +2384,8 @@ local function ProcessPlayer(player, ctx)
         rec.prev_origin_tick = st
 
         RPush(rec.hist, {p=pose, e=eye_y, t=st})
-        -- Pruned by age: clearing only tm[st - TM_HORIZON] leaked every
-        -- entry a fakelagging enemy's skipped simtime ticks never revisit
-        -- (2,500 after 20k ticks). Lookups stay within the horizon.
-        if not rec.tm[st] then
-            rec.tm[st] = {p=pose, e=eye_y, t=st}
-            rec.tm_n = (rec.tm_n or 0) + 1
-            if rec.tm_n > CFG.TM_HORIZON * 2 then
-                local floor_st, n = st - CFG.TM_HORIZON, 0
-                for k in pairs(rec.tm) do
-                    if k < floor_st then rec.tm[k] = nil else n = n + 1 end
-                end
-                rec.tm_n = n
-            end
-        end
+        rec.tm[st]      = rec.tm[st] or {p=pose, e=eye_y, t=st}
+        rec.tm[st - CFG.TM_HORIZON] = nil
         rec.yc[#rec.yc+1] = eye_y
         if #rec.yc > CFG.YAW_BUF then table.remove(rec.yc, 1) end
 
@@ -2927,7 +2437,7 @@ local function ProcessPlayer(player, ctx)
                 if rcfg == rec.config_type then
                     rec.config_conf = math.min(rec.config_conf + CFG.CFG_GAIN, 1.0)
                 else
-                    if DET.verbose then
+                    if ui.get(ui_verb) then
                         info("cfg", "switch %s->%s player=%s",
                              rec.config_type or "?", rcfg,
                              entity.get_player_name(player) or "?")
@@ -3006,7 +2516,7 @@ local function ProcessPlayer(player, ctx)
             rec.vuln_ttl  = math.max(rec.vuln_ttl, base_ttl, lc_ttl)
             rec.vuln_type = vtype
             rec.vuln_val  = vcorr
-            if DET.verbose then
+            if ui.get(ui_verb) then
                 dbg("vuln", "type=%s val=%.1f player=%s ttl=%d%s",
                     vtype, vcorr, entity.get_player_name(player) or "?",
                     rec.vuln_ttl, is_standing and " [STAND]" or "")
@@ -3038,7 +2548,7 @@ local function ProcessPlayer(player, ctx)
                 tracked_side   = six_side
                 tracked_method = METH.SIX_LEX
 
-            elseif FEATURE.JITTER_PRED and #rec.fl >= CFG.PERIOD_MIN then
+            elseif ui.get(ui_per) and #rec.fl >= CFG.PERIOD_MIN then
                 local ps = PredictSide(rec, ctx.cur_tc)
                 if ps ~= 0 then
                     tracked_side   = ps
@@ -3088,8 +2598,7 @@ local function ProcessPlayer(player, ctx)
             end
 
             -- Symmetric fallback: alternate when no signal
-            local is_jitter = aa_type == AA.TWO_WAY -- luacheck: ignore 211
-                            or aa_type == AA.THREE_WAY
+            local is_jitter = aa_type == AA.TWO_WAY  or aa_type == AA.THREE_WAY
                             or aa_type == AA.FIVE_WAY or aa_type == AA.SKITTER
                             or aa_type == AA.HOLD
             local is_sym = rec.side == 0 and
@@ -3148,8 +2657,7 @@ local function ProcessPlayer(player, ctx)
         -- Lower confidence threshold when meta_aggressive — even a weaker
         -- vuln read beats the known-failing built-in.
         local vuln_min = rec.meta_aggressive and 0.20 or 0.35
-        if DET.vuln and rec.vuln_ttl > 0 and rec.conf >= vuln_min
-           and CheatTrusts(rec, "vuln_" .. tostring(rec.vuln_type)) then
+        if ui.get(ui_vuln) and rec.vuln_ttl > 0 and rec.conf >= vuln_min then
             should_override = true
             override_val    = rec.vuln_val
             override_meth   = "vuln_" .. rec.vuln_type
@@ -3159,9 +2667,8 @@ local function ProcessPlayer(player, ctx)
         -- confirmed hits more than a small margin above how often it's
         -- been right for THIS player, stop trusting it for them and fall
         -- through to hit-mem/suppress instead (see on_aim_hit).
-        elseif DET.six and six_side ~= 0 and rec.conf > 0.25
-               and (rec.six_disagree or 0) <= (rec.six_agree or 0) + 2
-               and CheatTrusts(rec, METH.SIX_LEX) then
+        elseif ui.get(ui_6lex) and six_side ~= 0 and rec.conf > 0.25
+               and (rec.six_disagree or 0) <= (rec.six_agree or 0) + 2 then
             should_override = true
             override_val    = six_desync > 0
                               and (six_side * six_desync)
@@ -3187,16 +2694,14 @@ local function ProcessPlayer(player, ctx)
         -- static guesses are least trustworthy, not when confirmed data should
         -- be thrown out). Seen directly in a debug log: a hit_mem correction
         -- logged val=0.0 for a fast-moving target.
-        elseif DET.hitmem and rec.state
+        elseif ui.get(ui_hitmem) and rec.state
                and (rec.hit_count_by_state[rec.state] or 0) >= 2
-               and (rec.hit_side_by_state[rec.state] or 0) ~= 0
-               and CheatTrusts(rec, METH.HIT_MEM) then
+               and (rec.hit_side_by_state[rec.state] or 0) ~= 0 then
             should_override = true
             override_val    = CfgAngle(rec.hit_side_by_state[rec.state], rec.state, TrustedCfg(rec), live_cap)
             override_meth   = METH.HIT_MEM
 
-        elseif DET.hitmem and rec.hit_count >= 2 and rec.hit_side ~= 0
-               and CheatTrusts(rec, METH.HIT_MEM) then
+        elseif ui.get(ui_hitmem) and rec.hit_count >= 2 and rec.hit_side ~= 0 then
             should_override = true
             override_val    = CfgAngle(rec.hit_side, rec.state, TrustedCfg(rec), live_cap)
             override_meth   = METH.HIT_MEM
@@ -3217,7 +2722,7 @@ local function ProcessPlayer(player, ctx)
         -- tick instead of pausing for 4. Fixed with a dedicated pause counter
         -- (_sup_pause) and sup_pausing, which tells the bookkeeping below not
         -- to blow the counters away while a deliberate pause is in progress.
-        elseif FEATURE.SUPPRESS and rec.vuln_ttl == 0 and CheatTrusts(rec, METH.SUPPRESS) then
+        elseif ui.get(ui_sup) and rec.vuln_ttl == 0 then
             local is_jitter = aa_type == AA.TWO_WAY  or aa_type == AA.THREE_WAY
                             or aa_type == AA.FIVE_WAY or aa_type == AA.SKITTER
                             or aa_type == AA.HOLD
@@ -3243,16 +2748,16 @@ local function ProcessPlayer(player, ctx)
         end
 
         if should_override then
-            PSet(player, "Force body yaw", true)
-            PSet(player, "Force body yaw value", SafeYaw(override_val))
-            PSet(player, "Correction active", true)
+            plist.set(player, "Force body yaw", true)
+            plist.set(player, "Force body yaw value", override_val)
+            plist.set(player, "Correction active", true)
             -- High priority: confirmed via a real resolver's usage (not in
             -- the official docs) -- hints the LC/backtrack system not to
             -- deprioritize this target's validation window while we're
             -- actively correcting them ("prevent missing LC" per that
             -- script's own comment). Set last so a bad/renamed field
             -- can't stop the actual correction above from applying.
-            PSet(player, "High priority", true)
+            plist.set(player, "High priority", true)
             rec.active = true; rec.resolved = true
             rec.last_val = override_val; rec.last_meth = override_meth
             -- Track suppress streak for the streak-cap logic above
@@ -3279,10 +2784,10 @@ local function ProcessPlayer(player, ctx)
             local meta_cap = (tracked_method == METH.HIT_MEM) and live_cap or corr_cap
             local meta_val = CfgAngle(tracked_side, rec.state, TrustedCfg(rec), meta_cap)
             if rec._brute_half then meta_val = meta_val * 0.5 end
-            PSet(player, "Force body yaw", true)
-            PSet(player, "Force body yaw value", SafeYaw(meta_val))
-            PSet(player, "Correction active", true)
-            PSet(player, "High priority", true)
+            plist.set(player, "Force body yaw", true)
+            plist.set(player, "Force body yaw value", meta_val)
+            plist.set(player, "Correction active", true)
+            plist.set(player, "High priority", true)
             rec.active = true; rec.resolved = true
             rec.last_val = meta_val; rec.last_meth = METH.META_HOLD
             -- Don't blow away a suppress streak/pause in progress -- this
@@ -3292,10 +2797,10 @@ local function ProcessPlayer(player, ctx)
             if not sup_pausing then rec._sup_streak = 0; rec._sup_pause = 0 end
 
         else
-            PSet(player, "Force body yaw", false)
-            PSet(player, "Force body yaw value", 0)
-            PSet(player, "Correction active", false)
-            PSet(player, "High priority", false)
+            plist.set(player, "Force body yaw", false)
+            plist.set(player, "Force body yaw value", 0)
+            plist.set(player, "Correction active", false)
+            plist.set(player, "High priority", false)
             rec.active = false; rec.resolved = false
             rec.last_val = 0; rec.last_meth = "builtin"
             -- Same sup_pausing guard as the meta_aggressive branch above.
@@ -3306,7 +2811,7 @@ local function ProcessPlayer(player, ctx)
         -- Log analysis showed 35k+ [corr] lines for 453 hits — 98% were
         -- stale TTL echoes (same val repeated for 11+ ticks). This gate
         -- cuts the log to only meaningful resolver decisions.
-        if DET.verbose then
+        if ui.get(ui_verb) then
             local val_changed  = math.abs((rec.last_val  or 0) - (rec._prev_log_val  or 0)) > 1.0
             local meth_changed = rec.last_meth ~= rec._prev_log_meth
             if val_changed or meth_changed then
@@ -3325,7 +2830,6 @@ local function ProcessPlayer(player, ctx)
     rec.prev_pose     = pose
     rec.prev_spd2     = rec.prev_spd  -- shift: spd2 = last tick's spd before this update
     rec.prev_spd      = spd
-    if spd then rec.prev_spd_st = st end
     rec.prev_duck     = duck or 0
     rec.prev_onground = on_ground
     -- Decrement DCK cooldown each tick (set to 10 when DCK fires, counts down to 0)
@@ -3338,41 +2842,8 @@ end
 -- ══════════════════════════════════════════════════════════════════
 --  UPDATE  — orchestration loop
 -- ══════════════════════════════════════════════════════════════════
--- Read by the info panel and ESP flags (paint runs every frame; these only
--- change once per net update or on a shot event).
-local ESP_VLN, ESP_RES = {}, {}
-local CTX = {threat = nil}
-local STATE_VER = 0
-
-local function UpdateEspState()
-    for k in pairs(ESP_VLN) do ESP_VLN[k] = nil end
-    for k in pairs(ESP_RES) do ESP_RES[k] = nil end
-    if not IND.esp then return end
-    for i = 1, #LIVE_ENEMIES do
-        local ent = LIVE_ENEMIES[i]
-        local s64 = EIDX_S64[ent]
-        local rec = s64 and REC[s64]
-        if rec then
-            -- VLN: vulnerability window open (deterministic correction)
-            ESP_VLN[ent] = rec.vuln_ttl > 0
-            -- RES: confident correction overriding the built-in (not suppress, not vuln)
-            ESP_RES[ent] = rec.resolved and rec.conf >= CFG.CONF_ESP
-                and rec.vuln_ttl == 0 and rec.last_meth ~= METH.SUPPRESS
-        end
-    end
-end
-
 local function Update()
-    if not ui.get(ui_on) then
-        if next(ESP_VLN) or next(ESP_RES) then
-            for k in pairs(ESP_VLN) do ESP_VLN[k] = nil end
-            for k in pairs(ESP_RES) do ESP_RES[k] = nil end
-        end
-        return
-    end
-    -- Once per tick, so a config load that skips the change callbacks
-    -- still reaches the resolver within one update.
-    SyncFlags()
+    if not ui.get(ui_on) then return end
 
     local cur_lat, avg_lat = GetLat()
     local ctx = {
@@ -3385,34 +2856,22 @@ local function Update()
     }
     LAST_SPIKE = ctx.is_spike
 
-    -- entity.get_players(true): enemies only, dormant and dead already
-    -- excluded (docs), so no per-player is_enemy/is_alive calls. Collected
-    -- first so the player list can be refreshed before any plist write.
-    local n_live, fresh = 0, false
-    for _, player in ipairs(entity.get_players(true)) do
-        n_live = n_live + 1
-        LIVE_ENEMIES[n_live] = player
-        if not PL_KNOWN[player] then PL_KNOWN[player] = true; fresh = true end
-    end
-    for i = #LIVE_ENEMIES, n_live + 1, -1 do LIVE_ENEMIES[i] = nil end
-    -- update_player_list is only needed so plist.set reaches a player who
-    -- just appeared: run it then, plus a once-a-second resync that also
-    -- drops the write cache. (v6.2 ran it every tick.)
-    if fresh or ctx.cur_tc - LAST_PL_SYNC >= PL_RESYNC_TICKS or ctx.cur_tc < LAST_PL_SYNC then
-        if not fresh then PL_CACHE = {} end
-        client.update_player_list()
-        LAST_PL_SYNC = ctx.cur_tc
-    end
-    for i = 1, n_live do
-        local player = LIVE_ENEMIES[i]
-        local ok, msg = pcall(ProcessPlayer, player, ctx)
-        if not ok then
-            err("update", "player=%d crash=%s", player, tostring(msg))
+    client.update_player_list()
+    local n_live = 0
+    for _, player in ipairs(entity.get_players()) do
+        if entity.is_enemy(player) and entity.is_alive(player) then
+            -- Cache the live-enemy list here (already paid for is_enemy/
+            -- is_alive this tick) so DrawOverlay's off-angle row doesn't
+            -- re-scan every player again on every single rendered frame.
+            n_live = n_live + 1
+            LIVE_ENEMIES[n_live] = player
+            local ok, msg = pcall(ProcessPlayer, player, ctx)
+            if not ok then
+                err("update", "player=%d crash=%s", player, tostring(msg))
+            end
         end
     end
-    CTX.threat = ctx.threat
-    UpdateEspState()
-    STATE_VER = STATE_VER + 1
+    for i = #LIVE_ENEMIES, n_live + 1, -1 do LIVE_ENEMIES[i] = nil end
 
     -- Periodic autosave: don't rely solely on match-end/disconnect/shutdown
     -- firing cleanly. Every 60s, if there's anyone worth saving, flush to
@@ -3421,7 +2880,6 @@ local function Update()
     if next(REC) and (now - LAST_DB_SAVE) >= 60 then
         LAST_DB_SAVE = now
         FlushDB()
-        flush_log()
     end
 
     -- Tight interp is handled by its ui.set_callback — nothing to do here
@@ -3435,47 +2893,6 @@ end
 -- ══════════════════════════════════════════════════════════════════
 --  SHOT FEEDBACK
 -- ══════════════════════════════════════════════════════════════════
--- Local weapon class, logged on every shot (wpn=) for the per-weapon aim
--- policy (docs/WEAPON_PLAN.md): item definition indexes of the guns that
--- matter in HvH; anything else logs as "other".
-local WEAPON_CLASS = {
-    [9] = "awp", [40] = "scout", [11] = "auto", [38] = "auto",
-    [64] = "r8", [1] = "deagle",
-    [4] = "pistol", [61] = "pistol", [32] = "pistol", [36] = "pistol",
-    [3] = "pistol", [30] = "pistol", [63] = "pistol", [2] = "pistol",
-}
-local function LocalWeaponClass()
-    local me = entity.get_local_player()
-    local w = me and entity.get_player_weapon(me)
-    local idx = w and entity.get_prop(w, "m_iItemDefinitionIndex")
-    if type(idx) ~= "number" then return "?" end
-    return WEAPON_CLASS[bit.band(idx, 0xFFFF)] or "other"
-end
-
--- Aim policy step 1 (docs/WEAPON_PLAN.md): do the player-list override
--- fields exist, and what do they hold? Read once per session on the first
--- shot and logged; nothing is written to them yet.
-local AIM_FIELDS_PROBED = false
-local function ProbeAimFields(ent)
-    if AIM_FIELDS_PROBED then return end
-    AIM_FIELDS_PROBED = true
-    for _, f in ipairs({"Override prefer body aim", "Override safe point", "Force body aim"}) do
-        local ok, v = pcall(plist.get, ent, f)
-        info("aimfield", "%s: %s", f, ok and ("exists, value=" .. tostring(v)) or ("missing (" .. tostring(v) .. ")"))
-    end
-end
-
--- aim_fire's backtrack, in ticks. The docs call it ticks but their example
--- converts it as seconds; the two ranges can't overlap (seconds < 1 under
--- sv_maxunlag, a nonzero tick count >= 1), so both read correctly. v6.2 ran
--- tick counts through TT() and logged bt=64+; only the log, the panel's BT
--- tag and the saved bt_pref use it -- no correction does.
-local function BtTicks(v)
-    if type(v) ~= "number" or v ~= v or v <= 0 or v == math.huge then return 0 end
-    if v < 1 then return TT(v) end
-    return math.min(64, math.floor(v + 0.5))
-end
-
 local function on_aim_fire(e)
     local t = e.target; if not t then return end
     local s64 = GetS64(t); local r = s64 and REC[s64]
@@ -3491,17 +2908,10 @@ local function on_aim_fire(e)
         conf    = r and r.conf      or 0,
         aa      = r and r.aa_type   or AA.UNKNOWN,
         state   = r and r.state     or nil,  -- movement state at fire time, for per-condition hit_mem
-        cheat   = r and r.cheat     or nil,  -- enemy cheat (CHEAT REVEALER), logged
-        -- per-weapon aim policy inputs (logged only)
-        wpn     = LocalWeaponClass(),
-        aim_hg  = tonumber(e.hitgroup) or -1,
-        aim_dmg = isnum(e.damage) and math.floor(e.damage) or -1,
-        thp     = tonumber(entity.get_prop(t, "m_iHealth")) or -1,
-        tarm    = tonumber(entity.get_prop(t, "m_ArmorValue")) or -1,
         -- e.backtrack is a TIME value (seconds), not a tick count -- must
         -- go through TT() before comparing against the 1..16 tick range
         -- used everywhere else (bt_hist/preferred_bt/log output).
-        bt      = BtTicks(e.backtrack),
+        bt      = TT(e.backtrack),
         hc      = e.hit_chance or 0,
         in_vuln = r and r.vuln_ttl > 0 or false,
         vuln_t  = r and r.vuln_type or nil,
@@ -3520,13 +2930,9 @@ local function on_aim_fire(e)
     if r and r.vuln_ttl > 0 and r.vuln_type and r.vuln_profile[r.vuln_type] then
         r.vuln_profile[r.vuln_type].seen = r.vuln_profile[r.vuln_type].seen + 1
     end
-    ProbeAimFields(t)
-    -- Shot counter for CheatTrusts' probe (every 4th shot at a player)
-    if r then r.shots_fired = (r.shots_fired or 0) + 1 end
 end
 
 local function on_aim_hit(e)
-    STATE_VER = STATE_VER + 1
     brk.def = 0; brk.check = 0
     local d = SHOTS[e.id]; if not d then return end
     local rec = d.s64 and REC[d.s64]
@@ -3567,8 +2973,6 @@ local function on_aim_hit(e)
         -- confirmed head/neck hit, exactly the body-shot pollution this
         -- comment says it's guarding against.
         local is_head = e.hitgroup == 1 or e.hitgroup == 8
-        -- A head hit confirms the method that was applied, for this cheat
-        if is_head then CheatCredit(d.cheat, d.meth, true) end
         if d.side ~= 0 and is_head then
             rec.hit_side  = d.flip and -d.side or d.side
             rec.hit_count = rec.hit_count + 1
@@ -3615,19 +3019,15 @@ local function on_aim_hit(e)
         end
     end
 
-    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s wpn=%s hp=%d ar=%d aim=%s pdmg=%d cf=%.2f%s%s",
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d%s",
         entity.get_player_name(e.target) or "?",
-        HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
-        isnum(e.damage) and math.floor(e.damage) or 0,
-        d.meth, d.val, d.bt, d.state or "?", d.wpn or "?", d.thp or -1, d.tarm or -1,
-        HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
-        d.cheat and (" cht=" .. d.cheat) or "",
+        HG[e.hitgroup + 1] or "?", e.damage or 0,
+        d.meth, d.val, d.bt,
         d.in_vuln and (" !" .. d.vuln_t) or "")
     SHOTS[e.id] = nil
 end
 
 local function on_aim_miss(e)
-    STATE_VER = STATE_VER + 1
     local d = SHOTS[e.id]
     if not d then return end
 
@@ -3667,7 +3067,7 @@ local function on_aim_miss(e)
             local rec = d.s64 and REC[d.s64]
             if rec then rec.total_hits = rec.total_hits + 1 end
         end
-        if DET.verbose then
+        if ui.get(ui_verb) then
             dbg("miss", "player=%s discarded (%s) meth=%s val=%.0f -- %s",
                 entity.get_player_name(e.target) or "?",
                 is_timeout and "timeout" or "dmg_rejected", d.meth, d.val,
@@ -3684,15 +3084,12 @@ local function on_aim_miss(e)
 
     local is_resolver = reason == "?" or reason == "" or reason == "prediction error"
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s wpn=%s hp=%d ar=%d aim=%s pdmg=%d cf=%.2f%s%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%%%s",
         entity.get_player_name(e.target) or "?",
-        reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.wpn or "?", d.thp or -1, d.tarm or -1,
-        HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
-        d.cheat and (" cht=" .. d.cheat) or "",
+        reason, d.meth, d.val, d.bt, d.hc,
         d.in_vuln and (" !" .. d.vuln_t) or "")
 
     if is_resolver then
-        CheatCredit(d.cheat, d.meth, false)
         local rec = d.s64 and REC[d.s64]
         if rec then
             -- BUILT-IN FAIL TRACKING (meta_aggressive counter):
@@ -3802,71 +3199,72 @@ end
 --  log only now (ui_verb) since they were pure plumbing confirmation,
 --  not something a player acts on mid-round.
 -- ══════════════════════════════════════════════════════════════════
--- Flag state is computed once per tick in Update() (UpdateEspState) and the
--- callbacks are plain table lookups. They used to run per enemy, per flag,
--- per rendered FRAME -- each allocating a pcall closure and making three C
--- calls (ui.get, is_enemy, is_alive) to read values that only change once
--- per tick.
-client.register_esp_flag("VLN", 232, 86, 86, function(ent) return ESP_VLN[ent] == true end)
-client.register_esp_flag("RES", 150, 200, 70, function(ent) return ESP_RES[ent] == true end)
--- Enemy cheat (CHEAT REVEALER): GS / NL / NW ... once detected
-client.register_esp_flag("", 220, 220, 220, function(ent)
-    local c = IND.esp and ui.get(ui_on) and CHEAT_OF[ent]
-    if not c or not entity.is_enemy(ent) then return false end
-    return true, string.upper(c)
+local function ent_rec(ent)
+    if not ui.get(ui_on) then return nil end
+    if not entity.is_enemy(ent) or not entity.is_alive(ent) then return nil end
+    local s64 = EIDX_S64[ent]; return s64 and REC[s64] or nil
+end
+
+-- VLN — vulnerability window open (deterministic correction being applied)
+client.register_esp_flag("VLN", 230, 28, 28, function(ent)
+    local ok, r = pcall(function()
+        local rec = ent_rec(ent); return rec ~= nil and rec.vuln_ttl > 0
+    end); return ok and r or false
+end)
+
+-- RES — resolver has a confident read and is overriding the built-in
+-- (covers hit-mem, 6lex, and meta-hold alike -- any method confident
+-- enough to be actively applied, not suppress and not a vuln window)
+client.register_esp_flag("RES", 55, 205, 70, function(ent)
+    local ok, r = pcall(function()
+        local rec = ent_rec(ent)
+        return rec ~= nil and rec.resolved and rec.conf >= CFG.CONF_ESP
+            and rec.vuln_ttl == 0 and rec.last_meth ~= METH.SUPPRESS
+    end); return ok and r or false
 end)
 
 -- ══════════════════════════════════════════════════════════════════
---  INFO PANEL  (v7.1 redesign)
+--  DRAGGABLE PANEL  (v3.0 — Solus-UI style single panel, replaces the
+--  stacked renderer.indicator rows entirely)
 --
---  Drawn in gamesense's own visual language rather than a rounded card:
---  square corners, a two-layer 1px frame, the menu's tri-colour strip with
---  its darker second row, small pixel-font labels and a fixed width. The
---  width never follows the content: a box that resizes with every name
---  change reads as flicker at the edge of vision.
---
---    ┌────────────────────────────────────┐
---    │▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀│  strip
---    │ riftveil                 24/37  65% │  session score
---    │─────────────────────────────────────│
---    │ TARGET  zia anger              2WAY │
---    │ STATE   RESOLVED        HIT MEM -29 │
---    │ SIDE    ━━━━━━━━━┃             62%  │  centre-zero side meter
---    │ INFO    BT 2 · DEF                  │  only when there are tags
---    │ ALT     goralan            2WAY 40% │  the other enemy (2v2)
---    └────────────────────────────────────┘
---
---  Position persists through two hidden sliders: slider values survive
---  config save/load and script reload, a Lua local would not. Drag by the
---  header while the menu is open, so holding mouse1 to shoot can never
---  move it.
---
---  Built inside its own function: the main chunk sits at Lua's 200-local
---  limit (a do-block would still count against it), and nothing outside
---  the panel needs its helpers. Only DrawOverlay comes out.
+--  Position is persisted through two HIDDEN sliders instead of a plain
+--  Lua local -- ui.new_slider values survive config save/load and script
+--  reload (a raw local table wouldn't), which is the same trick real
+--  Solus-style HUDs use to make a "movable box" remember where you put it.
+--  Drag by clicking and holding inside the title bar -- gated to the menu
+--  being open so holding left-click to shoot during a round can never
+--  accidentally drag the panel around mid-fight.
 -- ══════════════════════════════════════════════════════════════════
-local DrawOverlay = (function()
-local PANEL_RES    = 10000
-local PANEL_W      = 200
-local PANEL_PAD    = 6
-local PANEL_HEAD_H = 19   -- 2px strip + 17px title row
-local PANEL_ROW_H  = 14
-local PANEL_LBL_W  = 44   -- label column
-local PANEL_BODY_PAD = 3  -- above the first row and below the last
+local PANEL_RES     = 10000
+local PANEL_PAD     = 7
+local PANEL_ROW_H   = 13
+local PANEL_TITLE_H = 16
+local PANEL_MIN_W   = 150
+local PANEL_R       = 6  -- corner radius
 
--- The gamesense menu strip, bright row and the half-brightness row
--- beneath it.
-local STRIP_A = {59, 175, 222}
-local STRIP_B = {202, 70, 205}
-local STRIP_C = {201, 227, 58}
-
--- State colours carry meaning, so they stay fixed whatever the accent is.
-local C_VULN  = {232, 86, 86}
-local C_OK    = {150, 200, 70}
-local C_BUILD = {220, 168, 72}
-local C_TEXT  = {205, 205, 205}
-local C_DIM   = {112, 112, 112}
-local C_ALT   = {140, 140, 140}
+-- Rounded rectangle: 3 straight-fill rects + 4 corner quarter-circles.
+-- Ported from a real "SOLUS UI"-style script's renderer_rounded_rect,
+-- trimmed to just the fill (no outline/multi-step shadow -- this repaints
+-- every frame, so a single extra call for a flat drop-shadow is used
+-- instead of a several-step gaussian falloff). renderer.circle's
+-- start_degrees/percentage usage here is verified against
+-- docs.gamesense.gs/docs/api/renderer/circle: 180@0.25 sweeps the
+-- top-left quarter, 270@0.25 top-right, 0@0.25 bottom-right, 90@0.25
+-- bottom-left.
+local function RoundedRect(x, y, w, h, r, cr, cg, cb, ca)
+    r = math.min(r, h / 2, w / 2)
+    if r <= 0 then
+        renderer.rectangle(x, y, w, h, cr, cg, cb, ca)
+        return
+    end
+    renderer.rectangle(x + r, y, w - 2 * r, h, cr, cg, cb, ca)
+    renderer.rectangle(x, y + r, r, h - 2 * r, cr, cg, cb, ca)
+    renderer.rectangle(x + w - r, y + r, r, h - 2 * r, cr, cg, cb, ca)
+    renderer.circle(x + r,     y + r,     cr, cg, cb, ca, r, 180, .25)
+    renderer.circle(x + w - r, y + r,     cr, cg, cb, ca, r, 270, .25)
+    renderer.circle(x + w - r, y + h - r, cr, cg, cb, ca, r, 0,   .25)
+    renderer.circle(x + r,     y + h - r, cr, cg, cb, ca, r, 90,  .25)
+end
 
 local ui_panel_x = ui.new_slider("LUA","B","  Panel X", 0, PANEL_RES, 6800)
 local ui_panel_y = ui.new_slider("LUA","B","  Panel Y", 0, PANEL_RES, 1400)
@@ -3885,20 +3283,20 @@ end
 
 local drag = {held = false, grabbed = false, mx = 0, my = 0}
 
--- Called once per paint with the header's current screen rect.
-local function UpdateDrag(px, py, pw, ph, menu_open)
-    if not menu_open then
-        -- No mouse or key reads while the menu is closed: a drag can't
-        -- start then, and this ran on every frame.
-        drag.held, drag.grabbed = false, false
-        return false
-    end
+-- Called once per paint with the title bar's current screen rect.
+local function UpdateDrag(px, py, pw, ph)
+    local menu_open = ui.is_menu_open()
     local mx, my    = ui.mouse_position()
     local held      = menu_open and client.key_state(0x01) == true
     if held and not drag.held then
         drag.grabbed = mx >= px and mx <= px + pw and my >= py and my <= py + ph
-        -- Re-base the delta on the grab frame, or the first frame of every
-        -- drag jumps by however far the mouse moved since the last one.
+        -- Reset the delta baseline to THIS frame's mouse position the
+        -- instant a grab starts. Without this, drag.mx/my still held
+        -- whatever position was recorded on the last unrelated frame
+        -- (mouse released, hovering elsewhere) -- so the very first frame
+        -- of every drag applied a "jump" equal to incidental mouse
+        -- movement since then, snapping the panel before smooth dragging
+        -- took over on subsequent frames.
         if drag.grabbed then drag.mx, drag.my = mx, my end
     elseif not held then
         drag.grabbed = false
@@ -3908,7 +3306,6 @@ local function UpdateDrag(px, py, pw, ph, menu_open)
         SetPanelPos(x + (mx - drag.mx), y + (my - drag.my))
     end
     drag.held, drag.mx, drag.my = held, mx, my
-    return menu_open
 end
 
 -- METH_LABEL: short display strings for each resolver method
@@ -3926,301 +3323,206 @@ local METH_LABEL = {
     [METH.SYM_FLIP] = "sym-flip",
     [METH.META_HOLD]= "meta",
 }
-local function MethTag(meth)
-    return string.upper(((METH_LABEL[meth] or meth):gsub("[-_]", " ")))
-end
 
--- Hoisted: this was allocated (13 tables) on every rendered frame, even
--- when no SHIFT flash was active.
-local BOX_EDGES = {
-    {1,2},{2,4},{4,3},{3,1},   -- bottom face
-    {5,6},{6,8},{8,7},{7,5},   -- top face
-    {1,5},{2,6},{3,7},{4,8},   -- verticals
-}
-
--- Names are cut to the pixel width they have, by whole UTF-8 characters.
--- The old byte-based sub(1, 15) could split a Cyrillic letter in half and
--- draw a broken glyph; the logs are full of Cyrillic names. Cached per
--- name, since measure_text is a C call and names rarely change.
--- Keyed by width first: the same player can sit in the TARGET row and the
--- ALT row (different right tags, different room) within one match.
-local FIT_CACHE = {}
-local function FitText(s, max_w)
-    local by_w = FIT_CACHE[max_w]
-    if not by_w then by_w = {}; FIT_CACHE[max_w] = by_w end
-    local hit = by_w[s]
-    if hit then return hit end
-    local out = s
-    if renderer.measure_text("", s) > max_w then
-        local chars = {}
-        for ch in s:gmatch("[\1-\127\194-\244][\128-\191]*") do chars[#chars+1] = ch end
-        local n = #chars
-        repeat
-            n = n - 1
-            out = table.concat(chars, "", 1, math.max(n, 0)) .. "\xe2\x80\xa6"
-        until n <= 1 or renderer.measure_text("", out) <= max_w
+-- SideBar: directional confidence fill, rendered as a plain text line
+-- inside the panel body.
+--   side=-1  →  ◀ ■■■■■■····  62%        (fill anchored left, grows with conf)
+--   side=+1  →    62%  ····■■■■■■ ▶      (fill anchored right)
+--   side= 0  →      ··· unk ···           (unknown)
+local function SideBar(side, conf)
+    local cf     = Clamp(conf, 0, 1)
+    local BARS   = 10
+    local filled = math.floor(cf * BARS + 0.5)
+    local full   = string.rep("\xe2\x96\xa0", filled)         -- ■ U+25A0
+    local empty  = string.rep("\xc2\xb7", BARS - filled)      -- · U+00B7
+    local pct    = math.floor(cf * 100)
+    if side < 0 then
+        return "\xe2\x97\x80 " .. full .. empty .. " " .. pct .. "%"
+    elseif side > 0 then
+        return pct .. "% " .. empty .. full .. " \xe2\x96\xb6"
+    else
+        return "\xc2\xb7\xc2\xb7\xc2\xb7 unk \xc2\xb7\xc2\xb7\xc2\xb7"
     end
-    by_w[s] = out
-    return out
 end
 
--- Reused row records: {lbl, val, vf (font), vc (colour), rt (right text),
--- rc, rw (right width), bar (true for the side meter)}.
-local function PanelRow(OV, i, lbl, val, vf, vc, rt, rc)
-    local r = OV.rows[i]
-    if not r then r = {}; OV.rows[i] = r end
-    r.lbl, r.val, r.vf, r.vc = lbl, val, vf, vc
-    r.rt, r.rc = rt, rc
-    r.rw = (rt and rt ~= "") and renderer.measure_text("-", rt) or 0
-    r.bar = nil
-    return r
-end
+local function DrawOverlay()
+    if not ui.get(ui_on) or not ui.get(ui_esp) then return end
 
--- Content build, cached. paint runs every rendered frame (200-300 fps),
--- but everything here only changes with the resolver state (once per net
--- update, or on a shot event), the threat, or the accent.
-local OVERLAY    = {ver = -1, rows = {}, n = 0, bar = 0}
-local ACCENT_VER = 0
-local FONT_H     = nil
-
-local function BuildOverlay(OV, threat)
-    if not FONT_H then
-        local _, hs = renderer.measure_text("-", "A")
-        local _, hn = renderer.measure_text("", "A")
-        FONT_H = {small = hs or 9, norm = hn or 12}
-    end
-    local acc_hex = string.format("%02X%02X%02XFF", ACCENT[1], ACCENT[2], ACCENT[3])
-
-    -- Header: brand left, this match's score right. total_hits and
-    -- total_misses count every real outcome; hit_count and
-    -- resolver_misses are resolver inputs, not a scoreboard.
+    -- ── Gather content ────────────────────────────────────────────────
+    -- total_hits/total_misses (every real outcome) -- NOT hit_count
+    -- (head/neck-confirmed only) or resolver_misses (non-vuln only). Those
+    -- two drive internal resolver logic and were never meant to be a
+    -- hit/miss scoreboard; using them here undercounted misses badly,
+    -- since most misses happen during vuln windows and resolver_misses
+    -- deliberately excludes those.
     local mh, mm = 0, 0
     for _, r in pairs(REC) do
         mh = mh + (r.total_hits or 0)
         mm = mm + (r.total_misses or 0)
     end
-    local total = mh + mm
-    OV.brand = "\aCDCDCDFFrift\a" .. acc_hex .. "veil"
-    if total > 0 then
-        local pct = math.floor(mh / total * 100 + 0.5)
-        OV.score   = string.format("\a707070FF%d/%d  \aCDCDCDFF%d%%", mh, total, pct)
-        OV.score_w = renderer.measure_text("-", string.format("%d/%d  %d%%", mh, total, pct))
-    else
-        OV.score   = "\a707070FF--"
-        OV.score_w = renderer.measure_text("-", "--")
-    end
+    local total  = mh + mm
+    local hr_str = total > 0
+        and string.format("%d%%", math.floor(mh / total * 100)) or "--"
+    local header = string.format("%dH/%dM \xc2\xb7 %s", mh, mm, hr_str)
 
-    local rec = nil
+    -- is_spike is computed once per net_update in Update() (LAST_SPIKE) --
+    -- paint fires every rendered frame, so recomputing it here via GetLat()
+    -- would be pure per-frame overhead for a value that rarely changes.
+    local is_spike = LAST_SPIKE
+    local threat   = client.current_threat()
+    local rec      = nil
     if threat and entity.is_alive(threat) then
         local s64 = EIDX_S64[threat]
         rec = s64 and REC[s64]
     end
 
-    local n, value_w = 0, PANEL_W - PANEL_PAD * 2 - PANEL_LBL_W
-    OV.bar = 0
+    -- lines: {text, r, g, b}. accent_* drives the title bar's top strip,
+    -- so the panel's overall color reads the resolver state even before
+    -- you read a single word of text.
+    local lines = {}
+    -- Idle default reads from ui_accent (user-customizable) -- the vuln/
+    -- resolved/building branches below still override it with their own
+    -- fixed, meaningful colors regardless of this setting.
+    local accent_r, accent_g, accent_b = ui.get(ui_accent)
+
     if rec then
-        local cf  = rec.conf
-        local aa  = string.upper(AA_SHORT[rec.aa_type] or "?")
-        local aaw = renderer.measure_text("-", aa)
-        n = n + 1
-        PanelRow(OV, n, "TARGET",
-            FitText(entity.get_player_name(threat) or "?", value_w - aaw - 8), "", C_TEXT,
-            aa, C_DIM)
+        local cf   = rec.conf
+        local name = entity.get_player_name(threat) or "?"
+        if #name > 16 then name = name:sub(1, 15) .. "\xe2\x80\xa6" end
+        local tc = AA_SHORT[rec.aa_type] or "?"
+
+        lines[#lines+1] = {string.format("%s  \xc2\xb7  %s  %d%%", name, tc, math.floor(cf * 100)), 225, 225, 232}
 
         local meth    = rec.last_meth
+        local mlbl    = (meth and meth ~= "builtin") and (METH_LABEL[meth] or meth) or nil
         local has_val = isnum(rec.last_val) and math.abs(rec.last_val) > 0.5
-        local ang     = has_val and string.format("%+d", math.floor(rec.last_val + 0.5)) or ""
-        n = n + 1
+        local angle_s = has_val and string.format(" %+.0f\xc2\xb0", rec.last_val) or ""
+
         if rec.vuln_ttl > 0 then
-            PanelRow(OV, n, "STATE", "VULN " .. string.upper(rec.vuln_type or "?"), "-", C_VULN,
-                string.format("%dT  %s", rec.vuln_ttl, ang), C_DIM)
+            local vt = (rec.vuln_type or "?"):upper()
+            accent_r, accent_g, accent_b = 235, 60, 60
+            lines[#lines+1] = {string.format("\xe2\x9a\xa1 %s  %dt%s", vt, rec.vuln_ttl, angle_s), 245, 115, 115}
         elseif rec.resolved and cf >= CFG.CONF_ESP then
-            local src = (meth and meth ~= "builtin") and (MethTag(meth) .. "  ") or ""
-            PanelRow(OV, n, "STATE", "RESOLVED", "-", C_OK, src .. ang, C_DIM)
+            accent_r, accent_g, accent_b = 70, 210, 130
+            local src = mlbl and ("  " .. mlbl) or ""
+            lines[#lines+1] = {string.format("\xe2\x97\x8f resolved%s%s", src, angle_s), 130, 225, 165}
         else
-            PanelRow(OV, n, "STATE", "BUILDING", "-", C_BUILD, nil, nil)
+            accent_r, accent_g, accent_b = 215, 150, 60
+            lines[#lines+1] = {"\xe2\x97\x8b building", 215, 178, 120}
         end
 
-        n = n + 1
         local side = rec.side
-        local pct  = side ~= 0 and string.format("%d%%", math.floor(cf * 100)) or "--"
-        PanelRow(OV, n, "SIDE", nil, nil, nil, pct, C_TEXT).bar = true
-        OV.bar = Clamp(side * cf, -1, 1)
+        local sr, sg, sb_line
+        if     side < 0 then sr, sg, sb_line = 100, 170, 255
+        elseif side > 0 then sr, sg, sb_line = 255, 165, 90
+        else                 sr, sg, sb_line = 150, 150, 158 end
+        lines[#lines+1] = {SideBar(side, cf), sr, sg, sb_line}
 
-        local tags = {}
-        if rec.cheat then tags[#tags+1] = string.upper(rec.cheat) end
-        if rec.preferred_bt > 0 then tags[#tags+1] = "BT " .. rec.preferred_bt end
+        local sup = {}
+        if rec.preferred_bt > 0 then sup[#sup+1] = "bt:" .. rec.preferred_bt end
         if rec.config_type and rec.config_conf >= CFG.CFG_THRESH then
-            tags[#tags+1] = string.upper((rec.config_type:gsub("_", " ")))
+            sup[#sup+1] = CFG_LABEL[rec.config_type] or rec.config_type
         end
-        if rec.def_tickbase    then tags[#tags+1] = "DEF" end
-        if LAST_SPIKE          then tags[#tags+1] = "SPIKE" end
-        if rec.meta_aggressive then tags[#tags+1] = "AGG" end
-        if #tags > 0 then
-            n = n + 1
-            PanelRow(OV, n, "INFO", table.concat(tags, "  \xc2\xb7  "), "-", C_DIM, nil, nil)
+        if rec.def_tickbase    then sup[#sup+1] = "def" end
+        if is_spike            then sup[#sup+1] = "spk" end
+        if rec.meta_aggressive then sup[#sup+1] = "agg" end
+        if #sup > 0 then
+            lines[#lines+1] = {table.concat(sup, "  \xc2\xb7  "), 150, 150, 162}
         end
 
-        -- 2v2: the one other live enemy. LIVE_ENEMIES is cached once per
-        -- net update, so no entity scan here.
+        -- Off-angle awareness: 2v2/duel modes only ever have one other
+        -- enemy. Reads LIVE_ENEMIES (cached once per net_update in
+        -- Update()) instead of scanning entity.get_players() again here
+        -- every rendered frame.
         for _, p in ipairs(LIVE_ENEMIES) do
             if p ~= threat then
                 local os64 = EIDX_S64[p]
                 local orec = os64 and REC[os64]
                 if orec then
-                    local ort = string.format("%s  %d%%",
-                        string.upper(AA_SHORT[orec.aa_type] or "?"), math.floor(orec.conf * 100))
-                    local ortw = renderer.measure_text("-", ort)
-                    n = n + 1
-                    PanelRow(OV, n, "ALT",
-                        FitText(entity.get_player_name(p) or "?", value_w - ortw - 8), "", C_ALT,
-                        ort, C_DIM)
+                    local oname = entity.get_player_name(p) or "?"
+                    if #oname > 16 then oname = oname:sub(1, 15) .. "\xe2\x80\xa6" end
+                    local otc = AA_SHORT[orec.aa_type] or "?"
+                    lines[#lines+1] = {string.format("\xe2\x86\xb3 %s  %s %d%%", oname, otc, math.floor(orec.conf * 100)), 125, 125, 135}
                 end
                 break
             end
         end
-    elseif LAST_SPIKE then
-        n = n + 1
-        PanelRow(OV, n, "NET", "LAG SPIKE", "-", C_BUILD, nil, nil)
+    elseif is_spike then
+        lines[#lines+1] = {"\xe2\x96\xb2 spike", 235, 150, 60}
     end
 
-    OV.n  = n
-    OV.ph = PANEL_HEAD_H + (n > 0 and (n * PANEL_ROW_H + PANEL_BODY_PAD * 2) or 0)
-    OV.ver, OV.threat, OV.acc = STATE_VER, threat, ACCENT_VER
-end
+    -- ── Layout ──────────────────────────────────────────────────────
+    local px, py  = PanelPos()
+    local title_w = renderer.measure_text(nil, header) + PANEL_PAD * 2 + 18
+    local content_w = PANEL_MIN_W
+    for _, ln in ipairs(lines) do
+        local w = renderer.measure_text(nil, ln[1])
+        if w > content_w then content_w = w end
+    end
+    local pw = math.max(title_w, content_w + PANEL_PAD * 2)
+    local ph = PANEL_TITLE_H + #lines * PANEL_ROW_H + (#lines > 0 and PANEL_PAD or 2)
 
-local function DrawStrip(x, y, w)
-    local a, b, c = STRIP_A, STRIP_B, STRIP_C
-    local hw = math.floor(w / 2)
-    renderer.gradient(x,      y,     hw,     1, a[1], a[2], a[3], 255, b[1], b[2], b[3], 255, true)
-    renderer.gradient(x + hw, y,     w - hw, 1, b[1], b[2], b[3], 255, c[1], c[2], c[3], 255, true)
-    renderer.gradient(x,      y + 1, hw,     1, a[1], a[2], a[3], 110, b[1], b[2], b[3], 110, true)
-    renderer.gradient(x + hw, y + 1, w - hw, 1, b[1], b[2], b[3], 110, c[1], c[2], c[3], 110, true)
-end
+    UpdateDrag(px, py, pw, PANEL_TITLE_H)
 
-local ANIM = {h = nil, bar = 0}
+    -- ── Draw ────────────────────────────────────────────────────────
+    -- Rounded body + a single offset shadow pass instead of the old flat
+    -- hard-cornered rectangles and straight 1px border lines (which would
+    -- visibly clash with rounded corners). The header no longer gets its
+    -- own filled rectangle -- square corners on an inset rect would poke
+    -- out past the rounded body above/below it -- a thin inset separator
+    -- line marks the header/body boundary instead.
+    RoundedRect(px + 3, py + 4, pw, ph, PANEL_R, 0, 0, 0, 90)      -- shadow
+    RoundedRect(px, py, pw, ph, PANEL_R, 14, 14, 18, 232)          -- body
+    renderer.gradient(px + PANEL_R, py, pw - PANEL_R * 2, 2,
+                                      accent_r, accent_g, accent_b, 235,
+                                      accent_r, accent_g, accent_b, 40, false) -- accent strip
+    renderer.rectangle(px + PANEL_R, py + PANEL_TITLE_H, pw - PANEL_R * 2, 1,
+                        45, 45, 52, 200) -- header separator
 
-local PP = {x = nil, y = nil, at = -1}
-local function DrawPanel(threat)
-    local OV = OVERLAY
-    local now = globals.realtime()
-    -- Rebuild on a new target or accent at once; for resolver-state changes
-    -- (every tick) at most ~16 times a second. The text measurement in a
-    -- rebuild is the costliest part of the panel, and 16 Hz is faster than
-    -- anyone reads it.
-    if OV.threat ~= threat or OV.acc ~= ACCENT_VER
-       or (OV.ver ~= STATE_VER and now - (OV.built_at or -1) >= 0.06) then
-        BuildOverlay(OV, threat)
-        OV.built_at = now
+    -- "RV" tinted 55% toward the accent color, blended with light gray so
+    -- it stays legible even if the user picks a dark accent.
+    local title_r = math.floor(accent_r * 0.55 + 205 * 0.45)
+    local title_g = math.floor(accent_g * 0.55 + 208 * 0.45)
+    local title_b = math.floor(accent_b * 0.55 + 218 * 0.45)
+    renderer.text(px + PANEL_PAD, py + 3, title_r, title_g, title_b, 255, "", 0, "RV")
+    local hdr_w = renderer.measure_text(nil, header)
+    renderer.text(px + pw - hdr_w - PANEL_PAD, py + 3, 150, 150, 162, 220, "", 0, header)
+
+    local ly = py + PANEL_TITLE_H + 3
+    for _, ln in ipairs(lines) do
+        renderer.text(px + PANEL_PAD, ly, ln[2], ln[3], ln[4], 240, "", 0, ln[1])
+        ly = ly + PANEL_ROW_H
     end
 
-    -- Panel position: two slider reads and the screen size, re-read only
-    -- while the menu is open (it can be dragged then) or every 2 s.
-    local menu_open = ui.is_menu_open()
-    if menu_open or not PP.x or now - PP.at > 2 then
-        local x, y = PanelPos()
-        PP.x, PP.y, PP.at = math.floor(x), math.floor(y), now
-    end
-    local px, py = PP.x, PP.y
-    UpdateDrag(px, py, PANEL_W, PANEL_HEAD_H, menu_open)
-
-    -- Height eases toward its target, so rows slide in and out instead of
-    -- the box snapping between sizes when a target appears.
-    local ft = globals.frametime()
-    local k  = math.min(1, ft * 14)
-    local h  = ANIM.h or OV.ph
-    h = h + (OV.ph - h) * k
-    if math.abs(OV.ph - h) < 0.5 then h = OV.ph end
-    ANIM.h = h
-    ANIM.bar = ANIM.bar + (OV.bar - ANIM.bar) * math.min(1, ft * 10)
-    local ph = math.floor(h + 0.5)
-    local w  = PANEL_W
-
-    -- Frame: black outline, 1px bevel, opaque body. Opaque on purpose --
-    -- the stacked layers only read as edges when nothing blends through.
-    renderer.rectangle(px - 2, py - 2, w + 4, ph + 4, 10, 10, 10, 255)
-    renderer.rectangle(px - 1, py - 1, w + 2, ph + 2, 46, 46, 46, 255)
-    renderer.rectangle(px,     py,     w,     ph,     19, 19, 19, 255)
-    if menu_open then
-        -- Accent outline while the menu is open: the box is draggable now.
-        local ar, ag, ab = ACCENT[1], ACCENT[2], ACCENT[3]
-        local oa = drag.grabbed and 220 or 110
-        renderer.rectangle(px - 3,     py - 3,      w + 6, 1,      ar, ag, ab, oa)
-        renderer.rectangle(px - 3,     py + ph + 2, w + 6, 1,      ar, ag, ab, oa)
-        renderer.rectangle(px - 3,     py - 2,      1,     ph + 4, ar, ag, ab, oa)
-        renderer.rectangle(px + w + 2, py - 2,      1,     ph + 4, ar, ag, ab, oa)
-    end
-    DrawStrip(px, py, w)
-
-    local fh = FONT_H
-    local ty_norm  = math.floor((PANEL_HEAD_H - 2 - fh.norm) / 2)
-    local ty_small = math.floor((PANEL_HEAD_H - 2 - fh.small) / 2)
-    renderer.text(px + PANEL_PAD, py + 2 + ty_norm, 205, 205, 205, 255, "", 0, OV.brand)
-    renderer.text(px + w - PANEL_PAD - OV.score_w, py + 2 + ty_small, 205, 205, 205, 255, "-", 0, OV.score)
-
-    if OV.n == 0 or ph <= PANEL_HEAD_H then return end
-    renderer.rectangle(px, py + PANEL_HEAD_H, w, 1, 33, 33, 33, 255)
-
-    local row_small = math.floor((PANEL_ROW_H - fh.small) / 2)
-    local row_norm  = math.floor((PANEL_ROW_H - fh.norm) / 2)
-    local vx     = px + PANEL_PAD + PANEL_LBL_W
-    local bottom = py + ph - PANEL_BODY_PAD
-    local ry     = py + PANEL_HEAD_H + PANEL_BODY_PAD
-    for i = 1, OV.n do
-        if ry + PANEL_ROW_H > bottom + 1 then break end  -- still easing open
-        local r = OV.rows[i]
-        renderer.text(px + PANEL_PAD, ry + row_small, C_DIM[1], C_DIM[2], C_DIM[3], 255, "-", 0, r.lbl)
-        if r.bar then
-            -- Centre-zero side meter: the fill grows from the centre mark
-            -- toward the side we track, its length is the confidence.
-            local bx0 = vx
-            local bw  = w - PANEL_PAD - 34 - (vx - px)
-            local cx  = bx0 + math.floor(bw / 2)
-            local by  = ry + math.floor((PANEL_ROW_H - 4) / 2)
-            renderer.rectangle(bx0, by, bw, 4, 34, 34, 34, 255)
-            local v  = ANIM.bar
-            local fw = math.floor(math.abs(v) * (bw / 2) + 0.5)
-            if fw > 0 then
-                local ar, ag, ab = ACCENT[1], ACCENT[2], ACCENT[3]
-                if v < 0 then
-                    renderer.gradient(cx - fw, by, fw, 4, ar, ag, ab, 255, ar, ag, ab, 110, true)
-                else
-                    renderer.gradient(cx, by, fw, 4, ar, ag, ab, 110, ar, ag, ab, 255, true)
-                end
-            end
-            renderer.rectangle(cx, by - 2, 1, 8, 96, 96, 96, 255)
-        elseif r.val then
-            local c = r.vc
-            renderer.text(vx, ry + (r.vf == "-" and row_small or row_norm),
-                c[1], c[2], c[3], 255, r.vf, 0, r.val)
-        end
-        if r.rw > 0 then
-            local c = r.rc
-            renderer.text(px + w - PANEL_PAD - r.rw, ry + row_small, c[1], c[2], c[3], 255, "-", 0, r.rt)
-        end
-        ry = ry + PANEL_ROW_H
-    end
-end
-
--- World-space SHIFT marker: a brief, fading tag and wireframe box over any
--- live enemy whose backtrack record just broke (the origin-jump check in
--- ProcessPlayer), not only the current threat. The flash decays even with
--- the marker hidden, so switching it back on never replays a stale one.
-local function DrawShiftMarkers(show)
+    -- ── World-space "SHIFT" flash + box ─────────────────────────────────
+    -- Fires from the origin-jump check in ProcessPlayer -- a brief, fading
+    -- tag + wireframe box over ANY live enemy whose backtrack record just
+    -- broke, not just the current threat, since a shift is a rare,
+    -- meaningful moment worth surfacing regardless of who's aimed at.
+    -- Inspired by a standalone "lag comp breaker" ESP tool's 3D box +
+    -- tether-line style; the box corners/edges here are rebuilt from
+    -- scratch with correct 1-indexed Lua array math (that reference file's
+    -- own edge list mixes 0- and 1-based indices, silently dropping 3 of
+    -- its 12 intended edges -- not something to carry over).
+    local BOX_EDGES = {
+        {1,2},{2,4},{4,3},{3,1},   -- bottom face
+        {5,6},{6,8},{8,7},{7,5},   -- top face
+        {1,5},{2,6},{3,7},{4,8},   -- verticals
+    }
     local decay = globals.frametime() * 2  -- fades out over ~0.5s
     for _, p in ipairs(LIVE_ENEMIES) do
         local s2 = EIDX_S64[p]
         local r2 = s2 and REC[s2]
         if r2 and (r2._shift_flash or 0) > 0 then
             r2._shift_flash = math.max(0, r2._shift_flash - decay)
-            if show and r2._shift_flash > 0 then
+            if r2._shift_flash > 0 then
                 local ox2, oy2, oz2 = entity.get_origin(p)
                 local a = math.floor(r2._shift_flash * 255)
                 local sx, sy
                 if isnum(ox2) and isnum(oy2) and isnum(oz2) then
                     sx, sy = renderer.world_to_screen(ox2, oy2, oz2 + 78)
                     if sx then
-                        renderer.text(sx, sy, C_BUILD[1], C_BUILD[2], C_BUILD[3], a, "-c", 0, "SHIFT")
+                        renderer.text(sx, sy, 255, 140, 60, a, "c", 0, "SHIFT")
                     end
                 end
 
@@ -4246,17 +3548,22 @@ local function DrawShiftMarkers(show)
                         for _, e in ipairs(BOX_EDGES) do
                             local p1, p2 = scr[e[1]], scr[e[2]]
                             if p1 and p2 then
-                                renderer.line(p1[1], p1[2], p2[1], p2[2], C_BUILD[1], C_BUILD[2], C_BUILD[3], ba)
+                                renderer.line(p1[1], p1[2], p2[1], p2[2], 255, 140, 60, ba)
                             end
                         end
-                        -- Tether to the box centre, not a corner: a corner
-                        -- sits on the far side of the box at many angles.
+                        -- Tether from the actually-reported origin to the box's
+                        -- CENTER, not an arbitrary corner -- scr[1] (bottom,
+                        -- min-x, min-y) is on the far side of the box from the
+                        -- camera at plenty of viewing angles, so the tether
+                        -- looked like it stabbed into a random edge instead of
+                        -- pointing at the box. The center is always a
+                        -- consistent, symmetric anchor regardless of angle.
                         local ccx = bx + (mnx + mxx) / 2
                         local ccy = by + (mny + mxy) / 2
                         local ccz = bz + (mnz + mxz) / 2
                         local tsx, tsy = renderer.world_to_screen(ccx, ccy, ccz)
                         if sx and tsx then
-                            renderer.line(sx, sy, tsx, tsy, C_BUILD[1], C_BUILD[2], C_BUILD[3], ba)
+                            renderer.line(sx, sy, tsx, tsy, 255, 140, 60, ba)
                         end
                     end
                 end
@@ -4264,21 +3571,6 @@ local function DrawShiftMarkers(show)
         end
     end
 end
-
-return function()
-    -- The accent follows gamesense's Menu color. ui.get on it returns four
-    -- numbers, no allocation, so polling it per frame is cheaper than
-    -- trusting a callback on an element this script doesn't own.
-    if ReadAccent() then
-        ACCENT_VER = ACCENT_VER + 1
-        ui.set(ui_title, TitleText())
-    end
-    if not ui.get(ui_on) then return end
-    -- Threat as read once per tick in Update, not queried every frame.
-    if IND.panel then DrawPanel(CTX.threat) end
-    DrawShiftMarkers(IND.shift)
-end
-end)() -- panel scope
 
 -- ══════════════════════════════════════════════════════════════════
 --  CLEANUP
@@ -4289,16 +3581,13 @@ local function ResetPlist()
             plist.set(i, "Force body yaw", false)
             plist.set(i, "Force body yaw value", 0)
             plist.set(i, "Correction active", false)
-            plist.set(i, "High priority", false)
         end)
     end
-    PL_CACHE = {}; PL_KNOWN = {}
 end
 
 local function EndMatch()
     info("match", "ended -- flushing DB")
     FlushDB()
-    ForgetAllCheats()
     ResetPlist()
     REC = {}; DT_HIST = {}; SHOTS = {}; EIDX_S64 = {}
     RestoreInterp()
@@ -4316,108 +3605,23 @@ local function FullShutdown()
 end
 
 -- ══════════════════════════════════════════════════════════════════
---  PERFORMANCE PROFILER  (rv_perf)
---
---  Every callback runs through Instrument: a pcall, so an error can never
---  repeat per frame into the console (it is logged once, then every 1000th
---  time), and -- while rv_perf is measuring -- a high-resolution timer
---  (QueryPerformanceCounter through LuaJIT's FFI) around the call.
--- ══════════════════════════════════════════════════════════════════
-PERF = {on = false, since = 0, stat = {}, order = {}}
-PERF.qpc = (function()
-    pcall(ffi.cdef, [[
-        int QueryPerformanceCounter(int64_t *count);
-        int QueryPerformanceFrequency(int64_t *freq);
-    ]])
-    local ok, C = pcall(function()
-        local c = ffi.C
-        local _ = c.QueryPerformanceCounter and c.QueryPerformanceFrequency
-        return c
-    end)
-    if not ok or not C then return nil end
-    local ok_new, buf = pcall(ffi.new, "int64_t[1]")
-    if not ok_new or not buf then return nil end
-    local ok_f = pcall(C.QueryPerformanceFrequency, buf)
-    local freq = ok_f and tonumber(buf[0])
-    if not freq or freq <= 0 then return nil end
-    return function()
-        C.QueryPerformanceCounter(buf)
-        return tonumber(buf[0]) * 1e6 / freq          -- microseconds
-    end
-end)()
-
-function PERF.Reset()
-    for _, st in pairs(PERF.stat) do st.n, st.sum, st.max, st.err = 0, 0, 0, 0 end
-    PERF.since = globals.realtime()
-end
-
-function PERF.Report()
-    local secs = math.max(0.001, globals.realtime() - PERF.since)
-    local out = {string.format("[RIFTVEIL] === PERF === %.1f s measured%s", secs,
-        PERF.qpc and "" or " (no timer: error counts only)")}
-    local total = 0
-    for _, name in ipairs(PERF.order) do
-        local st = PERF.stat[name]
-        local per_s = st.sum / secs
-        total = total + per_s
-        out[#out + 1] = string.format("  %-14s %7.0f calls/s  avg %7.1f us  max %8.1f us  %6.2f ms/s  errors %d",
-            name, st.n / secs, st.n > 0 and st.sum / st.n or 0, st.max, per_s / 1000, st.err)
-    end
-    out[#out + 1] = string.format("  total %.2f ms per second of game time (%.2f%% of one core)",
-        total / 1000, total / 1e4)
-    return table.concat(out, "\n")
-end
-
-local function Instrument(name, fn)
-    local st = {n = 0, sum = 0, max = 0, err = 0}
-    PERF.stat[name] = st
-    PERF.order[#PERF.order + 1] = name
-    local clock = PERF.qpc
-    return function(...)
-        local t0 = PERF.on and clock and clock()
-        local ok, r = pcall(fn, ...)
-        if t0 then
-            local dt = clock() - t0
-            st.n, st.sum = st.n + 1, st.sum + dt
-            if dt > st.max then st.max = dt end
-        end
-        if not ok then
-            st.err = st.err + 1
-            if st.err == 1 or st.err % 1000 == 0 then
-                err(name, "%s (x%d)", tostring(r), st.err)
-                if st.err == 1 then client.log("[RIFTVEIL] error in " .. name .. ": " .. tostring(r)) end
-            end
-            return nil
-        end
-        return r
-    end
-end
-
--- ══════════════════════════════════════════════════════════════════
 --  EVENT REGISTRATION
 -- ══════════════════════════════════════════════════════════════════
-client.set_event_callback("net_update_end", Instrument("update", function()
-    if entity.is_alive(entity.get_local_player()) then Update() end
-end))
-client.set_event_callback("paint",       Instrument("paint", DrawOverlay))
-client.set_event_callback("aim_fire",    Instrument("aim_fire", on_aim_fire))
-client.set_event_callback("aim_miss",    Instrument("aim_miss", on_aim_miss))
-client.set_event_callback("aim_hit",     Instrument("aim_hit", on_aim_hit))
--- The log also reaches disk every round, so a match with the debug log
--- off still leaves its shots on disk.
-client.set_event_callback("round_start", Instrument("round_start", function()
-    ResetPlist()
-    flush_log()
-end))
-client.set_event_callback("voice",       Instrument("voice", OnVoice))
-client.set_event_callback("player_connect_full", Instrument("connect", function(e)
-    local ent = client.userid_to_entindex(e.userid)
-    if ent == entity.get_local_player() then ForgetAllCheats() elseif ent then ForgetCheat(ent) end
-end))
+client.set_event_callback("net_update_end", function()
+    if entity.is_alive(entity.get_local_player()) then
+        local ok, msg = pcall(Update)
+        if not ok then err("update", "top-level crash: %s", tostring(msg)) end
+    end
+end)
+client.set_event_callback("paint",       DrawOverlay)
+client.set_event_callback("aim_fire",    on_aim_fire)
+client.set_event_callback("aim_miss",    on_aim_miss)
+client.set_event_callback("aim_hit",     on_aim_hit)
+client.set_event_callback("round_start", ResetPlist)
 client.set_event_callback("game_end",    EndMatch)
 client.set_event_callback("level_init",  EndMatch)
 client.set_event_callback("shutdown",    FullShutdown)
 client.set_event_callback("disconnect",  FullShutdown)
 
-info("init", "RIFTVEIL v" .. RV_VERSION .. " loaded -- commands: rv_stats  rv_db  rv_perf  rv_save  rv_clear  rv_reset  rv_wipe")
+info("init", "RIFTVEIL v" .. RV_VERSION .. " loaded -- commands: rv_stats  rv_db  rv_clear  rv_reset  rv_wipe")
 flush_log()

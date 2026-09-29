@@ -386,6 +386,28 @@ debug.sethook(hook, "l")
 local ok, run_err = pcall(chunk)
 if not ok then print("RUNTIME ERROR during top-level load: " .. tostring(run_err)) end
 
+-- RV_PARITY=1: switch off the post-v6.2 decision features (FEATURE flags
+-- that change a correction) before the first tick, for the v6.2 parity run.
+if os.getenv("RV_PARITY") then
+    local seen = {}
+    local function find(f, depth)
+        if seen[f] or depth > 4 then return nil end
+        seen[f] = true
+        for i = 1, 255 do
+            local n, v = debug.getupvalue(f, i)
+            if not n then break end
+            if n == "FEATURE" and type(v) == "table" then return v end
+            if type(v) == "function" then
+                local r = find(v, depth + 1)
+                if r then return r end
+            end
+        end
+    end
+    local F
+    for _, cb in pairs(CALLBACKS) do F = F or find(cb, 0) end
+    if F then F.STATE_PHYSICS = false end
+end
+
 local cb_errors = {}
 local function fire(name, ...)
     local cb = CALLBACKS[name]
@@ -823,9 +845,10 @@ local UNIT_FAIL, UNIT_OK = {}, nil
 -- slow crouch-walk must read as crouch-moving.
 do
     local CS = probe("ClassifyState")
-    if not os.getenv("RV_MUST_RUN_V7") then
-        -- v8.0 restored v6.2's speed-band classifier on purpose; the
-        -- physics check below tests the v7.5 one.
+    local FEAT = probe("FEATURE")
+    if not (FEAT and FEAT.STATE_PHYSICS) and not os.getenv("RV_MUST_RUN_V7") then
+        -- v6.2's speed-band classifier (RV_PARITY or an old RV_TARGET):
+        -- the physics check below tests the v7.5 one.
     elseif not CS then
         UNIT_FAIL[#UNIT_FAIL + 1] = "ClassifyState: not reachable through upvalues"
     else

@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v8.2  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v8.1  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · cheat revealer · per-cheat method trust
 -- ════════════════════════════════════════════════════════════════════
@@ -9,9 +9,6 @@
 --          per-cheat method trust. Full notes: CHANGELOG.md. The v6.2
 --          notes below describe the decision code as it is.
 --  v8.1 – The v7.9 menu and info panel back on top of that core.
---  v8.2 – Condition detection by physics, cached player-list writes,
---          rv_perf, weapon/target logging, aim-field probe. Status and
---          next steps: docs/ROADMAP.md.
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
 --    v6.2 – Senior resolver-review pass #3, focused on resolver-domain
@@ -691,7 +688,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.2"
+local RV_VERSION = "8.1"
 
 local ffi = require "ffi"
 
@@ -800,20 +797,6 @@ local DT_HIST  = {}   -- [s64] = simtime-delta samples for DT detection
 -- than net updates, so anything DrawOverlay can read instead of recompute is
 -- a real, multiplicative FPS win, not a micro-optimization).
 local LIVE_ENEMIES = {}   -- array of live enemy entindexes, this net_update
-
--- Player-list writes go through a per-entity cache: a field is only sent
--- when its value changes (v6.2 sent all four fields for every enemy every
--- tick). The cache is dropped once a second and on every reset, so a value
--- the game changed behind our back is re-sent within a second.
-local PL_CACHE, PL_KNOWN = {}, {}
-local LAST_PL_SYNC, PL_RESYNC_TICKS = 0, 64
-local function PSet(ent, field, value)
-    local c = PL_CACHE[ent]
-    if not c then c = {}; PL_CACHE[ent] = c end
-    if c[field] == value then return end
-    c[field] = value
-    plist.set(ent, field, value)
-end
 local LAST_SPIKE    = false
 
 -- Periodic DB autosave state. FlushDB previously only ran on match-end/
@@ -849,10 +832,6 @@ local FEATURE = {
     -- lagcomp, def-tick, spike and yaw-cache even on ticks where it
     -- predicts nothing.
     JITTER_PRED = false,
-    -- v7.5 condition detection (see ClassifyState): on. It only changes
-    -- which state table a moving enemy reads; shot lines log st= so the
-    -- next match shows whether it helps.
-    STATE_PHYSICS = true,
     -- These three are the v6.2 [EXP] switches as the logs show them
     -- running when the resolver hit 74% (suppress fired in every v6.2
     -- match; jitter prediction never did).
@@ -995,10 +974,8 @@ ui.set_callback(ui_verb,   SyncFlags)
 ui.set_callback(ui_tight,  ApplyTightInterp)
 SyncMenu()
 
--- Forward-declared: the rv_save command and EndMatch both call FlushDB;
--- rv_perf reads PERF (see PERFORMANCE PROFILER).
+-- Forward-declared: the rv_save command and EndMatch both call FlushDB.
 local FlushDB
-local PERF
 
 
 -- ══════════════════════════════════════════════════════════════════
@@ -1076,19 +1053,6 @@ client.set_event_callback("console_input", function(text)
         end
         local s = table.concat(out, "\n")
         client.log(s); log_write("CMD","db", s)
-
-    elseif cmd == "rv_perf" then
-        -- First call starts measuring, the second prints the report.
-        if not PERF.on then
-            PERF.Reset()
-            PERF.on = true
-            client.log(PERF.qpc and "[RIFTVEIL] profiling -- play ~10 s, then run rv_perf again"
-                       or "[RIFTVEIL] profiling errors only (no high-resolution timer) -- run rv_perf again")
-        else
-            PERF.on = false
-            local s = PERF.Report()
-            client.log(s); log_write("CMD", "perf", s)
-        end
 
     elseif cmd == "rv_save" then
         -- Saves this match's profiles now instead of waiting for match end.
@@ -1495,33 +1459,12 @@ end
 -- ══════════════════════════════════════════════════════════════════
 -- (MaxDesync removed — was used to compute max_d which was dead after pick chain refactor)
 
--- FEATURE.STATE_PHYSICS (v7.5, audited against the AA builders in
--- docs/STATE_AUDIT.md): the builders pick slow walk by KEY, v6.2 inferred it
--- from a 5-100 u/s band -- which also caught every acceleration into and
--- braking out of a run. Source physics (sv_accelerate 5.5, friction 5.2):
--- 38% of a rifle peek-and-stop read as slow walk. With it: inside the band,
--- gaining > 10 u/s per tick is a run (full-speed acceleration is 18-21),
--- losing > 2 keeps the state being braked from; otherwise slow walk. Crouch-
--- move starts at 5 u/s (builders: 2 / 3.63 / 10) instead of 20.
--- dv = speed change per simtime tick (nil on the first sample).
-local function ClassifyState(player, as, spd, dv, prev_state)
+local function ClassifyState(player, as, spd)
     local flags = entity.get_prop(player, "m_fFlags") or 0
     local og    = bit.band(flags, 1) ~= 0
     local duck  = as and (as.duck_amount or 0) > 0.5
     spd = spd or 0
     if not og   then return duck and STATE.AIR_CROUCH  or STATE.AIR           end
-    if FEATURE.STATE_PHYSICS then
-        if duck       then return spd > 5 and STATE.CROUCH_MOVING or STATE.CROUCH end
-        if spd >= 100 then return STATE.RUNNING                                 end
-        if spd <= 5   then return STATE.STANDING                                end
-        if dv then
-            if dv > 10 then return STATE.RUNNING end
-            if dv < -2 then
-                return (prev_state == STATE.SLOWMOTION) and STATE.SLOWMOTION or STATE.RUNNING
-            end
-        end
-        return STATE.SLOWMOTION
-    end
     if duck     then return spd > 20 and STATE.CROUCH_MOVING or STATE.CROUCH  end
     if spd > 5 and spd < 100 then return STATE.SLOWMOTION                     end
     if spd >= 100             then return STATE.RUNNING                        end
@@ -2626,10 +2569,10 @@ local function GetRec(player)
 end
 
 local function ClearEnt(player)
-    PSet(player, "Force body yaw", false)
-    PSet(player, "Force body yaw value", 0)
-    PSet(player, "Correction active", false)
-    PSet(player, "High priority", false)
+    plist.set(player, "Force body yaw", false)
+    plist.set(player, "Force body yaw value", 0)
+    plist.set(player, "Correction active", false)
+    plist.set(player, "High priority", false)
     local s64 = EIDX_S64[player]
     if s64 and REC[s64] then
         REC[s64].active = false; REC[s64].resolved = false
@@ -2768,11 +2711,7 @@ local function ProcessPlayer(player, ctx)
         spd = (isnum(vx0) and isnum(vy0)) and math.sqrt(vx0*vx0 + vy0*vy0) or 0
 
         -- State
-        local dv
-        if isnum(rec.prev_spd) and rec.prev_spd_st and st > rec.prev_spd_st then
-            dv = (spd - rec.prev_spd) / (st - rec.prev_spd_st)   -- per tick, fakelag-safe
-        end
-        local state_key = ClassifyState(player, as, spd, dv, rec.state)
+        local state_key = ClassifyState(player, as, spd)
         rec.state = state_key
         if rec.conf == 0 then rec.conf = CFG.STATE_SEED[state_key] or 0.25 end
 
@@ -3243,16 +3182,16 @@ local function ProcessPlayer(player, ctx)
         end
 
         if should_override then
-            PSet(player, "Force body yaw", true)
-            PSet(player, "Force body yaw value", SafeYaw(override_val))
-            PSet(player, "Correction active", true)
+            plist.set(player, "Force body yaw", true)
+            plist.set(player, "Force body yaw value", SafeYaw(override_val))
+            plist.set(player, "Correction active", true)
             -- High priority: confirmed via a real resolver's usage (not in
             -- the official docs) -- hints the LC/backtrack system not to
             -- deprioritize this target's validation window while we're
             -- actively correcting them ("prevent missing LC" per that
             -- script's own comment). Set last so a bad/renamed field
             -- can't stop the actual correction above from applying.
-            PSet(player, "High priority", true)
+            plist.set(player, "High priority", true)
             rec.active = true; rec.resolved = true
             rec.last_val = override_val; rec.last_meth = override_meth
             -- Track suppress streak for the streak-cap logic above
@@ -3279,10 +3218,10 @@ local function ProcessPlayer(player, ctx)
             local meta_cap = (tracked_method == METH.HIT_MEM) and live_cap or corr_cap
             local meta_val = CfgAngle(tracked_side, rec.state, TrustedCfg(rec), meta_cap)
             if rec._brute_half then meta_val = meta_val * 0.5 end
-            PSet(player, "Force body yaw", true)
-            PSet(player, "Force body yaw value", SafeYaw(meta_val))
-            PSet(player, "Correction active", true)
-            PSet(player, "High priority", true)
+            plist.set(player, "Force body yaw", true)
+            plist.set(player, "Force body yaw value", SafeYaw(meta_val))
+            plist.set(player, "Correction active", true)
+            plist.set(player, "High priority", true)
             rec.active = true; rec.resolved = true
             rec.last_val = meta_val; rec.last_meth = METH.META_HOLD
             -- Don't blow away a suppress streak/pause in progress -- this
@@ -3292,10 +3231,10 @@ local function ProcessPlayer(player, ctx)
             if not sup_pausing then rec._sup_streak = 0; rec._sup_pause = 0 end
 
         else
-            PSet(player, "Force body yaw", false)
-            PSet(player, "Force body yaw value", 0)
-            PSet(player, "Correction active", false)
-            PSet(player, "High priority", false)
+            plist.set(player, "Force body yaw", false)
+            plist.set(player, "Force body yaw value", 0)
+            plist.set(player, "Correction active", false)
+            plist.set(player, "High priority", false)
             rec.active = false; rec.resolved = false
             rec.last_val = 0; rec.last_meth = "builtin"
             -- Same sup_pausing guard as the meta_aggressive branch above.
@@ -3325,7 +3264,6 @@ local function ProcessPlayer(player, ctx)
     rec.prev_pose     = pose
     rec.prev_spd2     = rec.prev_spd  -- shift: spd2 = last tick's spd before this update
     rec.prev_spd      = spd
-    if spd then rec.prev_spd_st = st end
     rec.prev_duck     = duck or 0
     rec.prev_onground = on_ground
     -- Decrement DCK cooldown each tick (set to 10 when DCK fires, counts down to 0)
@@ -3385,31 +3323,22 @@ local function Update()
     }
     LAST_SPIKE = ctx.is_spike
 
-    -- entity.get_players(true): enemies only, dormant and dead already
-    -- excluded (docs), so no per-player is_enemy/is_alive calls. Collected
-    -- first so the player list can be refreshed before any plist write.
-    local n_live, fresh = 0, false
-    for _, player in ipairs(entity.get_players(true)) do
-        n_live = n_live + 1
-        LIVE_ENEMIES[n_live] = player
-        if not PL_KNOWN[player] then PL_KNOWN[player] = true; fresh = true end
-    end
-    for i = #LIVE_ENEMIES, n_live + 1, -1 do LIVE_ENEMIES[i] = nil end
-    -- update_player_list is only needed so plist.set reaches a player who
-    -- just appeared: run it then, plus a once-a-second resync that also
-    -- drops the write cache. (v6.2 ran it every tick.)
-    if fresh or ctx.cur_tc - LAST_PL_SYNC >= PL_RESYNC_TICKS or ctx.cur_tc < LAST_PL_SYNC then
-        if not fresh then PL_CACHE = {} end
-        client.update_player_list()
-        LAST_PL_SYNC = ctx.cur_tc
-    end
-    for i = 1, n_live do
-        local player = LIVE_ENEMIES[i]
-        local ok, msg = pcall(ProcessPlayer, player, ctx)
-        if not ok then
-            err("update", "player=%d crash=%s", player, tostring(msg))
+    client.update_player_list()
+    local n_live = 0
+    for _, player in ipairs(entity.get_players()) do
+        if entity.is_enemy(player) and entity.is_alive(player) then
+            -- Cache the live-enemy list here (already paid for is_enemy/
+            -- is_alive this tick) so DrawOverlay's off-angle row doesn't
+            -- re-scan every player again on every single rendered frame.
+            n_live = n_live + 1
+            LIVE_ENEMIES[n_live] = player
+            local ok, msg = pcall(ProcessPlayer, player, ctx)
+            if not ok then
+                err("update", "player=%d crash=%s", player, tostring(msg))
+            end
         end
     end
+    for i = #LIVE_ENEMIES, n_live + 1, -1 do LIVE_ENEMIES[i] = nil end
     CTX.threat = ctx.threat
     UpdateEspState()
     STATE_VER = STATE_VER + 1
@@ -3435,45 +3364,12 @@ end
 -- ══════════════════════════════════════════════════════════════════
 --  SHOT FEEDBACK
 -- ══════════════════════════════════════════════════════════════════
--- Local weapon class, logged on every shot (wpn=) for the per-weapon aim
--- policy (docs/WEAPON_PLAN.md): item definition indexes of the guns that
--- matter in HvH; anything else logs as "other".
-local WEAPON_CLASS = {
-    [9] = "awp", [40] = "scout", [11] = "auto", [38] = "auto",
-    [64] = "r8", [1] = "deagle",
-    [4] = "pistol", [61] = "pistol", [32] = "pistol", [36] = "pistol",
-    [3] = "pistol", [30] = "pistol", [63] = "pistol", [2] = "pistol",
-}
-local function LocalWeaponClass()
-    local me = entity.get_local_player()
-    local w = me and entity.get_player_weapon(me)
-    local idx = w and entity.get_prop(w, "m_iItemDefinitionIndex")
-    if type(idx) ~= "number" then return "?" end
-    return WEAPON_CLASS[bit.band(idx, 0xFFFF)] or "other"
-end
-
--- Aim policy step 1 (docs/WEAPON_PLAN.md): do the player-list override
--- fields exist, and what do they hold? Read once per session on the first
--- shot and logged; nothing is written to them yet.
-local AIM_FIELDS_PROBED = false
-local function ProbeAimFields(ent)
-    if AIM_FIELDS_PROBED then return end
-    AIM_FIELDS_PROBED = true
-    for _, f in ipairs({"Override prefer body aim", "Override safe point", "Force body aim"}) do
-        local ok, v = pcall(plist.get, ent, f)
-        info("aimfield", "%s: %s", f, ok and ("exists, value=" .. tostring(v)) or ("missing (" .. tostring(v) .. ")"))
-    end
-end
-
--- aim_fire's backtrack, in ticks. The docs call it ticks but their example
--- converts it as seconds; the two ranges can't overlap (seconds < 1 under
--- sv_maxunlag, a nonzero tick count >= 1), so both read correctly. v6.2 ran
--- tick counts through TT() and logged bt=64+; only the log, the panel's BT
--- tag and the saved bt_pref use it -- no correction does.
-local function BtTicks(v)
-    if type(v) ~= "number" or v ~= v or v <= 0 or v == math.huge then return 0 end
-    if v < 1 then return TT(v) end
-    return math.min(64, math.floor(v + 0.5))
+-- TT() with a range check: a NaN/inf backtrack from the event reached
+-- "%d" in the shot log (an error in Lua 5.3). Real values are unchanged.
+local function BtTicks(bt)
+    local t = TT(bt)
+    if t ~= t or t < 0 or t > 64 then return 0 end
+    return t
 end
 
 local function on_aim_fire(e)
@@ -3492,12 +3388,6 @@ local function on_aim_fire(e)
         aa      = r and r.aa_type   or AA.UNKNOWN,
         state   = r and r.state     or nil,  -- movement state at fire time, for per-condition hit_mem
         cheat   = r and r.cheat     or nil,  -- enemy cheat (CHEAT REVEALER), logged
-        -- per-weapon aim policy inputs (logged only)
-        wpn     = LocalWeaponClass(),
-        aim_hg  = tonumber(e.hitgroup) or -1,
-        aim_dmg = isnum(e.damage) and math.floor(e.damage) or -1,
-        thp     = tonumber(entity.get_prop(t, "m_iHealth")) or -1,
-        tarm    = tonumber(entity.get_prop(t, "m_ArmorValue")) or -1,
         -- e.backtrack is a TIME value (seconds), not a tick count -- must
         -- go through TT() before comparing against the 1..16 tick range
         -- used everywhere else (bt_hist/preferred_bt/log output).
@@ -3520,7 +3410,6 @@ local function on_aim_fire(e)
     if r and r.vuln_ttl > 0 and r.vuln_type and r.vuln_profile[r.vuln_type] then
         r.vuln_profile[r.vuln_type].seen = r.vuln_profile[r.vuln_type].seen + 1
     end
-    ProbeAimFields(t)
     -- Shot counter for CheatTrusts' probe (every 4th shot at a player)
     if r then r.shots_fired = (r.shots_fired or 0) + 1 end
 end
@@ -3615,12 +3504,11 @@ local function on_aim_hit(e)
         end
     end
 
-    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s wpn=%s hp=%d ar=%d aim=%s pdmg=%d cf=%.2f%s%s",
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s%s%s",
         entity.get_player_name(e.target) or "?",
         HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
         isnum(e.damage) and math.floor(e.damage) or 0,
-        d.meth, d.val, d.bt, d.state or "?", d.wpn or "?", d.thp or -1, d.tarm or -1,
-        HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
+        d.meth, d.val, d.bt, d.state or "?",
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
     SHOTS[e.id] = nil
@@ -3684,10 +3572,9 @@ local function on_aim_miss(e)
 
     local is_resolver = reason == "?" or reason == "" or reason == "prediction error"
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s wpn=%s hp=%d ar=%d aim=%s pdmg=%d cf=%.2f%s%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s%s%s",
         entity.get_player_name(e.target) or "?",
-        reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.wpn or "?", d.thp or -1, d.tarm or -1,
-        HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
+        reason, d.meth, d.val, d.bt, d.hc, d.state or "?",
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
 
@@ -4289,10 +4176,8 @@ local function ResetPlist()
             plist.set(i, "Force body yaw", false)
             plist.set(i, "Force body yaw value", 0)
             plist.set(i, "Correction active", false)
-            plist.set(i, "High priority", false)
         end)
     end
-    PL_CACHE = {}; PL_KNOWN = {}
 end
 
 local function EndMatch()
@@ -4316,101 +4201,39 @@ local function FullShutdown()
 end
 
 -- ══════════════════════════════════════════════════════════════════
---  PERFORMANCE PROFILER  (rv_perf)
---
---  Every callback runs through Instrument: a pcall, so an error can never
---  repeat per frame into the console (it is logged once, then every 1000th
---  time), and -- while rv_perf is measuring -- a high-resolution timer
---  (QueryPerformanceCounter through LuaJIT's FFI) around the call.
--- ══════════════════════════════════════════════════════════════════
-PERF = {on = false, since = 0, stat = {}, order = {}}
-PERF.qpc = (function()
-    pcall(ffi.cdef, [[
-        int QueryPerformanceCounter(int64_t *count);
-        int QueryPerformanceFrequency(int64_t *freq);
-    ]])
-    local ok, C = pcall(function()
-        local c = ffi.C
-        local _ = c.QueryPerformanceCounter and c.QueryPerformanceFrequency
-        return c
-    end)
-    if not ok or not C then return nil end
-    local ok_new, buf = pcall(ffi.new, "int64_t[1]")
-    if not ok_new or not buf then return nil end
-    local ok_f = pcall(C.QueryPerformanceFrequency, buf)
-    local freq = ok_f and tonumber(buf[0])
-    if not freq or freq <= 0 then return nil end
-    return function()
-        C.QueryPerformanceCounter(buf)
-        return tonumber(buf[0]) * 1e6 / freq          -- microseconds
-    end
-end)()
-
-function PERF.Reset()
-    for _, st in pairs(PERF.stat) do st.n, st.sum, st.max, st.err = 0, 0, 0, 0 end
-    PERF.since = globals.realtime()
-end
-
-function PERF.Report()
-    local secs = math.max(0.001, globals.realtime() - PERF.since)
-    local out = {string.format("[RIFTVEIL] === PERF === %.1f s measured%s", secs,
-        PERF.qpc and "" or " (no timer: error counts only)")}
-    local total = 0
-    for _, name in ipairs(PERF.order) do
-        local st = PERF.stat[name]
-        local per_s = st.sum / secs
-        total = total + per_s
-        out[#out + 1] = string.format("  %-14s %7.0f calls/s  avg %7.1f us  max %8.1f us  %6.2f ms/s  errors %d",
-            name, st.n / secs, st.n > 0 and st.sum / st.n or 0, st.max, per_s / 1000, st.err)
-    end
-    out[#out + 1] = string.format("  total %.2f ms per second of game time (%.2f%% of one core)",
-        total / 1000, total / 1e4)
-    return table.concat(out, "\n")
-end
-
-local function Instrument(name, fn)
-    local st = {n = 0, sum = 0, max = 0, err = 0}
-    PERF.stat[name] = st
-    PERF.order[#PERF.order + 1] = name
-    local clock = PERF.qpc
-    return function(...)
-        local t0 = PERF.on and clock and clock()
-        local ok, r = pcall(fn, ...)
-        if t0 then
-            local dt = clock() - t0
-            st.n, st.sum = st.n + 1, st.sum + dt
-            if dt > st.max then st.max = dt end
-        end
-        if not ok then
-            st.err = st.err + 1
-            if st.err == 1 or st.err % 1000 == 0 then
-                err(name, "%s (x%d)", tostring(r), st.err)
-                if st.err == 1 then client.log("[RIFTVEIL] error in " .. name .. ": " .. tostring(r)) end
-            end
-            return nil
-        end
-        return r
-    end
-end
-
--- ══════════════════════════════════════════════════════════════════
 --  EVENT REGISTRATION
 -- ══════════════════════════════════════════════════════════════════
-client.set_event_callback("net_update_end", Instrument("update", function()
+-- Every per-frame and per-shot callback runs in a pcall that logs an error
+-- once, then every 1000th time: an uncaught error in paint repeated into
+-- the console every frame, which is what cost 100-200 fps in v7.5.
+local function Guard(name, fn)
+    local count = 0
+    return function(...)
+        local ok, msg = pcall(fn, ...)
+        if not ok then
+            count = count + 1
+            if count == 1 or count % 1000 == 0 then
+                err(name, "error #%d: %s", count, tostring(msg))
+            end
+        end
+    end
+end
+
+client.set_event_callback("net_update_end", Guard("update", function()
     if entity.is_alive(entity.get_local_player()) then Update() end
 end))
-client.set_event_callback("paint",       Instrument("paint", DrawOverlay))
-client.set_event_callback("aim_fire",    Instrument("aim_fire", on_aim_fire))
-client.set_event_callback("aim_miss",    Instrument("aim_miss", on_aim_miss))
-client.set_event_callback("aim_hit",     Instrument("aim_hit", on_aim_hit))
+client.set_event_callback("paint",       Guard("paint", DrawOverlay))
+client.set_event_callback("aim_fire",    Guard("aim_fire", on_aim_fire))
+client.set_event_callback("aim_miss",    Guard("aim_miss", on_aim_miss))
+client.set_event_callback("aim_hit",     Guard("aim_hit", on_aim_hit))
 -- The log also reaches disk every round, so a match with the debug log
 -- off still leaves its shots on disk.
-client.set_event_callback("round_start", Instrument("round_start", function()
+client.set_event_callback("round_start", Guard("round_start", function()
     ResetPlist()
     flush_log()
 end))
-client.set_event_callback("voice",       Instrument("voice", OnVoice))
-client.set_event_callback("player_connect_full", Instrument("connect", function(e)
+client.set_event_callback("voice",       Guard("voice", OnVoice))
+client.set_event_callback("player_connect_full", Guard("connect", function(e)
     local ent = client.userid_to_entindex(e.userid)
     if ent == entity.get_local_player() then ForgetAllCheats() elseif ent then ForgetCheat(ent) end
 end))
@@ -4419,5 +4242,5 @@ client.set_event_callback("level_init",  EndMatch)
 client.set_event_callback("shutdown",    FullShutdown)
 client.set_event_callback("disconnect",  FullShutdown)
 
-info("init", "RIFTVEIL v" .. RV_VERSION .. " loaded -- commands: rv_stats  rv_db  rv_perf  rv_save  rv_clear  rv_reset  rv_wipe")
+info("init", "RIFTVEIL v" .. RV_VERSION .. " loaded -- commands: rv_stats  rv_db  rv_save  rv_clear  rv_reset  rv_wipe")
 flush_log()

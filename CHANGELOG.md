@@ -3,6 +3,25 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.2 – Progress saved; condition detection, speed, weapon data back.
+          SAVED: versions/ holds v6.2, v7.9 and v8.1 as files (the git
+          proxy refuses tags); docs/ROADMAP.md lists every feature, what
+          is waiting on a log and what comes next.
+          CONDITIONS: v7.5's physics-based ClassifyState is back as
+          FEATURE.STATE_PHYSICS (on): slow walk is no longer read during a
+          run's acceleration or braking, crouch-move starts at 5 u/s.
+          Unit-tested against Source movement physics every run.
+          SPEED: player-list fields are written only when they change
+          (harness: 3552 -> 1124 writes, -68%), update_player_list runs on
+          a new enemy or once a second instead of every tick, and
+          get_players(true) replaces the per-player enemy/alive checks.
+          rv_perf is back (QueryPerformanceCounter per callback).
+          WEAPONS: every shot logs wpn= hp= ar= aim= pdmg= cf=; the first
+          shot of a session probes the player-list aim override fields
+          and logs them ([aimfield]) -- step 1 of docs/WEAPON_PLAN.md.
+          Backtrack read in ticks or seconds (v6.2 logged bt=64+).
+          PROOF: check_all step 7 runs with FEATURE.STATE_PHYSICS off and
+          still matches v6.2 on all 342 forced ticks, 0 opposite.
   v8.1 – The v7.9 menu and info panel are back.
           v8.0 took v6.2's file whole and brought its old menu and panel
           with it. Now: the v7.9 six-row menu (Resolver, Detection,

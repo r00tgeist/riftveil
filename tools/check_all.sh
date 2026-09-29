@@ -55,18 +55,19 @@ RV_FUZZ=99 RV_TICKS=$SOAK timeout 1800 luajit tools/sandbox_check.lua > "$TMP/so
 line=$(grep "net heap peak" "$TMP/soak.txt" | sed 's/^ *//')
 grep -q "^PASS" "$TMP/soak.txt" && pass "$line" || { fail "soak"; grep FAIL "$TMP/soak.txt" | head -3; }
 
-echo "7. v6.2 parity: v8.0 forces the same side and value as v6.2 on every tick v6.2 runs"
+echo "7. v6.2 parity: with the post-v6.2 decision features off, the same side and value as v6.2 on every tick v6.2 runs"
 # v5.2-v6.2 measured 74% head (100/135 resolver-decided shots, 10/10
 # opponents >= 57%); v6.7+ 49%. v8.0 restores the v6.2 decisions: with no
 # cheat data it must match v6.2's effective player-list state exactly.
-if git show 72b408b:riftveil.lua > "$TMP/v62.lua" 2>/dev/null; then
+if cp versions/riftveil_v6.2.lua "$TMP/v62.lua" 2>/dev/null; then
     RV_TARGET="$TMP/v62.lua" RV_PLIST_OUT="$TMP/p62.txt" lua5.3 tools/sandbox_check.lua >/dev/null 2>&1
-    RV_PLIST_OUT="$TMP/p80.txt" lua5.3 tools/sandbox_check.lua >/dev/null 2>&1
+    # RV_PARITY: the post-v6.2 decision features (FEATURE.STATE_PHYSICS) off
+    RV_PARITY=1 RV_PLIST_OUT="$TMP/p80.txt" lua5.3 tools/sandbox_check.lua >/dev/null 2>&1
     par=$(lua5.3 tools/plist_parity.lua "$TMP/p62.txt" "$TMP/p80.txt")
     echo "$par" | grep -q "OPPOSITE=0 .*onlyA=0" && echo "$par" | grep -q "mean |dmag| 0.0" \
         && pass "$par" || fail "parity: $par"
 else
-    echo "  skip  v6.2 not in git history"
+    echo "  skip  versions/riftveil_v6.2.lua missing"
 fi
 
 echo "7b. Cheat revealer detectors (LuaJIT, real FFI packets)"

@@ -36,7 +36,10 @@ header while the menu is open. The info panel's INFO row shows the current
 threat's cheat. Suppress and asymmetric angles are fixed on and jitter
 prediction off, as v6.2 ran in the logs.
 
-Console: `rv_stats`, `rv_db`, `rv_save`, `rv_clear`, `rv_reset`, `rv_wipe`.
+Console: `rv_stats`, `rv_db`, `rv_perf`, `rv_save`, `rv_clear`, `rv_reset`, `rv_wipe`.
+
+Status of every feature, what's waiting on a match log, and what comes
+next: `docs/ROADMAP.md`. Earlier versions are kept in `versions/`.
 
 ## Cheat-based resolving
 
@@ -68,8 +71,8 @@ from the game folder. Or read them yourself:
 lua5.3 tools/log_report.lua riftveil_debug_prev.txt riftveil_debug.txt
 ```
 
-Head rate per method, movement state (`st=`), enemy cheat (`cht=`) and
-player, with 95% intervals.
+Head rate per method, movement state (`st=`), weapon (`wpn=`, and weapon
+by aimed hitgroup), enemy cheat (`cht=`) and player, with 95% intervals.
 
 ## Development
 
