@@ -294,6 +294,22 @@ local mock = {
 }
 mock.require = function() return mock.ffi end
 
+-- RV_COUNT_API: count every game API call during the benchmark (per tick
+-- and per paint frame), to compare versions by how much they ask the game.
+local API_COUNT = os.getenv("RV_COUNT_API") and {} or nil
+local API_PHASE = "load"
+if API_COUNT then
+    for _, ns in ipairs({"client", "entity", "ui", "renderer", "globals", "plist"}) do
+        local mt = getmetatable(mock[ns])
+        local idx = mt.__index
+        mt.__index = function(tbl, k)
+            local key = API_PHASE .. "\t" .. ns .. "." .. tostring(k)
+            API_COUNT[key] = (API_COUNT[key] or 0) + 1
+            return idx(tbl, k)
+        end
+    end
+end
+
 local declared = {}
 for k in pairs(mock) do declared[k] = true end
 
@@ -653,9 +669,12 @@ if os.getenv("RV_BENCH") then
         end
         W.threat = W.live[1 + step % N]
         local t0 = os.clock()
+        API_PHASE = "tick"
         fire("net_update_end")
         local t1 = os.clock()
+        API_PHASE = "frame"
         for _ = 1, 4 do fire("paint") end                        -- ~256 fps at 64 tick
+        API_PHASE = "other"
         local t2 = os.clock()
         t_net, t_paint = t_net + (t1 - t0), t_paint + (t2 - t1)
         if step % 8 == 0 then
@@ -845,6 +864,8 @@ fire("console_input", "rv_stats")
 fire("console_input", "rv_db")
 fire("console_input", "rv_save")
 fire("console_input", "rv_engine")
+fire("console_input", "rv_perf")
+fire("console_input", "rv_perf")
 fire("round_start")
 fire("game_end")
 fire("shutdown")
@@ -883,6 +904,20 @@ if #cb_errors > 0 then
 end
 
 local err_lines = ERR_LINES
+if BENCH and API_COUNT then
+    local per = {tick = BENCH.ticks, frame = BENCH.ticks * 4}
+    local sums, rows = {tick = 0, frame = 0}, {}
+    for key, n in pairs(API_COUNT) do
+        local phase, name = key:match("^(%w+)\t(.+)$")
+        if per[phase] then
+            sums[phase] = sums[phase] + n
+            rows[#rows + 1] = {phase, name, n / per[phase]}
+        end
+    end
+    table.sort(rows, function(a, b) return a[3] > b[3] end)
+    print(string.format("API calls: %.1f per tick, %.1f per paint frame", sums.tick / per.tick, sums.frame / per.frame))
+    for i = 1, math.min(14, #rows) do print(string.format("  %-5s %-28s %6.2f", rows[i][1], rows[i][2], rows[i][3])) end
+end
 if BENCH then
     print(string.format("Bench: %d enemies, %d ticks: net_update %.1f us/tick, paint %.1f us/frame, total at 4 frames/tick %.1f us/tick",
         BENCH.n, BENCH.ticks, BENCH.net, BENCH.paint, BENCH.net + 4 * BENCH.paint))

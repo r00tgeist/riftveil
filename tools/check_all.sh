@@ -63,7 +63,7 @@ luajit tools/engine_sim.lua > "$TMP/sim.txt" 2>&1 && pass "$(grep 'average gain'
     || { fail "engine sim"; tail -4 "$TMP/sim.txt"; }
 
 echo "8. Log analyzer smoke test"
-printf '%s\n' '[00:00:00.000][INF][init] RIFTVEIL v7.5 loaded' \
+printf '%s\n' '[00:00:00.000][INF][init] RIFTVEIL v7.6 loaded' \
     '[00:00:01.000][INF][hit] player=a b group=head dmg=100 meth=suppress val=-29 bt=0 st=running eng=pose:inv p=0.61' \
     '[00:00:02.000][WRN][miss] player=a b reason=? meth=hit_mem val=31 bt=0 hc=80% eng=hitmem:inv* p=0.55' > "$TMP/log.txt"
 lua5.3 tools/log_report.lua "$TMP/log.txt" > "$TMP/rep.txt" 2>&1 && grep -q "Brier" "$TMP/rep.txt" \

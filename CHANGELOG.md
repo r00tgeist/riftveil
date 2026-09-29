@@ -3,6 +3,21 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v7.6 – FPS hotfix + in-game profiler. Reported: 100-200 fps lost.
+          GUARDS: every callback now runs inside a pcall wrapper that logs
+          an error once (then every 1000th), so an error can no longer
+          repeat into the console every frame -- paint had no guard at
+          all, and Update logged every failing tick without a limit.
+          PER FRAME: threat read once per tick instead of every frame;
+          panel position re-read only while the menu is open (or every
+          2 s); drag input (mouse, key) only read with the menu open; the
+          panel text rebuild throttled from every tick to ~16 Hz. API
+          calls per paint frame 38.4 -> 34.5 (mock count).
+          DISK: log file cap 1.5 MB -> 512 KB, bounding each synchronous
+          rewrite of the log.
+          PROFILER: rv_perf (run it, play ~10 s, run it again) prints
+          calls/s, average and max microseconds and errors per callback,
+          timed with QueryPerformanceCounter through the FFI.
   v7.5 – Enemy state detection audited against the AA builders
           (docs/STATE_AUDIT.md). Builders pick slow walk by key; we read
           it from a 5-100 u/s speed band, which also caught every runner

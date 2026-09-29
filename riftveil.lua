@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v7.5  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v7.6  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · config recognition · vulnerability windows
 --  Adaptive decision engine · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
@@ -22,7 +22,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "7.5"
+local RV_VERSION = "7.6"
 
 local ffi = require "ffi"
 
@@ -45,7 +45,9 @@ local LOG_PREV_FILE = "riftveil_debug_prev.txt"
 -- the most recent history is always in those two files and every write is
 -- bounded by the cap instead of by how long you've been playing.
 local LOG_FLUSH_LINES = 2048
-local LOG_ROLL_BYTES  = 1500000
+-- 512 KB: every flush rewrites the whole file (writefile can't append), so
+-- this bounds the size of each synchronous disk write.
+local LOG_ROLL_BYTES  = 512000
 local log_buf   = {}
 local log_total = 0
 local log_disk  = readfile(LOG_FILE) or ""
@@ -356,12 +358,14 @@ SyncMenu()
 -- rv_stats reads ENG; both are defined further down, after what they use.
 local FlushDB
 local ENG
+local PERF   -- see PERFORMANCE PROFILER; rv_perf reads it
 
 -- ══════════════════════════════════════════════════════════════════
 --  CONSOLE COMMANDS  (console_input — confirmed cheat event)
 --    rv_stats   match stats per player
 --    rv_db      permanent DB contents
 --    rv_engine  decision engine: audit score, per-player arm beliefs
+--    rv_perf    profile: first call starts, second prints time per callback
 --    rv_save    save this match's profiles to the DB now
 --    rv_clear   wipe log file
 --    rv_reset   hard reset match + DB entries for CURRENT enemies only
@@ -471,6 +475,19 @@ client.set_event_callback("console_input", function(text)
         end
         local s = table.concat(out, "\n")
         client.log(s); log_write("CMD", "engine", s)
+
+    elseif cmd == "rv_perf" then
+        -- First call starts measuring, the second prints the report.
+        if not PERF.on then
+            PERF.Reset()
+            PERF.on = true
+            client.log(PERF.qpc and "[RIFTVEIL] profiling -- play ~10 s, then run rv_perf again"
+                       or "[RIFTVEIL] profiling errors only (no high-resolution timer) -- run rv_perf again")
+        else
+            PERF.on = false
+            local s = PERF.Report()
+            client.log(s); log_write("CMD", "perf", s)
+        end
 
     elseif cmd == "rv_save" then
         -- Saves this match's profiles now instead of waiting for match end.
@@ -3760,8 +3777,13 @@ end
 local drag = {held = false, grabbed = false, mx = 0, my = 0}
 
 -- Called once per paint with the header's current screen rect.
-local function UpdateDrag(px, py, pw, ph)
-    local menu_open = ui.is_menu_open()
+local function UpdateDrag(px, py, pw, ph, menu_open)
+    if not menu_open then
+        -- No mouse or key reads while the menu is closed: a drag can't
+        -- start then, and this ran on every frame.
+        drag.held, drag.grabbed = false, false
+        return false
+    end
     local mx, my    = ui.mouse_position()
     local held      = menu_open and client.key_state(0x01) == true
     if held and not drag.held then
@@ -3971,15 +3993,29 @@ end
 
 local ANIM = {h = nil, bar = 0}
 
+local PP = {x = nil, y = nil, at = -1}
 local function DrawPanel(threat)
     local OV = OVERLAY
-    if OV.ver ~= STATE_VER or OV.threat ~= threat or OV.acc ~= ACCENT_VER then
+    local now = globals.realtime()
+    -- Rebuild on a new target or accent at once; for resolver-state changes
+    -- (every tick) at most ~16 times a second. The text measurement in a
+    -- rebuild is the costliest part of the panel, and 16 Hz is faster than
+    -- anyone reads it.
+    if OV.threat ~= threat or OV.acc ~= ACCENT_VER
+       or (OV.ver ~= STATE_VER and now - (OV.built_at or -1) >= 0.06) then
         BuildOverlay(OV, threat)
+        OV.built_at = now
     end
 
-    local px, py = PanelPos()
-    px, py = math.floor(px), math.floor(py)
-    local menu_open = UpdateDrag(px, py, PANEL_W, PANEL_HEAD_H)
+    -- Panel position: two slider reads and the screen size, re-read only
+    -- while the menu is open (it can be dragged then) or every 2 s.
+    local menu_open = ui.is_menu_open()
+    if menu_open or not PP.x or now - PP.at > 2 then
+        local x, y = PanelPos()
+        PP.x, PP.y, PP.at = math.floor(x), math.floor(y), now
+    end
+    local px, py = PP.x, PP.y
+    UpdateDrag(px, py, PANEL_W, PANEL_HEAD_H, menu_open)
 
     -- Height eases toward its target, so rows slide in and out instead of
     -- the box snapping between sizes when a target appears.
@@ -4131,7 +4167,8 @@ return function()
         ui.set(ui_title, TitleText())
     end
     if not ui.get(ui_on) then return end
-    if IND.panel then DrawPanel(client.current_threat()) end
+    -- Threat as read once per tick in Update, not queried every frame.
+    if IND.panel then DrawPanel(CTX.threat) end
     DrawShiftMarkers(IND.shift)
 end
 end)() -- panel scope
@@ -4174,23 +4211,98 @@ local function FullShutdown()
 end
 
 -- ══════════════════════════════════════════════════════════════════
+--  PERFORMANCE PROFILER  (rv_perf)
+--
+--  Every callback runs through Instrument: a pcall, so an error can never
+--  repeat per frame into the console (it is logged once, then every 1000th
+--  time), and -- while rv_perf is measuring -- a high-resolution timer
+--  (QueryPerformanceCounter through LuaJIT's FFI) around the call.
+-- ══════════════════════════════════════════════════════════════════
+PERF = {on = false, since = 0, stat = {}, order = {}}
+PERF.qpc = (function()
+    pcall(ffi.cdef, [[
+        int QueryPerformanceCounter(int64_t *count);
+        int QueryPerformanceFrequency(int64_t *freq);
+    ]])
+    local ok, C = pcall(function()
+        local c = ffi.C
+        local _ = c.QueryPerformanceCounter and c.QueryPerformanceFrequency
+        return c
+    end)
+    if not ok or not C then return nil end
+    local ok_new, buf = pcall(ffi.new, "int64_t[1]")
+    if not ok_new or not buf then return nil end
+    local ok_f = pcall(C.QueryPerformanceFrequency, buf)
+    local freq = ok_f and tonumber(buf[0])
+    if not freq or freq <= 0 then return nil end
+    return function()
+        C.QueryPerformanceCounter(buf)
+        return tonumber(buf[0]) * 1e6 / freq          -- microseconds
+    end
+end)()
+
+function PERF.Reset()
+    for _, st in pairs(PERF.stat) do st.n, st.sum, st.max, st.err = 0, 0, 0, 0 end
+    PERF.since = globals.realtime()
+end
+
+function PERF.Report()
+    local secs = math.max(0.001, globals.realtime() - PERF.since)
+    local out = {string.format("[RIFTVEIL] === PERF === %.1f s measured%s", secs,
+        PERF.qpc and "" or " (no timer: error counts only)")}
+    local total = 0
+    for _, name in ipairs(PERF.order) do
+        local st = PERF.stat[name]
+        local per_s = st.sum / secs
+        total = total + per_s
+        out[#out + 1] = string.format("  %-14s %7.0f calls/s  avg %7.1f us  max %8.1f us  %6.2f ms/s  errors %d",
+            name, st.n / secs, st.n > 0 and st.sum / st.n or 0, st.max, per_s / 1000, st.err)
+    end
+    out[#out + 1] = string.format("  total %.2f ms per second of game time (%.2f%% of one core)",
+        total / 1000, total / 1e4)
+    return table.concat(out, "\n")
+end
+
+local function Instrument(name, fn)
+    local st = {n = 0, sum = 0, max = 0, err = 0}
+    PERF.stat[name] = st
+    PERF.order[#PERF.order + 1] = name
+    local clock = PERF.qpc
+    return function(...)
+        local t0 = PERF.on and clock and clock()
+        local ok, r = pcall(fn, ...)
+        if t0 then
+            local dt = clock() - t0
+            st.n, st.sum = st.n + 1, st.sum + dt
+            if dt > st.max then st.max = dt end
+        end
+        if not ok then
+            st.err = st.err + 1
+            if st.err == 1 or st.err % 1000 == 0 then
+                err(name, "%s (x%d)", tostring(r), st.err)
+                if st.err == 1 then client.log("[RIFTVEIL] error in " .. name .. ": " .. tostring(r)) end
+            end
+            return nil
+        end
+        return r
+    end
+end
+
+-- ══════════════════════════════════════════════════════════════════
 --  EVENT REGISTRATION
 -- ══════════════════════════════════════════════════════════════════
-client.set_event_callback("net_update_end", function()
-    if entity.is_alive(entity.get_local_player()) then
-        local ok, msg = pcall(Update)
-        if not ok then err("update", "top-level crash: %s", tostring(msg)) end
-    end
-end)
-client.set_event_callback("paint",       DrawOverlay)
-client.set_event_callback("aim_fire",    on_aim_fire)
-client.set_event_callback("aim_miss",    on_aim_miss)
-client.set_event_callback("aim_hit",     on_aim_hit)
+client.set_event_callback("net_update_end", Instrument("net_update", function()
+    if entity.is_alive(entity.get_local_player()) then Update() end
+end))
+client.set_event_callback("paint",       Instrument("paint", DrawOverlay))
+client.set_event_callback("aim_fire",    Instrument("aim_fire", on_aim_fire))
+client.set_event_callback("aim_miss",    Instrument("aim_miss", on_aim_miss))
+client.set_event_callback("aim_hit",     Instrument("aim_hit", on_aim_hit))
 client.set_event_callback("round_start", ResetPlist)
 client.set_event_callback("game_end",    EndMatch)
 client.set_event_callback("level_init",  EndMatch)
 client.set_event_callback("shutdown",    FullShutdown)
 client.set_event_callback("disconnect",  FullShutdown)
 
-info("init", "RIFTVEIL v" .. RV_VERSION .. " loaded -- commands: rv_stats  rv_engine  rv_db  rv_save  rv_clear  rv_reset  rv_wipe")
+info("init", "RIFTVEIL v" .. RV_VERSION .. " loaded -- commands: rv_stats  rv_engine  rv_perf  rv_db  rv_save  rv_clear  rv_reset  rv_wipe")
 flush_log()
