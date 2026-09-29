@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v7.6  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v7.7  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · config recognition · vulnerability windows
 --  Adaptive decision engine · backtrack learning · debug logger
 -- ════════════════════════════════════════════════════════════════════
@@ -22,7 +22,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "7.6"
+local RV_VERSION = "7.7"
 
 local ffi = require "ffi"
 
@@ -3287,6 +3287,10 @@ local function Update()
     if next(REC) and (now - LAST_DB_SAVE) >= 60 then
         LAST_DB_SAVE = now
         FlushDB()
+        -- The log too: it only reached disk every 2048 lines or at match
+        -- end, so a match with Debug log off could sit entirely in memory
+        -- -- the first v7.6 log sent in had none of the match in it.
+        flush_log()
     end
 
     -- Tight interp is handled by its ui.set_callback — nothing to do here
@@ -3317,6 +3321,22 @@ local function EngSnap(r)
     local p = ENG.Post(r.E, r.eng_arm, r.state)
     return {arm = r.eng_arm, by = r.eng_by, sign = Sign(r.last_val or 0), signs = signs,
             state = r.state, p = p}
+end
+
+-- Local weapon class by item definition index (CS:GO item ids), for the
+-- per-weapon analysis of shot outcomes (st= and wpn= on every shot line).
+local WEAPON_CLASS = {
+    [9] = "awp", [40] = "scout", [11] = "auto", [38] = "auto",
+    [64] = "r8", [1] = "deagle",
+    [4] = "pistol", [61] = "pistol", [32] = "pistol", [36] = "pistol",
+    [3] = "pistol", [30] = "pistol", [63] = "pistol", [2] = "pistol",
+}
+local function LocalWeaponClass()
+    local me = entity.get_local_player()
+    local w = me and entity.get_player_weapon(me)
+    local idx = w and entity.get_prop(w, "m_iItemDefinitionIndex")
+    if type(idx) ~= "number" then return "?" end
+    return WEAPON_CLASS[bit.band(idx, 0xFFFF)] or "other"
 end
 
 local function BacktrackTicks(v)
@@ -3358,6 +3378,10 @@ local function on_aim_fire(e)
         extrapolated = e.extrapolated == true,
         teleported   = e.teleported == true,
         hc      = e.hit_chance or 0,
+        wpn     = LocalWeaponClass(),
+        -- target health/armor at fire time: was a body shot lethal?
+        thp     = tonumber(entity.get_prop(t, "m_iHealth")) or -1,
+        tarm    = tonumber(entity.get_prop(t, "m_ArmorValue")) or -1,
         in_vuln = r and r.vuln_ttl > 0 or false,
         vuln_t  = r and r.vuln_type or nil,
         cfg     = r and r.config_type or nil,
@@ -3482,11 +3506,11 @@ local function on_aim_hit(e)
         end
     end
 
-    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s%s%s",
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s wpn=%s hp=%d ar=%d%s%s",
         entity.get_player_name(e.target) or "?",
         HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
         Finite(tonumber(e.damage)) and math.floor(e.damage) or 0,
-        d.meth, d.val, d.bt, d.state or "?",
+        d.meth, d.val, d.bt, d.state or "?", d.wpn or "?", d.thp or -1, d.tarm or -1,
         d.in_vuln and (" !" .. d.vuln_t) or "", EngTag(d))
     SHOTS[e.id] = nil
 end
@@ -3560,9 +3584,9 @@ local function on_aim_miss(e)
     local is_resolver = (reason == "?" or reason == "")
                         and not d.extrapolated and not d.teleported
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s%s%s%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s wpn=%s hp=%d ar=%d%s%s%s",
         entity.get_player_name(e.target) or "?",
-        reason, d.meth, d.val, d.bt, d.hc, d.state or "?",
+        reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.wpn or "?", d.thp or -1, d.tarm or -1,
         d.in_vuln and (" !" .. d.vuln_t) or "",
         (d.extrapolated and " [extrap]" or "") .. (d.teleported and " [tele]" or ""),
         EngTag(d))
@@ -4298,7 +4322,9 @@ client.set_event_callback("paint",       Instrument("paint", DrawOverlay))
 client.set_event_callback("aim_fire",    Instrument("aim_fire", on_aim_fire))
 client.set_event_callback("aim_miss",    Instrument("aim_miss", on_aim_miss))
 client.set_event_callback("aim_hit",     Instrument("aim_hit", on_aim_hit))
-client.set_event_callback("round_start", ResetPlist)
+-- Round start is a natural pause: flush the log there so a copied log
+-- always holds every finished round.
+client.set_event_callback("round_start", function() ResetPlist(); flush_log() end)
 client.set_event_callback("game_end",    EndMatch)
 client.set_event_callback("level_init",  EndMatch)
 client.set_event_callback("shutdown",    FullShutdown)

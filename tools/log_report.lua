@@ -46,7 +46,7 @@ local function bucket(t, key)
     return b
 end
 
-local by_meth, by_arm, by_player, by_origin, by_state = {}, {}, {}, {}, {}
+local by_meth, by_arm, by_player, by_origin, by_state, by_wpn = {}, {}, {}, {}, {}, {}
 local calib = {}          -- decile -> {n, heads, psum}
 local versions, engine_lines, resets = {}, {}, 0
 local brier_n, brier_se = 0, 0
@@ -87,6 +87,8 @@ for _, path in ipairs(files) do
             local targets = {bucket(by_meth, meth), bucket(by_player, player)}
             local st = field(line, "st")
             if st then targets[#targets + 1] = bucket(by_state, st) end
+            local wpn = field(line, "wpn")
+            if wpn then targets[#targets + 1] = bucket(by_wpn, wpn) end
             if arm then
                 targets[#targets + 1] = bucket(by_arm, arm)
                 targets[#targets + 1] = bucket(by_origin, by and "engine override" or "chain pick")
@@ -140,6 +142,7 @@ print(("soft resets: %d   engine log lines: %d"):format(resets, #engine_lines))
 
 report("BY METHOD (what was applied)", by_meth)
 report("BY MOVEMENT STATE (v7.5+ logs)", by_state)
+report("BY WEAPON (v7.7+ logs)", by_wpn)
 report("BY ENGINE ARM", by_arm)
 report("ENGINE OVERRIDES vs CHAIN PICKS", by_origin)
 report("BY PLAYER (5+ shots)", by_player, 5)

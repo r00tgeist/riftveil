@@ -3,6 +3,16 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v7.7 – Logs that contain the match; weapon data for per-weapon aim.
+          The first v7.6 log sent in held no shots: the log reached disk
+          only every 2048 lines or at match end, so a match with Debug
+          log off stayed in memory. Now also flushed at every round start
+          and with the 60 s autosave.
+          Every [hit]/[miss] line now records the local weapon class
+          (wpn=awp|scout|auto|r8|deagle|pistol), and the target's health
+          and armor at fire time (hp=, ar=); log_report adds BY WEAPON.
+          Plan for a resolver-driven per-weapon aim gate:
+          docs/WEAPON_PLAN.md (not implemented yet).
   v7.6 – FPS hotfix + in-game profiler. Reported: 100-200 fps lost.
           GUARDS: every callback now runs inside a pcall wrapper that logs
           an error once (then every 1000th), so an error can no longer
