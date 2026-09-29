@@ -56,7 +56,8 @@ local MUST_RUN = os.getenv("RV_MUST_RUN_V7") and {
     "TrackSide", "ChainPick", "ApplyDecision",
 } or {
     "ProcessPlayer", "DetectVuln", "DetectAA", "CanSeeHead", "CfgAngle",
-    "LiveCap", "Extract6Lex", "Update", "DrawOverlay",
+    "LiveCap", "Extract6Lex", "Update", "SyncFlags", "UpdateEspState",
+    "BuildOverlay", "DrawPanel", "FitText", "UpdateDrag", "DrawShiftMarkers", "SetPanelPos",
     "on_aim_fire", "on_aim_hit", "on_aim_miss", "FlushDB",
     "TorsoCluster", "ExtrapolateOrigin", "clear_log",
 }
@@ -208,7 +209,9 @@ local mock = {
         if k == "new_checkbox"     then return function(_, _, name)
             local off = type(name) == "string" and (name:find("Jitter Prediction", 1, true)
                 or name:find("Adaptive Learning", 1, true))
-            return ui_el("checkbox", not off)
+            local el = ui_el("checkbox", not off)
+            el.name = name
+            return el
         end end
         -- Multiselects start with every item selected, so each module runs.
         if k == "new_multiselect"  then return function(_, _, _, items)
@@ -736,7 +739,11 @@ end
 do
     for _, el in ipairs(UI_ELEMS) do
         if el.kind == "multi" and el.items and el.items[1] == "Vulnerability" then
-            el.a = {"Vulnerability", "Hit memory", "Adaptive engine"}
+            el.a = {"Vulnerability", "Hit memory", "Adaptive engine", "Cheat profiles"}
+        end
+        -- the same switch in the v6.2 menu (RV_TARGET parity runs)
+        if el.kind == "checkbox" and type(el.name) == "string" and el.name:find("Desync Angle", 1, true) then
+            el.a = false
         end
     end
     for _, cb in ipairs(UI_CALLBACKS) do pcall(cb) end
@@ -904,8 +911,9 @@ end
 -- skipped for that cheat except on every 4th shot; nothing changes for
 -- an unknown cheat or too little data; gamesense presets only for gs.
 do
-    local CT, STATS, TC = probe("CheatTrusts"), probe("CHEAT_STATS"), probe("TrustedCfg")
-    if CT and STATS and TC then
+    local CT, STATS, TC, DET_T = probe("CheatTrusts"), probe("CHEAT_STATS"), probe("TrustedCfg"), probe("DET")
+    if CT and STATS and TC and DET_T then
+        DET_T.cheat = true   -- Detection > Cheat profiles
         STATS.nl = {suppress = {h = 1, m = 9}, hit_mem = {h = 7, m = 3}}
         STATS.gs = {suppress = {h = 0, m = 3}}
         local cases = {

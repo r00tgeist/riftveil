@@ -23,16 +23,20 @@ same side with the same value as v6.2 (`tools/check_all.sh`, step 7).
 
 ## Menu (LUA › B)
 
-The v6.2 menu, unchanged, so your saved settings from then apply again:
-Enable, the three [SAFE] detectors, the three [EXP] switches (Jitter
-Prediction, Asymmetric Angles, Suppress Shots), Tight Interpolation, ESP
-Indicators, Verbose Logging, the panel accent, and the DB/log buttons.
+| Row | What it does |
+|---|---|
+| **Resolver** | Master switch. Off releases every player back to the built-in resolver. |
+| **Detection** | Vulnerability windows, Hit memory, Desync angle (6lex), Cheat profiles. |
+| **Tight interpolation** | Low-latency interp cvars while the resolver is on; originals restored when off. |
+| **Indicators** | Info panel, ESP flags (`VLN`, `RES`, enemy cheat), SHIFT marker. |
+| **Debug log** | Verbose `riftveil_debug.txt` (the log is always written; this adds per-tick detail). |
 
-ESP flags: `VLN` (vulnerability window open), `RES` (resolved), and the
-enemy's cheat (`GS`, `NL`, `NW`, `OT`, ...). The panel shows the current
-threat's cheat too.
+The accent follows gamesense's own *Menu color*; drag the panel by its
+header while the menu is open. The info panel's INFO row shows the current
+threat's cheat. Suppress and asymmetric angles are fixed on and jitter
+prediction off, as v6.2 ran in the logs.
 
-Console: `rv_stats`, `rv_db`, `rv_clear`, `rv_reset`, `rv_wipe`.
+Console: `rv_stats`, `rv_db`, `rv_save`, `rv_clear`, `rv_reset`, `rv_wipe`.
 
 ## Cheat-based resolving
 
@@ -52,7 +56,8 @@ Console: `rv_stats`, `rv_db`, `rv_clear`, `rv_reset`, `rv_wipe`.
    8+ shots is skipped for that cheat (every 4th shot still tries it, so it
    can recover). Each save logs what was learned: `[cheat] learned nl: ...`.
 
-With no cheat detected, or too few shots, v8.0 is exactly v6.2.
+With no cheat detected, too few shots, or Detection › Cheat profiles off,
+the resolver is exactly v6.2.
 
 ## Sending a match log
 

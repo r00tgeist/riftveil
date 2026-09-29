@@ -3,6 +3,17 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.1 – The v7.9 menu and info panel are back.
+          v8.0 took v6.2's file whole and brought its old menu and panel
+          with it. Now: the v7.9 six-row menu (Resolver, Detection,
+          Tight interpolation, Indicators, Debug log), the v7.9 info panel
+          with drag and eased height, VLN/RES flags, SHIFT marker and the
+          Menu color accent, on top of the v6.2 decision code. Detection's
+          fourth option is now "Cheat profiles" (replaces Adaptive engine,
+          added once to existing selections). Suppress and asymmetric
+          angles fixed on, jitter prediction off, as v6.2 ran in the logs.
+          rv_save is back. v6.2 parity still exact: 342/342 forced ticks,
+          0 opposite, 0 magnitude difference.
   v8.0 – Back to the v6.2 resolver; cheat revealer built in; per-cheat
           resolving.
           WHY: across every uploaded log, resolver-decided shots hit the
@@ -34,8 +45,8 @@ Moved out of `riftveil.lua` in v7.2. Newest first.
           after 8+ shots against a cheat is skipped for it (probed every
           4th shot). Unknown cheat: exactly v6.2.
           REMOVED: the decision engine, its cheat layer, engine_sim,
-          cheat_sim, the v7 menu and panel (the v6.2 menu is back, so
-          saved v6.2 settings apply again).
+          cheat_sim (and, by mistake, the v7 menu and panel -- back in
+          v8.1).
   v7.9 – Enemy-cheat engine layer; vuln windows scored on real evidence.
           LOG: the v7.6 match (51 shots) hit the head on 42% of
           informative shots vs ~63% over all earlier logs. Two opponents
