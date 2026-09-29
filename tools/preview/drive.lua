@@ -60,7 +60,8 @@ local function Clamp(v, a, b) return math.min(math.max(v, a), b) end
 local function isnum(v) return type(v) == "number" and v == v end
 local METH = {HIT_MEM="hit_mem", SIX_LEX="6lex", PERIOD="period", SUPPRESS="suppress",
     DEF_TICK="def_tick", LAGCOMP="lagcomp", PHASE="phase", RING="ring", RING_SPK="ring_spike",
-    YAW_CACHE="yaw_cache", SYM_FLIP="sym_flip", META_HOLD="meta_hold", LEARN="learn"}
+    YAW_CACHE="yaw_cache", SYM_FLIP="sym_flip", META_HOLD="meta_hold", TRACK="track"}
+local ENG = {Label = function(arm) return string.upper((arm:gsub("_", " "):gsub(":as", ""):gsub(":", " "))) end}
 local AA_SHORT = {two="2way", three="3way", five="5way", skitter="skitter", hold="hold", static="static"}
 local CFG = {CONF_ESP = 0.5, CFG_THRESH = 0.6}
 local REC, EIDX_S64, LIVE_ENEMIES = P.REC, P.EIDX, P.LIVE
@@ -90,7 +91,8 @@ local SCEN = {
     {file = "a_resolved.txt", menu = false, spike = false, names = {"zia anger", "goralan"},
      recs = {
         base_rec{conf = 0.72, side = -1, resolved = true, last_meth = "hit_mem", last_val = -29,
-                 preferred_bt = 2, def_tickbase = true, total_hits = 24, total_misses = 11},
+                 preferred_bt = 2, def_tickbase = true, total_hits = 24, total_misses = 11,
+                 eng_by = true, eng_arm = "hitmem:as"},
         base_rec{conf = 0.41, aa_type = "three", total_hits = 7, total_misses = 5}}},
     {file = "b_vuln.txt", menu = false, spike = false,
      names = {"\208\162\208\184\208\188\209\131\209\128 \208\159\209\136\208\181\208\189\208\184\209\135\208\189\209\139\208\185 the second", "7vip"},

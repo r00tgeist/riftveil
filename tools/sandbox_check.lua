@@ -25,17 +25,22 @@
 -- ══════════════════════════════════════════════════════════════════
 
 local SCRIPT_DIR = (arg and arg[0] or ""):match("(.*/)") or "./"
-local TARGET     = SCRIPT_DIR .. "../riftveil.lua"
+local TARGET     = os.getenv("RV_TARGET") or (SCRIPT_DIR .. "../riftveil.lua")
+-- Differential testing (see tools/engine_sim.lua's header): RV_PLIST_OUT
+-- records every plist.set call to a file, RV_NO_ENGINE starts Detection
+-- without "Adaptive engine".
+local PLIST_OUT = os.getenv("RV_PLIST_OUT")
+local NO_ENGINE = os.getenv("RV_NO_ENGINE") ~= nil
+local PLIST_LOG = {}
 
 -- Functions the scenario is designed to reach. If any of these show zero
 -- executed lines, the harness itself is broken and the run fails.
--- The adaptive learner is off since v7.1 (FEATURE.LEARNING); its code is
--- exercised by tools/learner_sim.lua instead.
 local MUST_RUN = {
     "ProcessPlayer", "DetectVuln", "DetectAA", "CanSeeHead", "CfgAngle",
     "LiveCap", "DynamicMaxYaw", "Extract6Lex", "Update", "SyncFlags",
     "BuildOverlay", "DrawPanel", "FitText", "UpdateDrag", "DrawShiftMarkers",
     "on_aim_fire", "on_aim_hit", "on_aim_miss", "FlushDB", "UpdateEspState",
+    "EngineStep", "ENG.Decide", "ENG.Credit", "ENG.Post", "EngSnap",
 }
 
 -- ── Mutable world state the mocks read from ──────────────────────────
@@ -156,7 +161,9 @@ local mock = {
         -- Multiselects start with every item selected, so each module runs.
         if k == "new_multiselect"  then return function(_, _, _, items)
             local sel = {}
-            for i, v in ipairs(items) do sel[i] = v end
+            for _, v in ipairs(items) do
+                if not (NO_ENGINE and v == "Adaptive engine") then sel[#sel + 1] = v end
+            end
             return ui_el("multi", sel)
         end end
         if k == "reference"        then return function() return ui_el("color", 150, 200, 60, 255) end end
@@ -199,7 +206,14 @@ local mock = {
         if k == "band" then return function(a, b) return (a % (2 * b) >= b) and b or 0 end end
         return function() return 0 end
     end}),
-    plist    = setmetatable({}, {__index = function() return function() end end}),
+    plist    = setmetatable({}, {__index = function(_, k)
+        if k == "set" then
+            return function(ent, field, value)
+                PLIST_LOG[#PLIST_LOG + 1] = string.format("%d\t%s\t%s\t%s", W.tick, tostring(ent), field, tostring(value))
+            end
+        end
+        return function() end
+    end}),
     renderer = setmetatable({}, {__index = function(_, k)
         if k == "measure_text"   then return function(_, text) return #tostring(text or "") * 6, 12 end end
         if k == "world_to_screen" then return function() return 500, 500 end end
@@ -346,6 +360,17 @@ fire("shutdown")
 
 debug.sethook()
 
+if os.getenv("RV_LOG_OUT") then
+    local f = assert(io.open(os.getenv("RV_LOG_OUT"), "w"))
+    f:write(LOG_CAPTURE[#LOG_CAPTURE] or "")
+    f:close()
+end
+if PLIST_OUT then
+    local f = assert(io.open(PLIST_OUT, "w"))
+    f:write(table.concat(PLIST_LOG, "\n"), "\n")
+    f:close()
+end
+
 -- ── Report ───────────────────────────────────────────────────────────
 local failed = false
 print("")
@@ -382,12 +407,14 @@ if #err_lines > 0 then
 end
 
 -- Per-function coverage for top-level `local function NAME(` definitions,
--- plus `NAME = function(` forward-declared ones (FlushDB).
+-- `NAME = function(` forward-declared ones (FlushDB) and module functions
+-- (`function ENG.Decide(`).
 local src_lines = {}
 for line in io.lines(TARGET) do src_lines[#src_lines + 1] = line end
 local fn_ranges = {}
 for i, line in ipairs(src_lines) do
     local name = line:match("^local function ([%w_]+)%(") or line:match("^([%w_]+) = function%(")
+                 or line:match("^function ([%w_%.]+)%(")
     if name then
         local j = i + 1
         while j <= #src_lines and not src_lines[j]:match("^end") do j = j + 1 end
