@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v8.5.1  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v8.5.2  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · cheat revealer · per-cheat method trust
 -- ════════════════════════════════════════════════════════════════════
@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.5.1"
+local RV_VERSION = "8.5.2"
 
 local ffi = require "ffi"
 
@@ -1023,6 +1023,7 @@ SyncMenu()
 -- rv_perf reads PERF (see PERFORMANCE PROFILER).
 local FlushDB
 local PERF
+local ResetPlist   -- CLEANUP; Update calls it when the resolver is switched off
 
 
 -- ══════════════════════════════════════════════════════════════════
@@ -3727,8 +3728,17 @@ local function UpdateEspState()
     end
 end
 
+local RELEASED = true   -- the player list holds nothing of ours
 local function Update()
     if not ui.get(ui_on) then
+        -- Switched off: hand every player back to the built-in resolver
+        -- now, not at the next round start (forced yaw and aim overrides
+        -- used to stay on until then).
+        if not RELEASED then
+            ResetPlist(true)
+            RELEASED = true
+            info("release", "resolver off -- every player back to the built-in")
+        end
         if next(ESP_VLN) or next(ESP_RES) then
             for k in pairs(ESP_VLN) do ESP_VLN[k] = nil end
             for k in pairs(ESP_RES) do ESP_RES[k] = nil end
@@ -3738,6 +3748,7 @@ local function Update()
     -- Once per tick, so a config load that skips the change callbacks
     -- still reaches the resolver within one update.
     SyncFlags()
+    RELEASED = false
 
     local cur_lat, avg_lat = GetLat()
     local ctx = {
@@ -4413,16 +4424,25 @@ local function BuildOverlay(OV, threat)
         -- weapon aim policy in effect on this enemy
         local pt = AIM_TAG[rec.aim_pol or "-"]
         if pt then tags[#tags+1] = pt end
+        -- warnings before details: a row that runs out of room drops the tail
+        if rec.def_tickbase    then tags[#tags+1] = "DEF" end
+        if LAST_SPIKE          then tags[#tags+1] = "SPIKE" end
+        if rec.meta_aggressive then tags[#tags+1] = "AGG" end
         if rec.preferred_bt > 0 then tags[#tags+1] = "BT " .. rec.preferred_bt end
         if rec.config_type and rec.config_conf >= CFG.CFG_THRESH then
             tags[#tags+1] = string.upper((rec.config_type:gsub("_", " ")))
         end
-        if rec.def_tickbase    then tags[#tags+1] = "DEF" end
-        if LAST_SPIKE          then tags[#tags+1] = "SPIKE" end
-        if rec.meta_aggressive then tags[#tags+1] = "AGG" end
         if #tags > 0 then
             n = n + 1
-            PanelRow(OV, n, "INFO", table.concat(tags, "  \xc2\xb7  "), "-", C_DIM, nil, nil)
+            -- Tags are in priority order; the ones that don't fit the row are
+            -- dropped whole (eight tags ran past the 200 px panel).
+            local sep, out = "  \xc2\xb7  ", tags[1]
+            for i = 2, #tags do
+                local nxt = out .. sep .. tags[i]
+                if renderer.measure_text("-", nxt) > value_w then break end
+                out = nxt
+            end
+            PanelRow(OV, n, "INFO", out, "-", C_DIM, nil, nil)
         end
 
         -- 2v2: the one other live enemy. LIVE_ENEMIES is cached once per
@@ -4647,8 +4667,15 @@ end)() -- panel scope
 -- ══════════════════════════════════════════════════════════════════
 --  CLEANUP
 -- ══════════════════════════════════════════════════════════════════
-local function ResetPlist()
-    for i = 1, 64 do
+-- all_written: also every entity in the write cache (the switch-off release
+-- hands back everything we ever touched; round resets cover the 64 slots)
+ResetPlist = function(all_written)
+    local ents = {}
+    for i = 1, 64 do ents[i] = true end
+    if all_written then
+        for ent in pairs(PL_CACHE) do ents[ent] = true end
+    end
+    for i in pairs(ents) do
         pcall(function()
             plist.set(i, "Force body yaw", false)
             plist.set(i, "Force body yaw value", 0)

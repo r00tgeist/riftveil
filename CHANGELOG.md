@@ -3,6 +3,23 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.5.2 – Explore / verify pass 2.
+          FIXED: switching Resolver off mid-round left the last forced
+          body yaw and aim overrides on every enemy until the next round
+          start (the README said "off releases every player" -- it didn't,
+          in v6.2 either). The first update after switching off now hands
+          every player back to the built-in, including any entity we ever
+          wrote to. Harness test: fails on 8.5.1, passes now.
+          FIXED: the info panel's INFO row had no width limit -- up to
+          eight tags ran past the 200 px panel. Tags that don't fit are
+          dropped whole, warnings (DEF, SPIKE, AGG) ahead of details.
+          EXPLORED, NOT CHANGED: v7's claim that v6.2's hit memory learns
+          the wrong side after a suppress head hit. In every v5.2-v6.2 log,
+          no hit-memory shot followed a suppress head hit (they followed
+          vuln windows: 12 head / 5 miss, and hit memory: 4 / 0), so the
+          case never arises in the data; v6.2 behaviour stays.
+          Parity note: the switch-off release covers the write cache only
+          on switch-off; round resets stay on the 64 slots, as in v6.2.
   v8.5.1 – Explore / verify pass.
           VERIFIED against docs.gamesense.gs: aim_fire.damage is the
           predicted damage (the aim calibration's input), hitgroup the

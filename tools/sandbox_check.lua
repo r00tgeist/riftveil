@@ -1077,6 +1077,34 @@ do
     end
 end
 
+-- Resolver switched off mid-match: one update later every player must be
+-- back on the built-in (no forced yaw, no aim override) -- not only at the
+-- next round start. (Not in parity runs: v6.2 never released, and parity is
+-- about decisions while the resolver is on.)
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local master
+    for _, el in ipairs(UI_ELEMS) do
+        if el.kind == "checkbox" and type(el.name) == "string" and el.name:find("^Resolver") then master = el end
+    end
+    if master then
+        for ent = 101, 102 do
+            PLIST_STATE[ent .. "\tForce body yaw"] = true
+            PLIST_STATE[ent .. "\tOverride prefer body aim"] = "On"
+        end
+        master.a = false
+        fire("net_update_end")
+        for ent = 101, 102 do
+            if PLIST_STATE[ent .. "\tForce body yaw"] ~= false
+               or PLIST_STATE[ent .. "\tOverride prefer body aim"] ~= "-" then
+                UNIT_FAIL[#UNIT_FAIL + 1] = "resolver off: player " .. ent .. " still forced after an update"
+            end
+        end
+        master.a = true
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "resolver master switch not found"
+    end
+end
+
 for _, cb in ipairs(UI_CALLBACKS) do pcall(cb) end
 -- a player (re)connects into a slot: that slot's cheat data is dropped;
 -- our own connect drops everyone's
