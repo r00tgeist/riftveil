@@ -48,6 +48,7 @@ end
 
 local by_meth, by_arm, by_player, by_origin, by_state, by_wpn, by_cheat, by_pol = {}, {}, {}, {}, {}, {}, {}, {}
 local by_speed = {}
+local by_flag, by_pitch = {}, {}   -- v8.6+: aim_fire flags, enemy eye pitch at fire
 local by_seed, seed_of = {}, {}   -- v8.5.6+: DB-seeded start vs cold start, per player
 local calib = {}          -- decile -> {n, heads, psum}
 local trace_ratio = {head = {}, body = {}}   -- v8.4+: ragebot predicted / traced damage
@@ -91,6 +92,21 @@ for _, path in ipairs(files) do
                 kind = ((reason == "?" or reason == "") and not extra) and "rmiss" or "other"
             end
             local targets = {bucket(by_meth, meth), bucket(by_player, player)}
+            -- fl= (v8.6+): aim_fire flags t/x/i/b/p and our defensive read d
+            local fl = field(line, "fl")
+            if fl then
+                local names = {t = "teleported", x = "extrapolated", i = "interpolated",
+                               b = "accuracy boost", p = "high-priority record", d = "enemy defensive tickbase"}
+                if fl == "-" then targets[#targets + 1] = bucket(by_flag, "(no flag)") end
+                for ch in fl:gmatch("[txibpd]") do targets[#targets + 1] = bucket(by_flag, names[ch]) end
+            end
+            -- pit= (v8.6+): ~89 ordinary AA pitch; defensive AA sets up / zero / random
+            local pit = tonumber(field(line, "pit") or "")
+            if pit and pit > -900 then
+                local band = pit >= 60 and "down (>= 60)" or pit <= -60 and "up (<= -60)"
+                    or math.abs(pit) <= 30 and "zero (-30..30)" or "other"
+                targets[#targets + 1] = bucket(by_pitch, band)
+            end
             if seed_of[player] then targets[#targets + 1] = bucket(by_seed, seed_of[player]) end
             local st = field(line, "st")
             if st then targets[#targets + 1] = bucket(by_state, st) end
@@ -192,6 +208,8 @@ print(("soft resets: %d   engine log lines: %d"):format(resets, #engine_lines))
 
 report("BY METHOD (what was applied)", by_meth)
 report("BY MOVEMENT STATE (v7.5+ logs)", by_state)
+report("BY SHOT FLAGS (v8.6+: aim_fire flags; teleported / extrapolated shots carry no side information)", by_flag)
+report("BY ENEMY PITCH AT FIRE (v8.6+: pitch other than down = defensive AA frame)", by_pitch)
 report("BY PROFILE START (v8.5.6+: confidence seeded from the saved DB vs cold start)", by_seed)
 report("BY ENEMY SPEED (mv=, u/s: 0-5 still, 5-40 micro / stopping, 40-110 slow walk, 200+ running; v8.2+ logs)", by_speed)
 report("BY WEAPON (v7.7+ logs)", by_wpn)

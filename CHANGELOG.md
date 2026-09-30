@@ -3,6 +3,24 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.6   – Explore: the API, the meta, indicators.
+          API (docs.gamesense.gs events/aim_fire): every shot carries
+          teleported ("breaking lag compensation"), extrapolated,
+          interpolated, boosted and high_priority. RIFTVEIL read none of
+          them. Now logged on every shot line as fl= (t x i b p, plus d =
+          our defensive-tickbase read on the target), and a teleported or
+          extrapolated shot no longer feeds the cheat profiles or the aim
+          policy's miss run (no side information in it). The v6.2 core
+          still sees every shot, as it did. Harness test fails on 8.5.6.
+          META: every AA script uploaded has a defensive AA mode (pitch
+          up / zero / random, yaw sideways / spin / n-way during the
+          tickbase shift). The enemy's eye pitch at fire is logged as pit=
+          (-999 = unread) so the next log shows whether misses cluster on
+          defensive frames; the fix waits for that (ROADMAP 5).
+          INDICATORS: ESP flags now show the aim policy on each enemy
+          (BODY / HEAD / HEAD SP / SAFE PT; nothing at ragebot default);
+          the panel shows it only for the threat. Harness-tested.
+          log_report: BY SHOT FLAGS, BY ENEMY PITCH AT FIRE.
   v8.5.6 – Explore / verify pass 6: v6.2 core internals, logging.
           FOUND, NOT CHANGED (v6.2 decisions, data first): the saved hit
           rate divides head hits by head hits + a miss STREAK (reset on

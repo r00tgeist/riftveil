@@ -226,7 +226,7 @@ local mock = {
                     return p and p.flags or 1
                 end
                 if prop == "m_bIsScoped"        then return p and p.scoped or 0 end
-                if prop == "m_angEyeAngles"     then return 0, p and p.eye or 0, 0 end
+                if prop == "m_angEyeAngles"     then return p and p.pitch or 89, p and p.eye or 0, 0 end
                 if prop == "m_flPoseParameter"  then CUR = ent; return p and p.pose01 or 0.5 end
                 if prop == "m_totalHitsOnServer" then return W.srv_hits end
                 if prop == "m_vecMins"          then return -16, -16, 0 end
@@ -1155,8 +1155,9 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     if STATS and rec then
         local c0, st0 = rec.cheat, rec.aim_miss_streak
         rec.cheat, rec.aim_miss_streak, STATS.pl = "pl", 0, nil
-        local function shot(id, hg, outcome)
-            fire("aim_fire", {id = id, target = 101, backtrack = 0, hit_chance = 80, hitgroup = hg, damage = 30})
+        local function shot(id, hg, outcome, tele)
+            fire("aim_fire", {id = id, target = 101, backtrack = 0, hit_chance = 80, hitgroup = hg, damage = 30,
+                              teleported = tele})
             if outcome == "miss" then fire("aim_miss", {id = id, target = 101, reason = "?"})
             else fire("aim_hit", {id = id, target = 101, hitgroup = outcome, damage = 30}) end
         end
@@ -1172,10 +1173,34 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         if rec.aim_miss_streak ~= 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "aim_miss_streak: a body hit didn't end the run of misses" end
         shot(90003, 1, "miss")
         shot(90004, 1, 1)
+        -- a teleporting target (aim_fire.teleported): no side information
+        shot(90005, 1, "miss", true)
+        if rec.aim_miss_streak ~= 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "aim_miss_streak: a miss on a teleporting target counted" end
         if credited() ~= 2 then UNIT_FAIL[#UNIT_FAIL + 1] = string.format("cheat credit: %d head-aimed shots counted, expected 2", credited()) end
         rec.cheat, rec.aim_miss_streak, STATS.pl = c0, st0, nil
     else
         UNIT_FAIL[#UNIT_FAIL + 1] = "cheat credit test: CHEAT_STATS / REC / EIDX_S64[101] not reachable"
+    end
+end
+
+-- ESP: the aim policy in force shows on that enemy (Indicators > ESP flags)
+if not os.getenv("RV_TARGET") then
+    local REC_T, EI, UES, IND_T = probe("REC"), probe("EIDX_S64"), probe("UpdateEspState"), probe("IND")
+    local rec = REC_T and EI and EI[101] and REC_T[EI[101]]
+    if rec and UES and IND_T then
+        local pol0, esp0 = rec.aim_pol, IND_T.esp
+        rec.aim_pol, IND_T.esp = "headsp", true
+        UES()
+        local seen
+        for _, cb in ipairs(ESP_FLAGS) do
+            local ok, on, text = pcall(cb, 101)
+            if ok and on and text == "HEAD SP" then seen = true end
+        end
+        if not seen then UNIT_FAIL[#UNIT_FAIL + 1] = "ESP: no HEAD SP flag on an enemy under that aim policy" end
+        rec.aim_pol, IND_T.esp = pol0, esp0
+        UES()
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "ESP aim flag test: REC / UpdateEspState / IND not reachable"
     end
 end
 

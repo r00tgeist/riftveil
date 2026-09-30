@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.5.6"
+local RV_VERSION = "8.6"
 
 local ffi = require "ffi"
 
@@ -3765,13 +3765,15 @@ end)() -- aim policy scope
 
 -- Read by the info panel and ESP flags (paint runs every frame; these only
 -- change once per net update or on a shot event).
-local ESP_VLN, ESP_RES = {}, {}
+local ESP_VLN, ESP_RES, ESP_AIM = {}, {}, {}   -- ESP_AIM: aim policy tag
 local CTX = {threat = nil}
 local STATE_VER = 0
 
+local AIM_ESP = {body = "BODY", head = "HEAD", headsp = "HEAD SP", sp = "SAFE PT"}
 local function UpdateEspState()
     for k in pairs(ESP_VLN) do ESP_VLN[k] = nil end
     for k in pairs(ESP_RES) do ESP_RES[k] = nil end
+    for k in pairs(ESP_AIM) do ESP_AIM[k] = nil end
     if not IND.esp then return end
     for i = 1, #LIVE_ENEMIES do
         local ent = LIVE_ENEMIES[i]
@@ -3783,6 +3785,9 @@ local function UpdateEspState()
             -- RES: confident correction overriding the built-in (not suppress, not vuln)
             ESP_RES[ent] = rec.resolved and rec.conf >= CFG.CONF_ESP
                 and rec.vuln_ttl == 0 and rec.last_meth ~= METH.SUPPRESS
+            -- aim policy per enemy (the panel shows only the threat's);
+            -- nothing while it's the ragebot default
+            ESP_AIM[ent] = DET.aim and AIM_ESP[rec.aim_pol] or nil
         end
     end
 end
@@ -3895,6 +3900,7 @@ local function on_aim_fire(e)
     local s64 = GetS64(t); local r = s64 and REC[s64]
     local praw = entity.get_prop(t, "m_flPoseParameter", 11)
     local me   = entity.get_local_player()
+    local pitch = entity.get_prop(t, "m_angEyeAngles")
     SHOTS[e.id] = {
         s64     = s64,
         fy      = praw and (praw * CFG.POSE_SCALE - 60) or 0,
@@ -3931,6 +3937,21 @@ local function on_aim_fire(e)
         -- reported as a client-side miss (see on_aim_miss).
         fire_time  = globals.realtime(),
         srv_hits = me and (entity.get_prop(me, "m_totalHitsOnServer") or 0) or 0,
+        -- aim_fire's own flags (docs.gamesense.gs events/aim_fire):
+        -- t teleported (breaking lag compensation), x extrapolated,
+        -- i interpolated, b accuracy boost, p high-priority record; plus
+        -- d = our defensive-tickbase read on the target at fire time
+        fl      = (e.teleported and "t" or "") .. (e.extrapolated and "x" or "")
+                  .. (e.interpolated and "i" or "") .. (e.boosted and "b" or "")
+                  .. (e.high_priority and "p" or "") .. (r and r.def_tickbase and "d" or ""),
+        -- the target's networked eye pitch: ~89 is ordinary AA pitch down;
+        -- defensive AA (every AA script uploaded has it) sets up / zero /
+        -- random during the defensive window
+        pit     = isnum(pitch) and math.floor(pitch + 0.5) or -999,   -- -999: unread
+        -- a shot at a teleporting or extrapolated record says nothing about
+        -- the desync side: kept out of the cheat profiles and the aim
+        -- policy's miss run (the v6.2 core still sees it, as it did)
+        nolearn = (e.teleported or e.extrapolated) and true or false,
     }
     -- Credit a vuln_profile "seen" (trial) here, once per actual shot fired
     -- during an open vuln window -- not once per detection (see the
@@ -3992,7 +4013,7 @@ local function on_aim_hit(e)
         -- (as up to 8.5.3 did) only ever pushed methods toward "skip".
         -- In the v7.7+ logs body-aimed shots were 5 of 15 credited misses
         -- and 1 of 7 credited hits, while landing 11 of 16.
-        if is_head and d.aim_hg == 1 then CheatCredit(d.cheat, d.meth, true) end
+        if is_head and d.aim_hg == 1 and not d.nolearn then CheatCredit(d.cheat, d.meth, true) end
         -- Any hit ends a run of resolver misses ("two in a row")
         rec.aim_miss_streak = 0
         if d.side ~= 0 and is_head then
@@ -4041,13 +4062,14 @@ local function on_aim_hit(e)
         end
     end
 
-    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f%s%s",
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d%s%s",
         entity.get_player_name(e.target) or "?",
         HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
         isnum(e.damage) and math.floor(e.damage) or 0,
         d.meth, d.val, d.bt, d.state or "?", d.sspd or -1, d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
+        (d.fl or "") ~= "" and d.fl or "-", d.pit or -999,
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
     SHOTS[e.id] = nil
@@ -4111,17 +4133,18 @@ local function on_aim_miss(e)
 
     local is_resolver = reason == "?" or reason == "" or reason == "prediction error"
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f%s%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d%s%s",
         entity.get_player_name(e.target) or "?",
         reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.sspd or -1, d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
+        (d.fl or "") ~= "" and d.fl or "-", d.pit or -999,
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
 
     if is_resolver then
-        if d.aim_hg == 1 then CheatCredit(d.cheat, d.meth, false) end
-        do
+        if d.aim_hg == 1 and not d.nolearn then CheatCredit(d.cheat, d.meth, false) end
+        if not d.nolearn then
             local rr = d.s64 and REC[d.s64]
             if rr then rr.aim_miss_streak = (rr.aim_miss_streak or 0) + 1 end
         end
@@ -4241,6 +4264,12 @@ end
 -- per tick.
 client.register_esp_flag("VLN", 232, 86, 86, function(ent) return ESP_VLN[ent] == true end)
 client.register_esp_flag("RES", 150, 200, 70, function(ent) return ESP_RES[ent] == true end)
+-- Weapon aim policy in force on this enemy: BODY / HEAD / HEAD SP / SAFE PT
+client.register_esp_flag("", 235, 190, 90, function(ent)
+    local t = ESP_AIM[ent]
+    if not t then return false end
+    return true, t
+end)
 -- Enemy cheat (CHEAT REVEALER): GS / NL / NW ... once detected
 client.register_esp_flag("", 220, 220, 220, function(ent)
     local c = IND.esp and ui.get(ui_on) and CHEAT_OF[ent]

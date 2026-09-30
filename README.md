@@ -28,7 +28,7 @@ same side with the same value as v6.2 (`tools/check_all.sh`, step 7).
 | **Resolver** | Master switch. Off releases every player back to the built-in resolver. |
 | **Detection** | Vulnerability windows, Hit memory, Desync angle (6lex), Cheat profiles, Weapon aim. |
 | **Tight interpolation** | Low-latency interp cvars while the resolver is on; originals restored when off. |
-| **Indicators** | Info panel, ESP flags (`VLN`, `RES`, enemy cheat), SHIFT marker. |
+| **Indicators** | Info panel, ESP flags (`VLN`, `RES`, aim policy `BODY` / `HEAD` / `HEAD SP` / `SAFE PT`, enemy cheat), SHIFT marker. |
 | **Debug log** | Verbose `riftveil_debug.txt` (the log is always written; this adds per-tick detail). |
 
 The accent follows gamesense's own *Menu color*; drag the panel by its
@@ -90,8 +90,10 @@ from the game folder. Or read them yourself:
 lua5.3 tools/log_report.lua riftveil_debug_prev.txt riftveil_debug.txt
 ```
 
-Head rate per method, movement state (`st=`), weapon (`wpn=`, and weapon
-by aimed hitgroup), enemy cheat (`cht=`) and player, with 95% intervals.
+Head rate per method, movement state (`st=`), enemy speed (`mv=`), weapon
+(`wpn=`, and weapon by aimed hitgroup), aim policy, shot flags (`fl=`:
+teleported, extrapolated, ...), enemy pitch at fire (`pit=`, defensive AA),
+DB-seeded vs cold start, enemy cheat (`cht=`) and player, with 95% intervals.
 
 ## Development
 
