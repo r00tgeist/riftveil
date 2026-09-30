@@ -5,12 +5,12 @@ and what comes next. Older versions are kept in `versions/` so none of the
 work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 (the decision engine), `riftveil_v8.1.lua`.
 
-## In the script (v8.4)
+## In the script (v8.5)
 
 | Area | Feature | Changes shots? |
 |---|---|---|
 | Core | v6.2 decision chain: vulnerability windows, 6lex, hit memory, suppress, meta hold | yes, the core |
-| Core | Condition detection by movement physics (slow walk vs peek, crouch-move at 5 u/s) | yes, `FEATURE.STATE_PHYSICS` |
+| Core | Condition tracker by movement physics: slow walk vs peek, weapon/scope-aware thresholds, fake duck, unreadable flags/velocity (91.7% vs a 93.1% ceiling in tools/state_test.lua) | yes, `FEATURE.STATE_PHYSICS` |
 | Cheats | Built-in cheat revealer (voice packets, 10 cheats), ESP flag, panel | no |
 | Cheats | Gamesense Lua presets only for gamesense users | yes, with Cheat profiles on |
 | Cheats | Per-(cheat, method) learned trust, saved across sessions | yes, once a method fails 8+ shots on a cheat |

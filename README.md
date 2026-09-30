@@ -106,5 +106,6 @@ QUICK=1 bash tools/check_all.sh  # 2 fuzz seeds, short soak
 | `tools/sandbox_check.lua` | Loads the script against a mock gamesense and plays a scripted match: global leaks, undeclared reads, swallowed errors, required code paths, unit checks (cheat trust, preset gating, DB cap). `RV_FUZZ=<seed>` adds a hostile randomized phase with plist range checks and a memory soak. `RV_PLIST_OUT` and `RV_TARGET` enable differential tests. |
 | `tools/plist_parity.lua` | Compares two player-list write logs by effect: same side, opposite side, magnitude difference. |
 | `tools/cheat_detect_test.lua` | Feeds real FFI voice packets to the detectors: every cheat's signature is detected, ordinary voice is never labelled, short runs label nobody. |
+| `tools/state_test.lua` | Plays Source movement physics (peeks, counter-strafes, slow walks, scoped snipers, crouch, jumps, fake duck) at fakelag 1-14 through the real state tracker; scores it per tick against the AA builder's condition and against what fakelag leaves possible. |
 | `tools/log_report.lua` | Real-match analysis (above). |
 | `tools/aim_model.lua` | Per-weapon kill-probability model (docs/WEAPON_PLAN.md). |

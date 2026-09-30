@@ -201,7 +201,8 @@ local mock = {
         end end
         if k == "get_origin"       then return function(p)
             local s = W.players[p]
-            return s and (W.tick * 0.5 + (s.jump or 0)) or 0, 0, 0
+            -- moves with the player's velocity (x only), plus any teleport
+            return s and (W.tick * (s.vx or 0) / 64 + (s.jump or 0)) or 0, 0, 0
         end end
         -- x encodes (entity, hitbox) so the trace_bullet mock knows what it hit
         if k == "hitbox_position"  then return function(ent, hb) return (ent or 0) * 1000 + (tonumber(hb) or 0), 0, 64 end end

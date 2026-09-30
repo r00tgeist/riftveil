@@ -74,6 +74,10 @@ echo "7b. Cheat revealer detectors (LuaJIT, real FFI packets)"
 luajit tools/cheat_detect_test.lua > "$TMP/cd.txt" 2>&1 && pass "$(grep -c PASS "$TMP/cd.txt") checks: every signature detected, real voice never labelled" \
     || { fail "cheat detectors"; grep FAIL "$TMP/cd.txt" | head -4; }
 
+echo "7c. State tracker: Source movement physics x fakelag 1/3/8/14 (LuaJIT)"
+luajit tools/state_test.lua > "$TMP/st.txt" 2>&1 && pass "$(grep '^TOTAL' "$TMP/st.txt" | awk '{print "v6.2 mode " $2 ", physics mode " $3 ", ceiling " $4}')" \
+    || { fail "state tracker"; grep -E "FAIL" "$TMP/st.txt" | head -4; }
+
 echo "8. Log analyzer smoke test"
 printf '%s\n' '[00:00:00.000][INF][init] RIFTVEIL v8.0 loaded' \
     '[00:00:01.000][INF][hit] player=a b group=head dmg=100 meth=suppress val=-29 bt=0 st=running wpn=awp pol=body tr=448/112 hp=100 ar=100 aim=head pdmg=448 cf=0.90 cht=nl' \

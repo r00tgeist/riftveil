@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v8.4  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v8.5  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · cheat revealer · per-cheat method trust
 -- ════════════════════════════════════════════════════════════════════
@@ -17,6 +17,9 @@
 --  v8.4 – Weapon aim on traced damage: body only when a body shot kills
 --          from here; when only the head kills (wallbang, cover) body
 --          preference is switched off. Self-calibrating. docs/WEAPON_PLAN.md
+--  v8.5 – State tracker debugged against movement physics: weapon/scope
+--          aware thresholds, fake duck, unreadable flags / velocity.
+--          tools/state_test.lua; docs/STATE_AUDIT.md
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
 --    v6.2 – Senior resolver-review pass #3, focused on resolver-domain
@@ -696,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.4"
+local RV_VERSION = "8.5"
 
 local ffi = require "ffi"
 
@@ -1511,37 +1514,163 @@ end
 -- ══════════════════════════════════════════════════════════════════
 -- (MaxDesync removed — was used to compute max_d which was dead after pick chain refactor)
 
--- FEATURE.STATE_PHYSICS (v7.5, audited against the AA builders in
--- docs/STATE_AUDIT.md): the builders pick slow walk by KEY, v6.2 inferred it
--- from a 5-100 u/s band -- which also caught every acceleration into and
--- braking out of a run. Source physics (sv_accelerate 5.5, friction 5.2):
--- 38% of a rifle peek-and-stop read as slow walk. With it: inside the band,
--- gaining > 10 u/s per tick is a run (full-speed acceleration is 18-21),
--- losing > 2 keeps the state being braked from; otherwise slow walk. Crouch-
--- move starts at 5 u/s (builders: 2 / 3.63 / 10) instead of 20.
--- dv = speed change per simtime tick (nil on the first sample).
-local function ClassifyState(player, as, spd, dv, prev_state)
-    local flags = entity.get_prop(player, "m_fFlags") or 0
-    local og    = bit.band(flags, 1) ~= 0
-    local duck  = as and (as.duck_amount or 0) > 0.5
+-- ══════════════════════════════════════════════════════════════════
+--  STATE TRACKER  — which movement condition an enemy is in
+--
+--  The AA builders pick their side and magnitude per condition (standing,
+--  moving, slow walk, crouch, crouch-move, air, air-crouch), so this picks
+--  which CfgAngle table, which per-state hit memory and which seed applies.
+--  Everything here is measured by tools/state_test.lua: Source movement
+--  physics (sv_accelerate 5.5, friction 5.2, stopspeed 80, jump 302 u/s,
+--  gravity 800) played through fakelag 1-14, per scenario, against the
+--  condition an AA builder would be in.
+--
+--  With FEATURE.STATE_PHYSICS off it is v6.2's speed-band classifier,
+--  unchanged. On:
+--   * Slow walk vs a run's acceleration or braking: inside the band,
+--     gaining speed faster than a slow walk can is a run; losing speed
+--     keeps the state being braked from (v7.5).
+--   * Thresholds follow the enemy's weapon and scope: a scoped AWP tops
+--     out at 100 u/s and accelerates at 8.6 u/s per tick, so the fixed
+--     100 u/s / 10 u/s-per-tick cuts read every scoped AWP walk as slow
+--     walk. A slow walk holds 34% of max speed, so anything above 40% of
+--     the weapon's max is a run (100 u/s with a knife, as before); the
+--     acceleration cuts scale with max speed / 250. This also catches a
+--     heavy-fakelag enemy who started running mid-gap: the speed change
+--     averaged over 14 ticks under-reads, the speed itself doesn't.
+--   * Fake duck (heavy fakelag, duck amount mid-way on 3 of the last 4
+--     records, on the ground, barely moving) holds CROUCH, as the builders
+--     map it, instead of flickering crouch / standing every record.
+--   * Crouch-move from 5 u/s (builders: 2 / 3.63 / 10), not 20.
+--   * No speed change yet (first record after a gap): keep a running or
+--     slow-walk state instead of defaulting to slow walk.
+--   * Ground flag unreadable: the animstate's on_ground decides, instead
+--     of every player reading as airborne.
+--   * Velocity that never reads (0 on 2 records in a row while the origin
+--     moves, never non-zero): speed from the origin delta between records.
+-- ══════════════════════════════════════════════════════════════════
+-- Max player speed per item definition index: {normal, scoped} (CS:GO
+-- weapon data; knives, grenades and anything unlisted run at 250).
+local WEAPON_MAXSPEED = {
+    [1] = {230}, [2] = {240}, [3] = {240}, [4] = {240}, [7] = {215}, [8] = {220, 150},
+    [9] = {200, 100}, [10] = {220}, [11] = {215, 120}, [13] = {215}, [14] = {195},
+    [16] = {225}, [17] = {240}, [19] = {230}, [23] = {235}, [24] = {230}, [25] = {215},
+    [26] = {240}, [27] = {225}, [28] = {150}, [29] = {210}, [30] = {240}, [31] = {220},
+    [32] = {240}, [33] = {220}, [34] = {240}, [35] = {220}, [36] = {240}, [38] = {215, 120},
+    [39] = {210, 150}, [40] = {230, 230}, [60] = {225}, [61] = {240}, [63] = {240}, [64] = {220},
+}
+
+local function EnemyMaxSpeed(player)
+    local w = entity.get_player_weapon(player)
+    local idx = w and entity.get_prop(w, "m_iItemDefinitionIndex")
+    if type(idx) ~= "number" then return 250 end
+    local m = WEAPON_MAXSPEED[bit.band(idx, 0xFFFF)]
+    if not m then return 250 end
+    local scoped = entity.get_prop(player, "m_bIsScoped")
+    if m[2] and (scoped == 1 or scoped == true) then return m[2] end
+    return m[1]
+end
+
+-- dv = speed change per simtime tick (nil when there is no previous
+-- record to compare with); maxspd = the enemy's weapon max speed (250 when
+-- unknown); fakeduck = TrackState's fake-duck read.
+local function ClassifyState(player, as, spd, dv, prev_state, maxspd, fakeduck)
+    local flags = entity.get_prop(player, "m_fFlags")
     spd = spd or 0
-    if not og   then return duck and STATE.AIR_CROUCH  or STATE.AIR           end
     if FEATURE.STATE_PHYSICS then
-        if duck       then return spd > 5 and STATE.CROUCH_MOVING or STATE.CROUCH end
-        if spd >= 100 then return STATE.RUNNING                                 end
-        if spd <= 5   then return STATE.STANDING                                end
+        local og
+        if type(flags) == "number" then og = bit.band(flags, 1) ~= 0
+        else og = as ~= nil and as.on_ground == true end
+        local duck = as and (as.duck_amount or 0) > 0.5
+        if not og then return duck and STATE.AIR_CROUCH or STATE.AIR end
+        if fakeduck then return STATE.CROUCH end
+        if duck then return spd > 5 and STATE.CROUCH_MOVING or STATE.CROUCH end
+        maxspd = maxspd or 250
+        local scale   = maxspd / 250
+        -- A slow walk holds 34% of the weapon's max speed (the accuracy
+        -- speed slow motion aims for), so above 40% it can't be one --
+        -- 100 u/s with a knife, 86 with an AK, 40 with a scoped AWP.
+        local run_thr = 0.4 * maxspd
+        if prev_state == STATE.RUNNING then run_thr = run_thr * 0.9 end   -- hysteresis
+        if spd >= run_thr then return STATE.RUNNING  end
+        if spd <= 5       then return STATE.STANDING end
         if dv then
-            if dv > 10 then return STATE.RUNNING end
-            if dv < -2 then
+            if dv > 10 * scale then return STATE.RUNNING end
+            if dv < -2 * scale then
                 return (prev_state == STATE.SLOWMOTION) and STATE.SLOWMOTION or STATE.RUNNING
             end
+        elseif prev_state == STATE.RUNNING or prev_state == STATE.SLOWMOTION then
+            return prev_state
         end
         return STATE.SLOWMOTION
     end
+    local og   = bit.band(flags or 0, 1) ~= 0
+    local duck = as and (as.duck_amount or 0) > 0.5
+    if not og   then return duck and STATE.AIR_CROUCH  or STATE.AIR           end
     if duck     then return spd > 20 and STATE.CROUCH_MOVING or STATE.CROUCH  end
     if spd > 5 and spd < 100 then return STATE.SLOWMOTION                     end
     if spd >= 100             then return STATE.RUNNING                        end
     return STATE.STANDING
+end
+
+-- One fresh record of one enemy: speed change, fake duck, velocity
+-- fallback, then ClassifyState. ox/oy = this record's origin. Returns the
+-- state and the speed it was judged on (logged on shot lines).
+local function TrackState(rec, player, as, spd, st, ox, oy, ti)
+    if not FEATURE.STATE_PHYSICS then
+        return ClassifyState(player, as, spd, nil, rec.state), spd
+    end
+    -- Velocity that never reads: once a player's velocity has read 0 on 2
+    -- records in a row while their origin kept moving, and never anything
+    -- else, their speed comes from the origin delta from then on. A real
+    -- stop gives one such record (the origin moved during the fakelag gap
+    -- before it), then a still one.
+    if spd >= 1 then rec.vel_ok, rec.vel_broken = true, false end
+    if not rec.vel_ok and isnum(ox) and isnum(oy) and rec.prev_origin_x and rec.prev_origin_tick
+       and st > rec.prev_origin_tick then
+        local dx, dy = ox - rec.prev_origin_x, oy - rec.prev_origin_y
+        local o = math.sqrt(dx * dx + dy * dy) / ((st - rec.prev_origin_tick) * ti)
+        local moving = o > 5 and o < 400
+        if moving and not rec.vel_broken then
+            rec.vel_zero_n = (rec.vel_zero_n or 0) + 1
+            if rec.vel_zero_n >= 2 then
+                rec.vel_broken = true
+                info("state", "velocity reads 0 for a moving player (%s) -- using origin speed",
+                     entity.get_player_name(player) or "?")
+            end
+        elseif not moving then
+            rec.vel_zero_n = 0
+        end
+        if rec.vel_broken and moving then spd = o end
+    end
+    -- speed change per tick since the previous classified record, from the
+    -- tracker's own history (prev_spd belongs to the v6.2 stop detector)
+    local dv, gap
+    if rec.ts_spd and rec.ts_st and st > rec.ts_st then
+        gap = st - rec.ts_st
+        dv  = (spd - rec.ts_spd) / gap   -- per tick, fakelag-safe
+    end
+    rec.ts_spd, rec.ts_st = spd, st
+    -- fake duck: heavy fakelag and a mid-way duck amount on 3 of 4 records
+    local d = as and as.duck_amount or 0
+    local mid = isnum(d) and d > 0.05 and d < 0.95
+    local fd = rec.fd_ring
+    if not fd then fd = {false, false, false, false}; rec.fd_ring = fd; rec.fd_i = 0 end
+    rec.fd_i = rec.fd_i % 4 + 1
+    fd[rec.fd_i] = mid and (gap or 0) >= 7
+    local n = (fd[1] and 1 or 0) + (fd[2] and 1 or 0) + (fd[3] and 1 or 0) + (fd[4] and 1 or 0)
+    local fakeduck = n >= 3 and spd < 40
+    rec.fakeduck = fakeduck
+    local maxspd = EnemyMaxSpeed(player)
+    local state = ClassifyState(player, as, spd, dv, rec.state, maxspd, fakeduck)
+    -- Debug log: every change of condition, with what it was judged on
+    if DET.verbose and state ~= rec.state then
+        dbg("state", "player=%s %s -> %s spd=%.0f dv=%s max=%d gap=%s duck=%.2f%s",
+            entity.get_player_name(player) or "?", tostring(rec.state), state, spd,
+            dv and string.format("%.1f", dv) or "-", maxspd, tostring(gap or "-"),
+            isnum(d) and d or 0, fakeduck and " fakeduck" or "")
+    end
+    return state, spd
 end
 
 -- TrustedCfg: only hand a recognized config_type to CfgAngle once
@@ -2778,18 +2907,15 @@ local function ProcessPlayer(player, ctx)
             break
         end
 
-        -- Velocity — read once, shared by ClassifyState, the velocity
+        -- Velocity — read once, shared by the state tracker, the velocity
         -- correction cap, and DetectVuln's STP/PKA checks below.
         local vx0, vy0 = entity.get_prop(player, "m_vecVelocity")
         spd = (isnum(vx0) and isnum(vy0)) and math.sqrt(vx0*vx0 + vy0*vy0) or 0
+        local ox, oy, oz = entity.get_origin(player)
 
-        -- State
-        local dv
-        if isnum(rec.prev_spd) and rec.prev_spd_st and st > rec.prev_spd_st then
-            dv = (spd - rec.prev_spd) / (st - rec.prev_spd_st)   -- per tick, fakelag-safe
-        end
-        local state_key = ClassifyState(player, as, spd, dv, rec.state)
-        rec.state = state_key
+        -- State (STATE TRACKER)
+        local state_key, state_spd = TrackState(rec, player, as, spd, st, ox, oy, ctx.ti)
+        rec.state, rec.state_spd = state_key, state_spd
         if rec.conf == 0 then rec.conf = CFG.STATE_SEED[state_key] or 0.25 end
 
         -- Live per-player desync bounds from animstate.
@@ -2862,7 +2988,6 @@ local function ProcessPlayer(player, ctx)
         -- instead of accumulating gradually. _shift_flash/_shift_box drive
         -- a brief world-space "SHIFT" tag + box in DrawOverlay, adapted
         -- from that same ESP tool's extrapolation technique.
-        local ox, oy, oz = entity.get_origin(player)
         if choke == 0 and isnum(ox) and isnum(oy)
            and rec.prev_origin_x and rec.prev_origin_y then
             local dx, dy = ox - rec.prev_origin_x, oy - rec.prev_origin_y
@@ -3341,7 +3466,6 @@ local function ProcessPlayer(player, ctx)
     rec.prev_pose     = pose
     rec.prev_spd2     = rec.prev_spd  -- shift: spd2 = last tick's spd before this update
     rec.prev_spd      = spd
-    if spd then rec.prev_spd_st = st end
     rec.prev_duck     = duck or 0
     rec.prev_onground = on_ground
     -- Decrement DCK cooldown each tick (set to 10 when DCK fires, counts down to 0)
@@ -3698,6 +3822,7 @@ local function on_aim_fire(e)
         conf    = r and r.conf      or 0,
         aa      = r and r.aa_type   or AA.UNKNOWN,
         state   = r and r.state     or nil,  -- movement state at fire time, for per-condition hit_mem
+        sspd    = r and isnum(r.state_spd) and math.floor(r.state_spd) or -1,
         cheat   = r and r.cheat     or nil,  -- enemy cheat (CHEAT REVEALER), logged
         -- per-weapon aim policy: inputs and the choice in effect
         wpn     = LocalWeaponClass(),
@@ -3829,11 +3954,11 @@ local function on_aim_hit(e)
         end
     end
 
-    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f%s%s",
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f%s%s",
         entity.get_player_name(e.target) or "?",
         HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
         isnum(e.damage) and math.floor(e.damage) or 0,
-        d.meth, d.val, d.bt, d.state or "?", d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
+        d.meth, d.val, d.bt, d.state or "?", d.sspd or -1, d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
         d.cheat and (" cht=" .. d.cheat) or "",
@@ -3899,9 +4024,9 @@ local function on_aim_miss(e)
 
     local is_resolver = reason == "?" or reason == "" or reason == "prediction error"
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f%s%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f%s%s",
         entity.get_player_name(e.target) or "?",
-        reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
+        reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.sspd or -1, d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
         d.cheat and (" cht=" .. d.cheat) or "",

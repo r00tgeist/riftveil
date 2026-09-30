@@ -3,6 +3,25 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.5 – State / condition tracker debugged against movement physics.
+          tools/state_test.lua: Source movement physics, CS:GO weapon
+          speeds, 15 scenarios x fakelag 1/3/8/14, scored per tick against
+          the AA builder's condition, with a ceiling (truth held between
+          records). All scenarios: v6.2 76.3%, v8.4 80.9%, v8.5 91.7%,
+          ceiling 93.1%.
+          FIXED: scoped snipers read as slow walk (AWP scoped 69 -> 92%):
+          thresholds follow the enemy's weapon and scope, run above 40% of
+          max speed; heavy fakelag hid a run's start; fake duck flickered
+          (55 -> 92%), now held as crouch; an unreadable ground flag meant
+          "in air" (0 -> 91%); no speed change after a gap defaulted to
+          slow walk; velocity that never reads falls back to origin speed
+          after 2 records (a single zero is a real stop -- the first cut
+          of this fired on real stops, the test caught it).
+          The tracker has its own section (STATE TRACKER) and speed
+          history; shot lines log mv=; the debug log gets a [state] line
+          per change. v6.2 parity unchanged with the feature off.
+          Harness: the mock origin now moves with velocity. Details:
+          docs/STATE_AUDIT.md.
   v8.4 – Weapon aim decided on traced damage.
           v8.3 read nominal chest damage ("AWP: prefer body always"),
           which is wrong whenever the body shot can't kill from where you
