@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.6"
+local RV_VERSION = "8.7"
 
 local ffi = require "ffi"
 
@@ -2938,6 +2938,19 @@ local function ProcessPlayer(player, ctx)
 
     local st = math.floor(st_raw / ctx.ti)
     if st == rec.lt then return end
+    -- DEFENSIVE FRAME COUNT (measurement only, no decision reads it): lag
+    -- compensation writes no record while a player's simulation time is at
+    -- or below the highest it has sent (tickcount/lagrecord-csgo.lua), so a
+    -- frame arriving with a lower simtime is a defensive frame -- the one
+    -- defensive AA fills with pitch up / zero and a yaw flick. v6.2 samples
+    -- it like any other; the shot log's df= says how many there were.
+    if rec.st_max and st < rec.st_max and rec.st_max - st <= 64 then
+        local r = rec.dfr
+        if not r then r = {}; rec.dfr = r end
+        r[#r + 1] = ctx.cur_tc
+        if #r > 32 then table.remove(r, 1) end
+    end
+    if not rec.st_max or st > rec.st_max or rec.st_max - st > 64 then rec.st_max = st end
     rec.lt = st
 
     -- pose/spd/duck/on_ground are nil until sampled.
@@ -3889,6 +3902,14 @@ end
 
 -- A game value for a "%d" log field: an integer, or -1 when it isn't a
 -- finite number (NaN / inf reached the shot log through hp and traces).
+-- Defensive frames (see ProcessPlayer) received from this player in the
+-- last 64 ticks (one second)
+local function DefFrames(rec, now)
+    local n, r = 0, rec.dfr
+    if r then for i = 1, #r do if now - r[i] <= 64 and now >= r[i] then n = n + 1 end end end
+    return n
+end
+
 local function LogInt(v)
     v = tonumber(v)
     if not isnum(v) then return -1 end
@@ -3952,6 +3973,7 @@ local function on_aim_fire(e)
         -- the desync side: kept out of the cheat profiles and the aim
         -- policy's miss run (the v6.2 core still sees it, as it did)
         nolearn = (e.teleported or e.extrapolated) and true or false,
+        df      = r and DefFrames(r, globals.tickcount()) or 0,
     }
     -- Credit a vuln_profile "seen" (trial) here, once per actual shot fired
     -- during an open vuln window -- not once per detection (see the
@@ -4062,14 +4084,14 @@ local function on_aim_hit(e)
         end
     end
 
-    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d%s%s",
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d%s%s",
         entity.get_player_name(e.target) or "?",
         HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
         isnum(e.damage) and math.floor(e.damage) or 0,
         d.meth, d.val, d.bt, d.state or "?", d.sspd or -1, d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
-        (d.fl or "") ~= "" and d.fl or "-", d.pit or -999,
+        (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0,
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
     SHOTS[e.id] = nil
@@ -4133,12 +4155,12 @@ local function on_aim_miss(e)
 
     local is_resolver = reason == "?" or reason == "" or reason == "prediction error"
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d%s%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d%s%s",
         entity.get_player_name(e.target) or "?",
         reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.sspd or -1, d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
-        (d.fl or "") ~= "" and d.fl or "-", d.pit or -999,
+        (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0,
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
 

@@ -93,6 +93,7 @@ lua5.3 tools/log_report.lua riftveil_debug_prev.txt riftveil_debug.txt
 Head rate per method, movement state (`st=`), enemy speed (`mv=`), weapon
 (`wpn=`, and weapon by aimed hitgroup), aim policy, shot flags (`fl=`:
 teleported, extrapolated, ...), enemy pitch at fire (`pit=`, defensive AA),
+defensive frames in the second before the shot (`df=`),
 DB-seeded vs cold start, enemy cheat (`cht=`) and player, with 95% intervals.
 
 ## Development

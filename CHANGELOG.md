@@ -3,6 +3,29 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.7   – Explore 2: the API, the meta, indicators.
+          META, located in code: lag compensation writes no record while a
+          player's simulation time is at or below the highest it sent
+          (tickcount/lagrecord-csgo.lua, which detects defensive exactly
+          this way). Defensive AA frames therefore arrive with a lower
+          simtime -- and ProcessPlayer samples every simtime change,
+          backwards ones included, into the pose ring (v6.2 core). Now
+          counted per player (measurement only, no decision reads it) and
+          logged per shot as df= (frames in the last second); log_report
+          BY DEFENSIVE FRAMES. The one-line skip waits on that data
+          (ROADMAP 5). Harness test: backward frames counted; the scripted
+          in-order match logs df=0 on every shot.
+          META: our own defensive read (brk) is the public pattern verbatim
+          (same code in the unnamed AA script and lagrecord's README).
+          API: client.current_threat is the "At targets" AA enemy, not the
+          ragebot's target. get_esp_data().flags bit 11 is read by two
+          uploaded scripts as "this enemy can hit us" -- not a resolver
+          input. trace_bullet returns nil entindex when no player is hit;
+          tsv4 scales damage only then, which corroborates that traces
+          ending on a player are already final (WEAPON_PLAN).
+          INDICATORS: client.draw_hitboxes (entindex, duration, hitbox list,
+          colour, tick) with aim_fire.tick could show the record each miss
+          was fired at; left out to keep the UI lean -- say if you want it.
   v8.6   – Explore: the API, the meta, indicators.
           API (docs.gamesense.gs events/aim_fire): every shot carries
           teleported ("breaking lag compensation"), extrapolated,

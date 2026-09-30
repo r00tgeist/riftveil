@@ -62,6 +62,10 @@ The head is never taken away when it's the only way to kill.
   (AWP head 100 / 448 = x0.22). Once 5 shots agree, the median ratio is applied
   automatically (`[aim] calibration head: ragebot damage = traced x...`).
   `tools/log_report.lua` prints the same ratio offline (TRACE CALIBRATION).
+  Corroboration (v8.7): the uploaded tsv4 script scales trace_bullet's
+  damage with client.scale_damage only when the trace ends on no player,
+  i.e. it treats a player-hitting trace as already scaled. RIFTVEIL only
+  uses traces that end on the target, so the factor should read ~1.0.
 - **Cost.** At most 8 traces per enemy per update, throttled as above.
   Check it with `rv_perf` in game.
 

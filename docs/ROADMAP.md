@@ -5,7 +5,7 @@ and what comes next. Older versions are kept in `versions/` so none of the
 work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 (the decision engine), `riftveil_v8.1.lua`.
 
-## In the script (v8.6)
+## In the script (v8.7)
 
 | Area | Feature | Changes shots? |
 |---|---|---|
@@ -55,13 +55,19 @@ post-v6.2 features off, the script forces the same side and value as v6.2.
    the 0.35 seed cap. v6.2 did the same while it measured 74%, so it stays
    until `BY PROFILE START` in log_report (seeded vs cold start) shows
    whether the seed helps or hurts.
-5. **Defensive AA frames** (found in v8.6). Every AA script uploaded
-   (angelwings, abyss, EmberLash, vandal, viera, the unnamed one) has a
-   defensive mode that sets pitch up / zero / random and yaw sideways /
-   opposite / spin / 3-way / 5-way while it shifts tickbase. Those frames
-   go into the pose ring and yaw cache like any other. v8.6 logs `pit=`
-   and `fl=d` on every shot; if `BY ENEMY PITCH AT FIRE` shows misses
-   cluster off "down", skip those frames in the ring (a core change, so
-   only on data).
+5. **Defensive AA frames** (found in v8.6, located in v8.7). Every AA
+   script uploaded (angelwings, abyss, EmberLash, vandal, viera, the
+   unnamed one) has a defensive mode: pitch up / zero / random and yaw
+   sideways / opposite / spin / n-way while it shifts tickbase; abyss
+   forces it every 7th command while flicking. Lag compensation writes no
+   record while a player's simulation time is at or below the highest it
+   has sent (tickcount/lagrecord-csgo.lua), so those frames arrive with
+   a LOWER simulation time. ProcessPlayer takes any simtime change as a
+   new record (`st == rec.lt`), so they go into the pose ring and yaw
+   cache, and rec.lt steps backwards. The fix is one line (skip a frame
+   below the highest simtime seen) but it changes the v6.2 core, so it
+   waits for the log: `df=` counts those frames per shot, and
+   `BY DEFENSIVE FRAMES` / `BY ENEMY PITCH AT FIRE` show whether the
+   head rate drops with them.
 6. **Decision engine** (v7.2-v7.9, `versions/riftveil_v7.9.lua`): only if
    the logs show a gap it could close. It ran during the drop to 49%.

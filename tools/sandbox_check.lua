@@ -1183,6 +1183,34 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     end
 end
 
+-- Defensive frames: a frame whose simulation time is below the highest
+-- already received (lag compensation writes no record for it) is counted,
+-- and the next shot at that player carries the count (df=)
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local SH = probe("SHOTS")
+    local p = W.players[102]
+    if SH and p then
+        W.live = {101, 102}
+        local top = W.tick
+        for k = 1, 6 do
+            W.tick = W.tick + 1
+            W.real = W.real + TI
+            -- even steps: a new top record; odd: 3 ticks back (defensive)
+            p.sim = ((k % 2 == 0) and (top + k) or (top + k - 3)) * TI
+            W.players[101].sim = W.tick * TI
+            fire("net_update_end")
+        end
+        fire("aim_fire", {id = 91001, target = 102, backtrack = 0, hit_chance = 80, hitgroup = 1, damage = 30})
+        local d = SH[91001]
+        if not (d and (d.df or 0) >= 2) then
+            UNIT_FAIL[#UNIT_FAIL + 1] = "defensive frames: " .. tostring(d and d.df) .. " counted, expected >= 2"
+        end
+        SH[91001] = nil
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "defensive frame test: SHOTS / player 102 not reachable"
+    end
+end
+
 -- ESP: the aim policy in force shows on that enemy (Indicators > ESP flags)
 if not os.getenv("RV_TARGET") then
     local REC_T, EI, UES, IND_T = probe("REC"), probe("EIDX_S64"), probe("UpdateEspState"), probe("IND")
