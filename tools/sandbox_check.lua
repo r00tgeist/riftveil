@@ -66,7 +66,7 @@ local MUST_RUN = os.getenv("RV_MUST_RUN_V7") and {
     "BuildOverlay", "DrawPanel", "FitText", "UpdateDrag", "DrawShiftMarkers", "SetPanelPos",
     "on_aim_fire", "on_aim_hit", "on_aim_miss", "FlushDB",
     "TorsoCluster", "ExtrapolateOrigin", "clear_log",
-    "Tick", "Decide", "Write", "Traced", "LocalWeaponClass",
+    "Tick", "Decide", "Write", "Traced", "LocalWeaponClass", "DtReady", "TrackState", "EnemyMaxSpeed",
 }
 
 -- ── Mutable world state the mocks read from ──────────────────────────
@@ -158,13 +158,17 @@ local mock = {
         if k == "current_threat"     then return function() return W.threat end end
         if k == "key_state"          then return function(key) return key == 0x01 and W.m1 == true end end
         if k == "trace_line"         then return function() return 1.0, -1 end end
-        if k == "eye_position"       then return function() return 0, 0, 64 end end
+        if k == "eye_position"       then return function()
+            if W.eye_bad then return W.eye_bad, 0, 64 end
+            return 0, 0, 64
+        end end
         -- Traced damage per hitbox from W.players[ent].tdmg (default: head
         -- 180, body 55 -- an armored enemy behind nothing, scout-like).
         if k == "trace_bullet"       then return function(_, _, _, _, tx)
             local target, hb = math.floor(tx / 1000), math.floor(tx % 1000)
             local p = W.players[target]
             if not p then return nil, 0 end
+            if p.trace_other then return p.trace_other, 90 end   -- the line hits someone else
             local d = p.tdmg and p.tdmg[hb]
             if d == nil then d = (hb == 0) and 180 or 55 end
             return target, d
@@ -173,6 +177,7 @@ local mock = {
         if k == "set_event_callback" then return function(name, cb) CALLBACKS[name] = cb end end
         if k == "log"                then return function() end end
         if k == "update_player_list" then return function() end end
+        if k == "userid_to_entindex" then return function(u) return u end end
         return function() return nil end
     end}),
     entity = setmetatable({}, {__index = function(_, k)
@@ -212,7 +217,11 @@ local mock = {
                 local p = W.players[ent]
                 if prop == "m_flSimulationTime" then return p and p.sim or 0 end
                 if prop == "m_vecVelocity"      then return p and p.vx or 0, p and p.vy or 0, 0 end
-                if prop == "m_fFlags"           then return 1 end
+                if prop == "m_fFlags"           then
+                    if p and p.flags_nil then return nil end
+                    return p and p.flags or 1
+                end
+                if prop == "m_bIsScoped"        then return p and p.scoped or 0 end
                 if prop == "m_angEyeAngles"     then return 0, p and p.eye or 0, 0 end
                 if prop == "m_flPoseParameter"  then CUR = ent; return p and p.pose01 or 0.5 end
                 if prop == "m_totalHitsOnServer" then return W.srv_hits end
@@ -637,7 +646,19 @@ if FUZZ_SEED then
             s.torso   = nasty(rint(-180, 180))
             s.gfy     = nasty(rint(-180, 180))
             W.dead[p] = rnd() < 0.02
+            -- aim policy and state tracker inputs
+            s.hp      = nasty(rint(-5, 130))
+            s.armor   = nasty(rint(0, 100))
+            s.scoped  = nasty((rnd() < 0.3) and 1 or 0)
+            s.flags   = nasty((rnd() < 0.1) and 0 or 1)
+            s.flags_nil = rnd() < 0.01
+            s.tdmg    = {[0] = nasty(rint(0, 500)), [2] = nasty(rint(0, 150)),
+                         [3] = nasty(rint(0, 150)), [5] = nasty(rint(0, 150))}
+            s.trace_other = (rnd() < 0.05) and rint(1, 64) or nil
         end
+        local WEAPONS = {9, 40, 11, 38, 64, 1, 4, 61, 42, 500, 0, 70000, nil}
+        if rnd() < 0.02 then W.weapon = WEAPONS[rint(#WEAPONS)] end
+        W.eye_bad = (rnd() < 0.01) and ((rnd() < 0.5) and NAN or INF) or nil
         local rt = rnd()
         W.threat = (rt < 0.8 and #W.live > 0) and W.live[rint(#W.live)] or (rt < 0.9 and nil or 999)
         if rnd() < 0.01 then W.menu_open = not W.menu_open end
@@ -811,13 +832,15 @@ end
 do
     for _, el in ipairs(UI_ELEMS) do
         if el.kind == "multi" and el.items and el.items[1] == "Vulnerability" then
-            el.a = {"Vulnerability", "Hit memory", "Adaptive engine", "Cheat profiles"}
+            el.a = {"Vulnerability", "Hit memory", "Adaptive engine", "Cheat profiles", "Weapon aim"}
         end
         -- the same switch in the v6.2 menu (RV_TARGET parity runs)
+        -- (and an auto in hand from here: the double-tap path of the aim policy)
         if el.kind == "checkbox" and type(el.name) == "string" and el.name:find("Desync Angle", 1, true) then
             el.a = false
         end
     end
+    W.weapon = 11
     for _, cb in ipairs(UI_CALLBACKS) do pcall(cb) end
     -- A clean match first, so this phase doesn't depend on what the fuzz
     -- phase left behind (a leftover profile sharing 104's id and holding
@@ -833,6 +856,9 @@ do
         DB_T["1888056103"] = {kills = "x", hit_rate = {}, config_type = 5, bt_pref = "a",
                               vuln_pref = 7, eng = "bad", samples = "q", gen = "z"}
         DB_T["1888056104"] = "garbage"
+        -- right types, wrong shape: fractional counters (a hand edit, an
+        -- old version's float) reached "%d" in the db flush line
+        DB_T["1888056101"] = {kills = 3.7, bt_pref = 2.5, hit_rate = 0.9, samples = 4.5}
     end
     W.live = {101, 102, 103}
     W.players[103] = {sim = W.tick * TI, vx = 0, vy = 0, pose01 = 0.5, eye = 10, duck = 0,
@@ -1052,6 +1078,10 @@ do
 end
 
 for _, cb in ipairs(UI_CALLBACKS) do pcall(cb) end
+-- a player (re)connects into a slot: that slot's cheat data is dropped;
+-- our own connect drops everyone's
+fire("player_connect_full", {userid = 102})
+fire("player_connect_full", {userid = 1})
 fire("console_input", "rv_stats")
 fire("console_input", "rv_db")
 fire("console_input", "rv_save")

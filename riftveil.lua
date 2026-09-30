@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v8.5  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v8.5.1  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · cheat revealer · per-cheat method trust
 -- ════════════════════════════════════════════════════════════════════
@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.5"
+local RV_VERSION = "8.5.1"
 
 local ffi = require "ffi"
 
@@ -776,6 +776,11 @@ local function DBNum(v, lo, hi)
     if type(v) ~= "number" or v ~= v or v < lo or v > hi then return nil end
     return v
 end
+-- Counters and tick counts are integers ("%d" in the db log line)
+local function DBInt(v, lo, hi)
+    v = DBNum(v, lo, hi)
+    return v and math.floor(v) or nil
+end
 local function CleanDBEntry(e)
     if type(e) ~= "table" then return nil end
     return {
@@ -783,10 +788,10 @@ local function CleanDBEntry(e)
         vuln_pref   = type(e.vuln_pref)   == "string" and e.vuln_pref   or nil,
         cheat       = type(e.cheat)       == "string" and e.cheat       or nil,
         gen         = DBNum(e.gen, 0, 1e12),
-        bt_pref     = DBNum(e.bt_pref, 0, 64),
+        bt_pref     = DBInt(e.bt_pref, 0, 64),
         hit_rate    = DBNum(e.hit_rate, 0, 1),
         samples     = DBNum(e.samples, 0, 1e9),
-        kills       = DBNum(e.kills, 0, 1e9),
+        kills       = DBInt(e.kills, 0, 1e9),
     }
 end
 local DB = {}
@@ -3807,6 +3812,14 @@ local function BtTicks(v)
     return math.min(64, math.floor(v + 0.5))
 end
 
+-- A game value for a "%d" log field: an integer, or -1 when it isn't a
+-- finite number (NaN / inf reached the shot log through hp and traces).
+local function LogInt(v)
+    v = tonumber(v)
+    if not isnum(v) then return -1 end
+    return math.floor(v)
+end
+
 local function on_aim_fire(e)
     local t = e.target; if not t then return end
     local s64 = GetS64(t); local r = s64 and REC[s64]
@@ -3822,17 +3835,17 @@ local function on_aim_fire(e)
         conf    = r and r.conf      or 0,
         aa      = r and r.aa_type   or AA.UNKNOWN,
         state   = r and r.state     or nil,  -- movement state at fire time, for per-condition hit_mem
-        sspd    = r and isnum(r.state_spd) and math.floor(r.state_spd) or -1,
+        sspd    = r and LogInt(r.state_spd) or -1,
         cheat   = r and r.cheat     or nil,  -- enemy cheat (CHEAT REVEALER), logged
         -- per-weapon aim policy: inputs and the choice in effect
         wpn     = LocalWeaponClass(),
         pol     = r and r.aim_pol or "-",
-        aim_th  = r and math.floor(r.aim_th or 0) or 0,   -- traced head / body damage
-        aim_tb  = r and math.floor(r.aim_tb or 0) or 0,
+        aim_th  = r and LogInt(r.aim_th or 0) or 0,   -- traced head / body damage
+        aim_tb  = r and LogInt(r.aim_tb or 0) or 0,
         aim_hg  = tonumber(e.hitgroup) or -1,
-        aim_dmg = isnum(e.damage) and math.floor(e.damage) or -1,
-        thp     = tonumber(entity.get_prop(t, "m_iHealth")) or -1,
-        tarm    = tonumber(entity.get_prop(t, "m_ArmorValue")) or -1,
+        aim_dmg = LogInt(e.damage),
+        thp     = LogInt(entity.get_prop(t, "m_iHealth")),
+        tarm    = LogInt(entity.get_prop(t, "m_ArmorValue")),
         -- e.backtrack is a TIME value (seconds), not a tick count -- must
         -- go through TT() before comparing against the 1..16 tick range
         -- used everywhere else (bt_hist/preferred_bt/log output).

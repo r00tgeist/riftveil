@@ -3,6 +3,26 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.5.1 – Explore / verify pass.
+          VERIFIED against docs.gamesense.gs: aim_fire.damage is the
+          predicted damage (the aim calibration's input), hitgroup the
+          targeted group; the voice event struct matches the cheat
+          revealer's byte for byte (client at 8, xuid at 16); ui.reference
+          returns the double-tap checkbox and hotkey, ui.get(hotkey) =
+          active; get_players excludes dormant and dead. Scoped max speeds
+          (AWP 100, G3SG1 120, AUG/SG 553 150) confirmed.
+          FOUND by a new hostile-input fuzz (health, armor, traces, eye
+          position, weapon, scope, ground flag -- NaN/inf/nil/wrong entity):
+          a NaN/inf hp, armor or trace reached "%d" in the hit/miss log
+          line and threw before the shot entry was cleared. Now every
+          integer log field goes through LogInt (-1 when not finite).
+          FOUND by a new corrupt-profile case: fractional kills / bt_pref
+          in the saved DB crashed rv_stats (proved: fails on 8.5, passes
+          now). Counters load as integers.
+          Coverage: the double-tap aim path, the state tracker and the
+          reconnect cheat-reset now run in the harness (auto in hand in
+          phase 3, player_connect_full fired). Trace cost measured: ~4
+          traces per tick in a 2v2, 8 at most while moving.
   v8.5 – State / condition tracker debugged against movement physics.
           tools/state_test.lua: Source movement physics, CS:GO weapon
           speeds, 15 scenarios x fakelag 1/3/8/14, scored per tick against
