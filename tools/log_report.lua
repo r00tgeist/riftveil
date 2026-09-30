@@ -47,6 +47,7 @@ local function bucket(t, key)
 end
 
 local by_meth, by_arm, by_player, by_origin, by_state, by_wpn, by_cheat, by_pol = {}, {}, {}, {}, {}, {}, {}, {}
+local by_speed = {}
 local calib = {}          -- decile -> {n, heads, psum}
 local trace_ratio = {head = {}, body = {}}   -- v8.4+: ragebot predicted / traced damage
 local versions, engine_lines, resets = {}, {}, 0
@@ -88,6 +89,14 @@ for _, path in ipairs(files) do
             local targets = {bucket(by_meth, meth), bucket(by_player, player)}
             local st = field(line, "st")
             if st then targets[#targets + 1] = bucket(by_state, st) end
+            -- mv= (v8.2+): the enemy's speed the state tracker saw, a check
+            -- on st= that doesn't depend on the classifier (-1 = unread)
+            local mv = tonumber(field(line, "mv") or "")
+            if mv and mv >= 0 then
+                local band = mv < 5 and "0-5" or mv < 40 and "5-40" or mv < 110 and "40-110"
+                    or mv < 200 and "110-200" or "200+"
+                targets[#targets + 1] = bucket(by_speed, band)
+            end
             local wpn = field(line, "wpn")
             if wpn then
                 targets[#targets + 1] = bucket(by_wpn, wpn)
@@ -101,7 +110,10 @@ for _, path in ipairs(files) do
             local th, tb = line:match(" tr=(%d+)/(%d+)")
             local aim_at, pdmg = line:match(" aim=(.-) pdmg=(%-?%d+)")
             th, tb, pdmg = tonumber(th), tonumber(tb), tonumber(pdmg)
-            if th and pdmg and pdmg > 0 then
+            -- only predictions below the target's health: a lethal one may
+            -- be capped at health and would read low (as in the script, v8.5.3+)
+            local thp = tonumber(field(line, "hp") or "")
+            if th and pdmg and pdmg > 0 and thp and thp > 0 and pdmg < thp then
                 if aim_at == "head" and th > 0 then
                     trace_ratio.head[#trace_ratio.head + 1] = pdmg / th
                 elseif (aim_at == "chest" or aim_at == "stomach") and tb > 0 then
@@ -175,6 +187,7 @@ print(("soft resets: %d   engine log lines: %d"):format(resets, #engine_lines))
 
 report("BY METHOD (what was applied)", by_meth)
 report("BY MOVEMENT STATE (v7.5+ logs)", by_state)
+report("BY ENEMY SPEED (mv=, u/s: 0-5 still, 5-40 micro / stopping, 40-110 slow walk, 200+ running; v8.2+ logs)", by_speed)
 report("BY WEAPON (v7.7+ logs)", by_wpn)
 report("BY ENEMY CHEAT (v7.9+ logs, cheat revealer running)", by_cheat)
 report("BY AIM POLICY (body = prefer body, head = head is the only kill, sp / headsp = safe point, - = ragebot default)", by_pol)

@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.5.2"
+local RV_VERSION = "8.5.3"
 
 local ffi = require "ffi"
 
@@ -824,8 +824,10 @@ local function PSet(ent, field, value)
     local c = PL_CACHE[ent]
     if not c then c = {}; PL_CACHE[ent] = c end
     if c[field] == value then return end
-    c[field] = value
+    -- cache only what the game took: a set that raises must be retried on
+    -- the next change, not remembered as written
     plist.set(ent, field, value)
+    c[field] = value
 end
 local LAST_SPIKE    = false
 
@@ -2570,6 +2572,14 @@ end
 local CHEAT_DB_KEY = "riftveil_cheat_v1"
 local CP = {MIN_N = 8, MAX_MEAN = 0.35, PROBE_EVERY = 4, CAP = 60}
 local CHEAT_STATS = {}   -- [cheat id][meth] = {h = head hits, m = resolver misses}
+-- At most CAP shots per (cheat, method), rate kept: past CAP each credit
+-- halves, so a cheat's AA update shows up within a few matches. Applied on
+-- load too -- a saved 0/5e8 (hand edit, old bug) would otherwise take ~90
+-- shots of halving before the method could be trusted again.
+function CP.Fit(c)
+    while c.h + c.m > CP.CAP do c.h, c.m = c.h / 2, c.m / 2 end
+end
+CP.logged = {}          -- [cheat id] = last "[cheat] learned" text
 do
     local raw = database.read(CHEAT_DB_KEY)
     if type(raw) == "table" then
@@ -2579,6 +2589,7 @@ do
                 for meth, c in pairs(T) do
                     if type(meth) == "string" and type(c) == "table" and isnum(c.h, 0) and isnum(c.m, 0) then
                         dst[meth] = {h = c.h, m = c.m}
+                        CP.Fit(dst[meth])
                     end
                 end
                 CHEAT_STATS[id] = dst
@@ -2603,8 +2614,7 @@ local function CheatCredit(cheat, meth, head)
     local st = T[meth]
     if not st then st = {h = 0, m = 0}; T[meth] = st end
     if head then st.h = st.h + 1 else st.m = st.m + 1 end
-    -- Halve past CAP so a cheat's AA update can show up within a few matches
-    if st.h + st.m > CP.CAP then st.h, st.m = st.h / 2, st.m / 2 end
+    CP.Fit(st)
 end
 
 -- ══════════════════════════════════════════════════════════════════
@@ -2859,7 +2869,13 @@ FlushDB = function()
             parts[#parts + 1] = string.format("%s=%.0f/%.0f", meth, c.h, c.h + c.m)
         end
         table.sort(parts)
-        info("cheat", "learned %s: %s", id, table.concat(parts, " "))
+        -- only what changed since the last save: the autosave runs every
+        -- 60 s and every cheat ever seen is in the table
+        local text = table.concat(parts, " ")
+        if CP.logged[id] ~= text then
+            CP.logged[id] = text
+            info("cheat", "learned %s: %s", id, text)
+        end
     end
     info("db", "written %d entries", math.min(#keys, DB_MAX))
 end
@@ -3576,7 +3592,9 @@ local function Write(ent, field, v)
     local n = 0
     while ok[v] == false and n < 3 do v = FALLBACK[field][v] or "-"; n = n + 1 end
     if not pcall(PSet, ent, field, v) then
-        if v ~= "-" then ok[v] = false end
+        -- the set raised: this value is out, write its fallback now so the
+        -- field doesn't keep the previous enemy decision for a tick
+        if v ~= "-" then ok[v] = false; Write(ent, field, FALLBACK[field][v] or "-") end
         return
     end
     if ok[v] == nil then
@@ -3629,8 +3647,14 @@ end
 
 -- aim_fire: the ragebot's predicted damage for the hitgroup it aimed at,
 -- against what we traced for that part.
-local function OnFire(rec, hitgroup, pred)
+-- A prediction at or above the target's health says nothing about the
+-- multiplier if the ragebot caps it at health (the docs don't say), and
+-- would pull the factor down (AWP head: 100 predicted / 448 traced = x0.22,
+-- so a 240 wallbang head would stop counting as a kill). Only predictions
+-- below health are used.
+local function OnFire(rec, hitgroup, pred, hp)
     if not (rec and isnum(pred) and pred > 0) then return end
+    if not (isnum(hp) and hp > 0 and pred < hp) then return end
     local group = (hitgroup == 1) and "head" or ((hitgroup == 2 or hitgroup == 3) and "body" or nil)
     if not group then return end
     local traced = (group == "head") and rec.aim_th or rec.aim_tb
@@ -3701,7 +3725,7 @@ local function Reset(ent)
     pcall(plist.set, ent, F_SP, "-")
 end
 
-return {Tick = Tick, Decide = Decide, OnFire = OnFire, Reset = Reset, CAL = CAL, VAL_OK = VAL_OK}
+return {Tick = Tick, Decide = Decide, OnFire = OnFire, Reset = Reset, Write = Write, CAL = CAL, VAL_OK = VAL_OK}
 end)() -- aim policy scope
 
 -- Read by the info panel and ESP flags (paint runs every frame; these only
@@ -3880,7 +3904,7 @@ local function on_aim_fire(e)
         r.vuln_profile[r.vuln_type].seen = r.vuln_profile[r.vuln_type].seen + 1
     end
     -- Weapon aim calibration: the ragebot's predicted damage vs our trace
-    AIMX.OnFire(r, tonumber(e.hitgroup), tonumber(e.damage))
+    AIMX.OnFire(r, tonumber(e.hitgroup), tonumber(e.damage), SHOTS[e.id].thp)
     -- Shot counter for CheatTrusts' probe (every 4th shot at a player)
     if r then r.shots_fired = (r.shots_fired or 0) + 1 end
 end

@@ -42,6 +42,8 @@ local PLIST_BAD, PLIST_BAD_N = {}, 0
 local NO_ENGINE = os.getenv("RV_NO_ENGINE") ~= nil
 local PLIST_LOG = {}
 local PLIST_STATE = {}
+-- [field .. "\t" .. value] = true: plist.set raises for that value (unit checks)
+local PLIST_THROW = {}
 -- Values the aim policy may write to gamesense's player-list combo fields
 local AIM_FIELD_VALUES = {
     ["Override prefer body aim"] = {["-"] = true, ["On"] = true, ["Off"] = true, ["Force"] = true},
@@ -311,6 +313,7 @@ local mock = {
     plist    = setmetatable({}, {__index = function(_, k)
         if k == "set" then
             return function(ent, field, value)
+                if PLIST_THROW[field .. "\t" .. tostring(value)] then error("bad value " .. tostring(value)) end
                 if PLIST_OUT then
                     PLIST_LOG[#PLIST_LOG + 1] = string.format("%d\t%s\t%s\t%s", W.tick, tostring(ent), field, tostring(value))
                 end
@@ -1034,12 +1037,42 @@ do
         end
         -- calibration: the ragebot predicts 4x our head trace on 5 shots
         local fh0 = AX.CAL.fh
-        for _ = 1, 5 do AX.OnFire({aim_th = 50, aim_tb = 40}, 1, 200) end
+        -- lethal predictions first: if the ragebot caps them at health they
+        -- would read as x0.22 (100 / 448); they must not move the factor
+        for _ = 1, 5 do AX.OnFire({aim_th = 448, aim_tb = 112}, 1, 100, 100) end
+        if AX.CAL.fh ~= fh0 or #AX.CAL.head ~= 0 then
+            UNIT_FAIL[#UNIT_FAIL + 1] = string.format("AIMX calibration: lethal predictions moved the head factor to %.2f", AX.CAL.fh)
+        end
+        for _ = 1, 5 do AX.OnFire({aim_th = 20, aim_tb = 40}, 1, 80, 100) end
         if math.abs(AX.CAL.fh - 4) > 0.01 then
             UNIT_FAIL[#UNIT_FAIL + 1] = string.format("AIMX calibration: head factor %.2f after 5 shots at 4x, expected 4", AX.CAL.fh)
         end
         for k in pairs(AX.CAL.head) do AX.CAL.head[k] = nil end
         AX.CAL.fh = fh0
+        -- field write fallbacks, on a slot nobody uses (60): a value the game
+        -- ignores (read back differs) and a value whose set raises must both
+        -- leave the fallback in the field within the same write
+        local FB, OK = "Override prefer body aim", AX.VAL_OK["Override prefer body aim"]
+        local saved = {On = OK.On, Force = OK.Force, Off = OK.Off}
+        local function field() return PLIST_STATE["60\t" .. FB] end
+        OK.On, OK.Force, OK.Off = nil, nil, nil
+        PLIST_THROW[FB .. "\tOn"] = true
+        AX.Write(60, FB, "On")
+        if field() ~= "Force" or OK.On ~= false then
+            UNIT_FAIL[#UNIT_FAIL + 1] = "AIMX.Write: set of On raised, field is " .. tostring(field()) .. ", expected Force"
+        end
+        -- a set that raised must not be cached as written: once the game
+        -- takes "-" again, the next write of it must go through
+        PLIST_THROW[FB .. "\tOn"], PLIST_THROW[FB .. "\t-"] = nil, true
+        PLIST_STATE["60\t" .. FB] = "Force"   -- in the field, whatever the step above did
+        AX.Write(60, FB, "-")
+        PLIST_THROW[FB .. "\t-"] = nil
+        AX.Write(60, FB, "-")
+        if field() ~= "-" then
+            UNIT_FAIL[#UNIT_FAIL + 1] = "AIMX.Write: a raised set was cached; field stuck at " .. tostring(field())
+        end
+        OK.On, OK.Force, OK.Off = saved.On, saved.Force, saved.Off
+    elseif not os.getenv("RV_TARGET") then
     elseif not os.getenv("RV_TARGET") then
         UNIT_FAIL[#UNIT_FAIL + 1] = "AIMX not reachable"
     end
@@ -1066,7 +1099,34 @@ do
                 UNIT_FAIL[#UNIT_FAIL + 1] = string.format("CheatTrusts case %d: expected %s", i, tostring(c[3]))
             end
         end
+        -- "[cheat] learned" only when a cheat's numbers changed: the
+        -- autosave runs every 60 s and would repeat every cheat ever seen
+        local FL, FDB = probe("flush_log"), probe("FlushDB")
+        if FL and FDB then
+            local function learned()
+                FL()
+                local _, n = (LOG_CAPTURE[1] or ""):gsub("%[cheat%] learned nl:", "")
+                return n
+            end
+            FDB(); local c1 = learned()
+            FDB(); local c2 = learned()
+            if c1 == 0 or c2 > c1 then
+                UNIT_FAIL[#UNIT_FAIL + 1] = string.format("[cheat] learned: %d line(s) after one save, %d after an unchanged second", c1, c2)
+            end
+        end
         STATS.nl, STATS.gs = nil, nil
+        -- counts are capped on load as on credit: a saved 0/5e8 must not
+        -- need ~90 shots of halving before the method can recover
+        local CPT = probe("CP")
+        if CPT and CPT.Fit then
+            local c = {h = 0, m = 5e8}
+            CPT.Fit(c)
+            if c.h + c.m > CPT.CAP then
+                UNIT_FAIL[#UNIT_FAIL + 1] = string.format("CP.Fit: %.0f shots left, cap %d", c.h + c.m, CPT.CAP)
+            end
+        else
+            UNIT_FAIL[#UNIT_FAIL + 1] = "CP.Fit not reachable"
+        end
         if TC({cheat = "nl", config_conf = 1, config_type = "luasense_beta"}) ~= nil
            or TC({cheat = "gs", config_conf = 1, config_type = "luasense_beta"}) ~= "luasense_beta"
            or TC({config_conf = 1, config_type = "luasense_beta"}) ~= "luasense_beta" then

@@ -57,7 +57,9 @@ The head is never taken away when it's the only way to kill.
 - **Trace calibration.** The docs don't say whether `trace_bullet`'s
   damage includes the head ×4 and armor. Every shot, the ragebot's own
   predicted damage (`aim_fire.damage`) is compared with our trace for the
-  same hitgroup. Once 5 shots agree, the median ratio is applied
+  same hitgroup. Only shots predicted below the target's health count:
+  if the ragebot caps a lethal prediction at health, it would read low
+  (AWP head 100 / 448 = x0.22). Once 5 shots agree, the median ratio is applied
   automatically (`[aim] calibration head: ragebot damage = traced x...`).
   `tools/log_report.lua` prints the same ratio offline (TRACE CALIBRATION).
 - **Cost.** At most 8 traces per enemy per update, throttled as above.

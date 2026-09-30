@@ -3,6 +3,28 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.5.3 – Explore / verify pass 3: aim fields, calibration, cheat stats.
+          FIXED: trace calibration could be pulled down by lethal shots.
+          If the ragebot caps its predicted damage at the target's health
+          (the docs don't say), an AWP head on a 100 HP enemy reads 100 /
+          448 = x0.22, and after five such shots a 240 wallbang head no
+          longer counted as a kill -- the aim policy would drop "head".
+          Only predictions below health calibrate now (the script and
+          log_report). Harness: 0.22 on 8.5.2, unchanged now.
+          FIXED: a player-list set that raised was cached as written (the
+          write cache stored the value first), so that field was never
+          retried; and the aim field kept the previous value for a tick
+          instead of its fallback. Both harness-tested (fail on 8.5.2).
+          FIXED: saved cheat stats weren't capped on load: a 0/5e8 entry
+          needed ~90 shots of halving before the method could recover.
+          Load and credit share one cap (CP.Fit).
+          CHANGED: "[cheat] learned" is logged only when a cheat's numbers
+          changed, not for every cheat on every 60 s autosave.
+          ADDED: log_report BY ENEMY SPEED (mv=), a check on st= that
+          doesn't go through the classifier.
+          VERIFIED, NOT CHANGED: the Write fallback chain ends (On -> Force
+          -> "-", Off -> "-"); the probe cadence (every 4th shot, counted
+          at aim_fire); EnemyMaxSpeed costs three prop reads per record.
   v8.5.2 – Explore / verify pass 2.
           FIXED: switching Resolver off mid-round left the last forced
           body yaw and aim overrides on every enemy until the next round
