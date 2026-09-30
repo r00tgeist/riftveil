@@ -43,13 +43,20 @@ next: `docs/ROADMAP.md`. Earlier versions are kept in `versions/`.
 
 ## Weapon aim
 
-Per enemy, per tick: **prefer body** when one body shot from your weapon
-kills (AWP always, scout at 68 HP or less, R8 73, auto 60, deagle 53,
-pistols 22 -- after armor), **safe point** after two resolver misses in a
-row on that player, otherwise your ragebot config as it is. Head stays
-available: nothing is ever forced. The player-list fields are checked the
-first time they're used; if they don't behave, the policy turns itself off
-for the session and says so in the log.
+Decided on the **real damage from where you stand**. The script traces from
+your eye (and a few ticks ahead while you peek) to the enemy's head and
+body, through whatever is in between.
+
+- **A body shot kills** (or two with a charged double tap on an auto,
+  deagle or pistol) → prefer body.
+- **Only the head kills** (wallbang, body behind cover, scout on a full-HP
+  enemy) → body preference off for that enemy, so the head is taken. On
+  safe points if the resolver just missed twice or they're in the air.
+- **Nothing kills** → your ragebot config as it is.
+
+The script checks the player-list fields in game and calibrates its traces
+against the ragebot's own damage prediction. How and why, with sources:
+`docs/WEAPON_PLAN.md`.
 
 ## Cheat-based resolving
 

@@ -1,95 +1,83 @@
-# Per-weapon aim policy — implementation plan (v2)
+# Per-weapon aim policy
 
-Status: **built in v8.3** as a first, conservative version (one-shot-lethal prefer body; safe point after two resolver misses; fields verified at run time). The fitted head / safe-point / body model below is the next step, once `pol=` and `wpn=` logs exist.
-(`wpn=`, `hp=`, `ar=`, `aim=`, `pdmg=` on every shot line). One match of
-that data plus an in-game check of the player-list fields come first.
+Status: **v8.4 built.** It decides on traced damage, not on weapon tables.
+v8.3 used nominal chest damage ("AWP: body always"). That was wrong
+whenever the body shot can't kill from where you stand: a wallbang, a body
+behind cover, a head-over-box peek. v8.4 traces the real damage.
 
-## Principle
+## What the research says
 
-The head is always an option. Nothing in this design forbids it; the
-policy only *leans* the ragebot per enemy, per tick, through soft
-player-list overrides (prefer body, prefer safe point), never "force
-body". gamesense's own per-weapon configs (RAGE › Weapon type) stay the
-baseline; RIFTVEIL adds the one input the ragebot lacks: how sure the
-resolver is about this enemy's head right now.
+Sources are listed at the end. None of this was invented for RIFTVEIL.
 
-## The decision, derived — not hand-picked
+1. **Public gamesense scripts decide lethality by tracing.** "Force body
+   aim on peek" and "Lethality indicator" both call
+   `client.trace_bullet(local, eye → enemy hitbox)` and compare the returned
+   damage with the enemy's `m_iHealth`. The peek script traces the pelvis,
+   stomach, chest and legs from three points around your eye, plus a
+   position 5 ticks ahead. With a charged double tap on a fast weapon, it
+   counts two shots as lethal.
+2. **The player-list values seen in real scripts** are
+   `"Override prefer body aim"` = `"-"` / `"Force"` and
+   `"Override safe point"` = `"-"` / `"On"`. No public script uses `"On"`
+   or `"Off"` for body aim, so RIFTVEIL verifies every value in game (below).
+3. **HvH config guides (onetap, aimware).**
+   - Body aim is set to **"lethal"** (body only when it kills) for most
+     weapons.
+   - AWP and autos use hitbox *priority*.
+   - AWP minimum damage is **101**: the AWP only fires when the shot kills,
+     head or body.
+   - Safe point: *force* on AWP, prefer or force on autos, optional on
+     scout.
+4. **"Force safe point on specific conditions"**, a public script, forces
+   safe point when the enemy is **in the air**, **ducking**, or **below X
+   HP**.
 
-`tools/aim_model.lua` computes, per weapon, enemy HP, body exposure and
-resolver certainty `p`, which option maximizes the probability of killing
-within one peek (~0.6 s), with each later kill discounted when the enemy
-shoots back:
+## The decision (per enemy, the threat every 2 ticks, others every 6)
 
-| Option | Hit chance per shot | When it wins |
+Traced damage to the head (hitbox 0) and the body (pelvis 2, stomach 3,
+chest 5, taking the highest). It's traced from your eye, and while you
+move, also from 4 ticks ahead.
+
+| Situation | Written | Why |
 |---|---|---|
-| **head** | `geo_head × p` | resolver sure enough |
-| **head, safe point** | `geo_sp` (side-proof, smaller area) | head needed but resolver unsure |
-| **prefer body** | `geo_body(exposure) × 0.95` | body lethal within the peek *and* exposed |
+| A body shot kills (or two with a charged DT on auto / deagle / pistol) | prefer body **On** | a body kill doesn't depend on the desync side |
+| Only the head kills (wallbang, body behind cover, scout at full HP) | prefer body **Off** | a global "prefer body" must not trade a lethal head for a non-lethal body |
+| ...and our side is in doubt (2 resolver misses in a row) or they're airborne | + safe point **On** | the head kill, on points that hit whatever the side |
+| Nothing kills, side in doubt | safe point **On** | |
+| Nothing kills | both **"-"** | your ragebot config decides |
 
-What comes out (armor + helmet; full table: run the model):
+The head is never taken away when it's the only way to kill.
 
-1. **Head vs head-on-safe-points is one ratio.** Head beats safe points
-   exactly when `p > geo_sp / geo_head`. With the placeholder values
-   (0.60 / 0.85) that is p > 0.71 for *every* weapon — so the most
-   important number in the whole policy is how much hit chance safe
-   points cost versus a normal head shot. It must be measured, not
-   assumed (step 2).
-2. **Body only when it is lethal within the peek and visible.**
-   - AWP, body fully open: body (112 dmg kills). Partial or head-only
-     exposure: head, on safe points when unsure.
-   - Scout: body only at ≤ ~74 HP; above that, head / head-sp.
-   - R8: body at ≤ ~80 HP.
-   - Auto, deagle at full HP: body wins only with no time pressure (2-3
-     hits). When the enemy shoots back, one head hit now beats two body
-     hits 0.25 s later → head / head-sp.
-   - Pistols: head / head-sp almost always.
-3. **Exposure decides as much as the weapon.** "Full open" is what makes
-   body viable; a head-first peek over cover makes body worthless no
-   matter the weapon.
+## Built-in checks
 
-## Inputs, per enemy, per tick (threat only, to stay cheap)
+- **Value verification.** The first time each value is written, it's read
+  back. If it doesn't stick, it falls back: body On → Force → "-",
+  body Off → "-", safe point On → "-". The log says which values work
+  (`[aim] ... supported` / `not supported, using ...`).
+- **Trace calibration.** The docs don't say whether `trace_bullet`'s
+  damage includes the head ×4 and armor. Every shot, the ragebot's own
+  predicted damage (`aim_fire.damage`) is compared with our trace for the
+  same hitgroup. Once 5 shots agree, the median ratio is applied
+  automatically (`[aim] calibration head: ragebot damage = traced x...`).
+  `tools/log_report.lua` prints the same ratio offline (TRACE CALIBRATION).
+- **Cost.** At most 8 traces per enemy per update, throttled as above.
+  Check it with `rv_perf` in game.
 
-| Input | Source | Cost |
-|---|---|---|
-| weapon class | local weapon item index | 2 API calls |
-| resolver certainty `p` | engine posterior of the applied arm; 1.0 in a trusted vuln window | none |
-| HP, armor, helmet | `m_iHealth`, `m_ArmorValue`, `m_bHasHelmet` | 3 props |
-| exposure | `client.trace_bullet` from our eye to head and chest: estimated damage vs open-air damage | 2 traces, threat only |
-| time pressure | enemy weapon class and whether we're in their view | cheap props |
+## Next
 
-## Measured constants (from logs, not guessed)
+1. From the logs (`pol= tr= wpn= hp= aim= pdmg=`), measure the kill rate of
+   each choice per weapon, and whether the airborne safe point pays.
+2. Add a crouching / fake-duck safe point if the logs show crouch shots
+   missing.
+3. Replace the fixed 4-tick peek offset with your actual acceleration.
 
-| Constant | How |
-|---|---|
-| `geo_head`, `geo_body` | hit rate by `wpn` × `aim=` hitgroup on shots with a right side (head hits confirm side) |
-| `geo_sp` | same, on shots taken with the safe-point override on (step 4 logs it) |
-| weapon damage table | `dmg=` by `group=`, `wpn=`, `ar=` |
-| peek length | time between first aim_fire and loss of the target |
+## Sources
 
-## Steps
-
-1. **Verify the player-list fields in game.** `pcall(plist.get, ent,
-   "Override prefer body aim")` / `"Override safe point"`: log existence
-   and accepted values. The only source for the names so far is an
-   obfuscated script — not enough to build on.
-2. **Collect a v7.8 match; fit the constants** above with an extension of
-   `tools/log_report.lua`; rerun `aim_model.lua` with the fitted values.
-3. **Implement `AimPolicy(rec, weapon, exposure)`** in the ApplyDecision
-   stage, a pure function returning one of `head`, `head_sp`, `body`,
-   mapped to soft overrides through `PSet` (cached writes). Head is never
-   blocked.
-4. **Log the decision** per shot (`pol=head|sp|body`) so the kill rate of
-   each choice can be compared per weapon.
-5. **Menu:** Detection › "Weapon aim policy", off by default until the
-   first measured match.
-6. **Tests:** unit-test the policy against `aim_model.lua`'s table;
-   fuzz the new plist writes (allowed values only); differential test
-   that with the policy off nothing changes.
-
-## Risks
-
-- Field names or values differ → step 1.
-- The placeholder `geo_sp / geo_head` ratio decides the head/safe-point
-  split everywhere → nothing ships before step 2 measures it.
-- Exposure traces cost time → threat only, once per tick, and skipped
-  when no shot is possible.
+- gamesense Lua API, `client` (trace_bullet, scale_damage, eye_position):
+  https://docs.gamesense.gs/docs/api/client
+- Public gamesense workshop scripts (Force body aim on peek, Actual force
+  body aim on lethal, Lethality indicator, Force safe point on specific
+  conditions): https://github.com/fakeangle/gamesense_workshop_dump
+- HvH config guides, onetap and aimware:
+  https://github.com/csgohacks/master-guide/blob/master/cheat-configuration/onetap/hvh.md
+  https://github.com/csgohacks/master-guide/blob/master/cheat-configuration/aimware/hvh.md

@@ -48,6 +48,7 @@ end
 
 local by_meth, by_arm, by_player, by_origin, by_state, by_wpn, by_cheat, by_pol = {}, {}, {}, {}, {}, {}, {}, {}
 local calib = {}          -- decile -> {n, heads, psum}
+local trace_ratio = {head = {}, body = {}}   -- v8.4+: ragebot predicted / traced damage
 local versions, engine_lines, resets = {}, {}, 0
 local brier_n, brier_se = 0, 0
 local total_lines = 0
@@ -94,6 +95,18 @@ for _, path in ipairs(files) do
                 -- choices per weapon, the aim model's missing input
                 local aim = line:match(" aim=(.-) pdmg=")
                 if aim then targets[#targets + 1] = bucket(by_wpn, wpn .. " -> " .. aim) end
+            end
+            -- trace calibration (v8.4+): tr=head/body traced damage vs the
+            -- ragebot's predicted damage for the hitgroup it aimed at
+            local th, tb = line:match(" tr=(%d+)/(%d+)")
+            local aim_at, pdmg = line:match(" aim=(.-) pdmg=(%-?%d+)")
+            th, tb, pdmg = tonumber(th), tonumber(tb), tonumber(pdmg)
+            if th and pdmg and pdmg > 0 then
+                if aim_at == "head" and th > 0 then
+                    trace_ratio.head[#trace_ratio.head + 1] = pdmg / th
+                elseif (aim_at == "chest" or aim_at == "stomach") and tb > 0 then
+                    trace_ratio.body[#trace_ratio.body + 1] = pdmg / tb
+                end
             end
             -- weapon aim policy (v8.3+): prefer body / safe point / default,
             -- per weapon; body hits count here, since body is the point
@@ -164,7 +177,15 @@ report("BY METHOD (what was applied)", by_meth)
 report("BY MOVEMENT STATE (v7.5+ logs)", by_state)
 report("BY WEAPON (v7.7+ logs)", by_wpn)
 report("BY ENEMY CHEAT (v7.9+ logs, cheat revealer running)", by_cheat)
-report("BY AIM POLICY (v8.3+; body = prefer body, sp = safe point, - = ragebot default)", by_pol)
+report("BY AIM POLICY (body = prefer body, head = head is the only kill, sp / headsp = safe point, - = ragebot default)", by_pol)
+for _, g in ipairs({"head", "body"}) do
+    local t = trace_ratio[g]
+    if #t > 0 then
+        table.sort(t)
+        if g == "head" then print("\nTRACE CALIBRATION (ragebot predicted damage / traced damage; 1.0 = traces already final)") end
+        print(("  %-5s median x%.2f over %d shots  (the script applies this itself after 5)"):format(g, t[math.floor((#t + 1) / 2)], #t))
+    end
+end
 report("BY ENGINE ARM", by_arm)
 report("ENGINE OVERRIDES vs CHAIN PICKS", by_origin)
 report("BY PLAYER (5+ shots)", by_player, 5)

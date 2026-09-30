@@ -44,7 +44,7 @@ local PLIST_LOG = {}
 local PLIST_STATE = {}
 -- Values the aim policy may write to gamesense's player-list combo fields
 local AIM_FIELD_VALUES = {
-    ["Override prefer body aim"] = {["-"] = true, ["On"] = true},
+    ["Override prefer body aim"] = {["-"] = true, ["On"] = true, ["Off"] = true, ["Force"] = true},
     ["Override safe point"]      = {["-"] = true, ["On"] = true},
 }
 
@@ -66,7 +66,7 @@ local MUST_RUN = os.getenv("RV_MUST_RUN_V7") and {
     "BuildOverlay", "DrawPanel", "FitText", "UpdateDrag", "DrawShiftMarkers", "SetPanelPos",
     "on_aim_fire", "on_aim_hit", "on_aim_miss", "FlushDB",
     "TorsoCluster", "ExtrapolateOrigin", "clear_log",
-    "AimPolicyTick", "AimPolicyFor", "AimWrite", "LocalWeaponClass",
+    "Tick", "Decide", "Write", "Traced", "LocalWeaponClass",
 }
 
 -- ── Mutable world state the mocks read from ──────────────────────────
@@ -78,7 +78,9 @@ local W = {
         [101] = {sim = 0, vx = 0, vy = 0, pose01 = 0.5, eye = 45, duck = 0,
                  torso = 70, gfy = 60},
         [102] = {sim = 0, vx = 250, vy = 0, pose01 = 0.5, eye = -30, duck = 0,
-                 torso = -10, gfy = -15},
+                 torso = -10, gfy = -15,
+                 -- fully open: the AWP's body shot kills (aim policy "body")
+                 tdmg = {[0] = 448, [2] = 112, [3] = 112, [5] = 112}},
     },
 }
 local CUR = 101  -- entity whose animstate the FFI proxy currently reports
@@ -157,6 +159,16 @@ local mock = {
         if k == "key_state"          then return function(key) return key == 0x01 and W.m1 == true end end
         if k == "trace_line"         then return function() return 1.0, -1 end end
         if k == "eye_position"       then return function() return 0, 0, 64 end end
+        -- Traced damage per hitbox from W.players[ent].tdmg (default: head
+        -- 180, body 55 -- an armored enemy behind nothing, scout-like).
+        if k == "trace_bullet"       then return function(_, _, _, _, tx)
+            local target, hb = math.floor(tx / 1000), math.floor(tx % 1000)
+            local p = W.players[target]
+            if not p then return nil, 0 end
+            local d = p.tdmg and p.tdmg[hb]
+            if d == nil then d = (hb == 0) and 180 or 55 end
+            return target, d
+        end end
         if k == "register_esp_flag"  then return function(_, _, _, _, cb) ESP_FLAGS[#ESP_FLAGS + 1] = cb end end
         if k == "set_event_callback" then return function(name, cb) CALLBACKS[name] = cb end end
         if k == "log"                then return function() end end
@@ -191,7 +203,8 @@ local mock = {
             local s = W.players[p]
             return s and (W.tick * 0.5 + (s.jump or 0)) or 0, 0, 0
         end end
-        if k == "hitbox_position"  then return function() return 100, 0, 64 end end
+        -- x encodes (entity, hitbox) so the trace_bullet mock knows what it hit
+        if k == "hitbox_position"  then return function(ent, hb) return (ent or 0) * 1000 + (tonumber(hb) or 0), 0, 64 end end
         if k == "get_player_weapon" then return function() return W.weapon and 900 or nil end end
         if k == "get_prop" then
             return function(ent, prop, idx)
@@ -292,7 +305,11 @@ local mock = {
                     PLIST_LOG[#PLIST_LOG + 1] = string.format("%d\t%s\t%s\t%s", W.tick, tostring(ent), field, tostring(value))
                 end
                 local bad
-                PLIST_STATE[tostring(ent) .. "\t" .. field] = value
+                -- RV_AIM_REJECT=On: the game "ignores" that aim value, to test the
+                -- read-back fallback (it stores "-" instead)
+                local stored = value
+                if AIM_FIELD_VALUES[field] and value == os.getenv("RV_AIM_REJECT") then stored = "-" end
+                PLIST_STATE[tostring(ent) .. "\t" .. field] = stored
                 if field == "Force body yaw value" then
                     if type(value) ~= "number" or value ~= value or math.abs(value) > 60 then bad = true end
                 elseif AIM_FIELD_VALUES[field] then
@@ -962,37 +979,42 @@ do
     end
 end
 
--- WEAPON AIM POLICY: prefer body only when one body shot kills, safe point
--- after two resolver misses in a row, the ragebot's default otherwise.
+-- WEAPON AIM POLICY: the decision on traced damage, and calibration.
 do
-    local POL = probe("AimPolicyFor")
-    if POL then
-        local P = {}
-        W.players[950] = P
+    local AX = probe("AIMX")
+    if AX then
         local cases = {
-            -- weapon, hp, armor, miss streak, vuln ttl, expected
-            {"awp", 100, 100, 0, 0, "body"},
-            {"scout", 100, 100, 0, 0, "-"},
-            {"scout", 60, 100, 0, 0, "body"},
-            {"scout", 72, 0, 0, 0, "body"},     -- unarmored: 88 * 0.92 = 81
-            {"auto", 61, 100, 0, 0, "-"},
-            {"auto", 60, 100, 0, 0, "body"},
-            {"deagle", 100, 100, 2, 0, "sp"},
-            {"deagle", 100, 100, 2, 3, "-"},    -- vulnerability window open
-            {"pistol", 20, 100, 0, 0, "body"},
-            {"other", 10, 100, 5, 0, "-"},      -- knife/nade/unknown: default
+            -- hp, traced head, traced body, dt2, unsure, air, expected
+            {100, 448, 112, false, false, false, "body"},    -- AWP, full open: body kills
+            {100, 240,  60, false, false, false, "head"},    -- AWP wallbang: only the head kills
+            {100, 300,   0, false, false, false, "head"},    -- head over cover, body hidden
+            {100, 299,  74, false, false, false, "head"},    -- scout, full HP: head is the kill
+            {70,  299,  74, false, false, false, "body"},    -- scout, 70 HP: body kills
+            {100, 264,  65, true,  false, false, "body"},    -- auto + charged DT: two body shots
+            {100, 264,  65, false, false, false, "head"},    -- auto, no DT
+            {100, 240,  60, false, true,  false, "headsp"},  -- only head kills, side in doubt
+            {100, 240,  60, false, false, true,  "headsp"},  -- only head kills, enemy in air
+            {100,  80,  40, false, true,  false, "sp"},      -- nothing kills, side in doubt
+            {100,  80,  40, false, false, false, "-"},       -- nothing kills: ragebot default
+            {0,   448, 112, false, false, false, "-"},       -- dead / no HP read
         }
         for i, c in ipairs(cases) do
-            P.hp, P.armor = c[2], c[3]
-            local got = POL({aim_miss_streak = c[4], vuln_ttl = c[5]}, 950, c[1])
-            if got ~= c[6] then
-                UNIT_FAIL[#UNIT_FAIL + 1] = string.format("AimPolicyFor case %d (%s hp %d): got %s, expected %s",
-                    i, c[1], c[2], tostring(got), c[6])
+            local got = AX.Decide(c[1], c[2], c[3], c[4], c[5], c[6])
+            if got ~= c[7] then
+                UNIT_FAIL[#UNIT_FAIL + 1] = string.format("AIMX.Decide case %d (hp %d head %d body %d): got %s, expected %s",
+                    i, c[1], c[2], c[3], tostring(got), c[7])
             end
         end
-        W.players[950] = nil
+        -- calibration: the ragebot predicts 4x our head trace on 5 shots
+        local fh0 = AX.CAL.fh
+        for _ = 1, 5 do AX.OnFire({aim_th = 50, aim_tb = 40}, 1, 200) end
+        if math.abs(AX.CAL.fh - 4) > 0.01 then
+            UNIT_FAIL[#UNIT_FAIL + 1] = string.format("AIMX calibration: head factor %.2f after 5 shots at 4x, expected 4", AX.CAL.fh)
+        end
+        for k in pairs(AX.CAL.head) do AX.CAL.head[k] = nil end
+        AX.CAL.fh = fh0
     elseif not os.getenv("RV_TARGET") then
-        UNIT_FAIL[#UNIT_FAIL + 1] = "AimPolicyFor not reachable"
+        UNIT_FAIL[#UNIT_FAIL + 1] = "AIMX not reachable"
     end
 end
 

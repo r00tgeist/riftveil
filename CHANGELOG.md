@@ -3,6 +3,30 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.4 – Weapon aim decided on traced damage.
+          v8.3 read nominal chest damage ("AWP: prefer body always"),
+          which is wrong whenever the body shot can't kill from where you
+          stand: a wallbang, a body behind cover, a head-over-box peek.
+          Now, per enemy: client.trace_bullet from your eye (and 4 ticks
+          ahead while moving) to the head and to pelvis/stomach/chest --
+          the method the public gamesense scripts use.
+            body shot kills (two with a charged DT on auto/deagle/pistol)
+              -> prefer body On
+            only the head kills -> prefer body OFF for that enemy, so a
+              global prefer body can't trade a lethal head for a
+              non-lethal body; + safe point when our side is in doubt (2
+              resolver misses in a row) or the enemy is airborne
+            nothing kills -> ragebot default (+ safe point if in doubt)
+          Every player-list value is read back on first use and falls
+          back if the game rejects it (body On -> Force -> -, Off -> -).
+          Trace scaling self-calibrates against the ragebot's predicted
+          damage (median of 15 shots, applied after 5). Shot lines log
+          tr=head/body; log_report prints TRACE CALIBRATION; the panel
+          shows BODY / HEAD / HEAD SP / SAFE PT.
+          Research and sources: docs/WEAPON_PLAN.md. Tests: 12 decision
+          cases (AWP open vs wallbang, head over cover, scout full vs 70
+          HP, auto with/without DT, safe point, airborne), calibration,
+          and the rejected-value fallback.
   v8.3 – Weapon aim policy, built (Detection › Weapon aim, on once).
           v8.2 only logged weapon data and probed the fields; this acts.
           PREFER BODY when one body shot kills: enemy HP <= our weapon's

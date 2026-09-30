@@ -1,5 +1,5 @@
 -- ════════════════════════════════════════════════════════════════════
---  RIFTVEIL  v8.3  ·  gamesense.pub  ·  unmatched.gg
+--  RIFTVEIL  v8.4  ·  gamesense.pub  ·  unmatched.gg
 --  Two-tier memory · period prediction · config recognition
 --  Vulnerability windows · cheat revealer · per-cheat method trust
 -- ════════════════════════════════════════════════════════════════════
@@ -14,6 +14,9 @@
 --          next steps: docs/ROADMAP.md.
 --  v8.3 – Weapon aim policy: prefer body when one body shot kills, safe
 --          point after two resolver misses in a row, fields verified.
+--  v8.4 – Weapon aim on traced damage: body only when a body shot kills
+--          from here; when only the head kills (wallbang, cover) body
+--          preference is switched off. Self-calibrating. docs/WEAPON_PLAN.md
 -- ════════════════════════════════════════════════════════════════════
 --  Changelog
 --    v6.2 – Senior resolver-review pass #3, focused on resolver-domain
@@ -693,7 +696,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.3"
+local RV_VERSION = "8.4"
 
 local ffi = require "ffi"
 
@@ -3354,29 +3357,47 @@ end
 -- ══════════════════════════════════════════════════════════════════
 --  WEAPON AIM POLICY  (Detection > Weapon aim)
 --
---  Per enemy, per tick, one of three: ragebot default ("-"), prefer body,
---  or head on safe points. Head is never taken away -- "prefer body aim"
---  still shoots the head when no body point is hittable, and nothing here
---  ever sets "Force". The ragebot's own per-weapon configs stay the base.
+--  The ragebot's per-weapon config stays the base. Per enemy, this only
+--  answers one question with the REAL damage available right now: does a
+--  body shot kill, does only a head shot kill, or neither?
 --
---  PREFER BODY when one body shot kills: enemy HP <= chest damage of our
---  weapon after armor, with an 8% margin for range falloff (CS:GO weapon
---  data, same numbers as tools/aim_model.lua). In practice:
---      AWP     always (112 armored)        scout   <= 68 HP
---      R8      <= 73 HP                    auto    <= 60 HP
---      deagle  <= 53 HP                    pistols <= 22 HP
---  A body shot that kills doesn't care which side the desync is on; a
---  head shot does. That is the whole case for body when it's lethal.
+--  REAL DAMAGE. client.trace_bullet from our eye to the enemy's head
+--  (hitbox 0) and body (pelvis 2, stomach 3, chest 5) returns the damage a
+--  bullet would do along that line -- walls, cover, distance, armor all
+--  included -- the same way the public gamesense scripts ("force body aim
+--  on peek", "lethality indicator") decide lethality. While we move, a
+--  second eye point 4 ticks ahead is traced too, so a peek is judged from
+--  where we will shoot, not where we stand.
 --
---  SAFE POINT after two resolver misses in a row on that player (reset by
---  a head hit, not a body hit -- a body hit says nothing about the side):
---  two misses are evidence our side is wrong, and a safe point is a point
---  that is hit whatever the side is. Not during a vulnerability window,
---  where the correction is read, not guessed.
+--  DECISION (hp = enemy health):
+--    body shot kills          -> prefer body. A body kill doesn't depend on
+--      (or two with a charged   the desync side; a head shot does. With
+--       double tap, for autos,  double tap an auto or pistol lands two
+--       deagle, pistols)        shots before they can react.
+--    only the head kills      -> body preference OFF for this enemy, so a
+--      (wallbang, body behind   global "prefer body aim" can't trade a
+--       cover, scout at full    lethal head for a non-lethal body. On safe
+--       HP)                     points when our side is in doubt (two
+--                               resolver misses in a row) or they're in
+--                               the air.
+--    neither kills            -> ragebot default; safe point when our side
+--                               is in doubt.
+--  Nothing is ever forced to body while a head kill is the only kill: the
+--  head is always available when it's what kills.
 --
---  The player-list fields are verified at run time: the first "On" we
---  write is read back; if the field is missing or holds something else,
---  the policy switches itself off for the session and logs why.
+--  SELF-CALIBRATION. The docs don't say whether trace_bullet's damage
+--  includes the hitgroup multiplier (head x4) and armor. Every shot the
+--  ragebot fires carries its own predicted damage; the ratio of that to our
+--  traced damage for the same hitgroup is kept (median of the last 15) and
+--  applied once 5 shots agree. Until then the traced damage is taken as-is,
+--  as the public scripts do.
+--
+--  PLAYER-LIST VALUES. "Override prefer body aim" = "-" / "Force" and
+--  "Override safe point" = "-" / "On" appear in public workshop scripts;
+--  "On" and "Off" for body aim are the natural remaining options. Every
+--  value is written once, read back, and if it doesn't stick it falls back
+--  (body On -> Force -> "-", body Off -> "-", safe point On -> "-") and the
+--  log says so ([aim] lines).
 -- ══════════════════════════════════════════════════════════════════
 local WEAPON_CLASS = {
     [9] = "awp", [40] = "scout", [11] = "auto", [38] = "auto",
@@ -3392,50 +3413,166 @@ local function LocalWeaponClass()
     return WEAPON_CLASS[bit.band(idx, 0xFFFF)] or "other"
 end
 
--- {base damage, armor penetration}; chest multiplier 1
-local BODY_DMG = {awp = {115, 0.975}, scout = {88, 0.85}, auto = {80, 0.825},
-                  r8 = {86, 0.932}, deagle = {63, 0.932}, pistol = {35, 0.70}}
-local AIM_F_BODY, AIM_F_SP = "Override prefer body aim", "Override safe point"
-local AIM = {ok = nil}   -- nil: not verified yet, true: verified, false: off
+-- Everything else lives in its own function scope (the main chunk is near
+-- Lua's 200-local limit); AIMX is the interface.
+local AIMX = (function()
+local F_BODY, F_SP = "Override prefer body aim", "Override safe point"
+-- per field and value: nil untested, true read back fine, false rejected
+local VAL_OK   = {[F_BODY] = {["-"] = true}, [F_SP] = {["-"] = true}}
+local FALLBACK = {[F_BODY] = {On = "Force", Force = "-", Off = "-"}, [F_SP] = {On = "-"}}
 
-local function AimWrite(ent, field, v)
-    if AIM.ok == false then return end
-    local okw = pcall(PSet, ent, field, v)
-    if not okw then
-        AIM.ok = false
-        warn("aim", "writing %s failed -- weapon aim policy off this session", field)
-    elseif AIM.ok == nil and v ~= "-" then
+local HB_HEAD, HB_BODY = 0, {2, 3, 5}          -- head; pelvis, stomach, chest
+local DT_WEAPON = {auto = true, deagle = true, pistol = true}
+local PEEK_TICKS = 4                            -- eye extrapolation while moving
+local EYES = {{0, 0, 0}, {0, 0, 0}}
+local CAL = {head = {}, body = {}, fh = 1, fb = 1}
+
+local DT_REF, DT_KEY
+do
+    local ok, a, b = pcall(ui.reference, "RAGE", "Other", "Double tap")
+    if ok then DT_REF, DT_KEY = a, b end
+end
+local function DtReady()
+    if not DT_REF then return false end
+    local ok1, on = pcall(ui.get, DT_REF)
+    if not (ok1 and on) then return false end
+    if not DT_KEY then return true end
+    local ok2, key = pcall(ui.get, DT_KEY)
+    return ok2 and key == true
+end
+
+local function Write(ent, field, v)
+    local ok = VAL_OK[field]
+    local n = 0
+    while ok[v] == false and n < 3 do v = FALLBACK[field][v] or "-"; n = n + 1 end
+    if not pcall(PSet, ent, field, v) then
+        if v ~= "-" then ok[v] = false end
+        return
+    end
+    if ok[v] == nil then
         local okg, back = pcall(plist.get, ent, field)
-        AIM.ok = okg and back == v
-        info("aim", "%s: wrote %s, read back %s -- %s", field, v, tostring(back),
-             AIM.ok and "policy active" or "policy off this session")
-        if not AIM.ok then pcall(plist.set, ent, field, "-") end
+        ok[v] = okg and back == v
+        local fb = FALLBACK[field][v] or "-"
+        info("aim", "%s = %s: read back %s -- %s", field, v, tostring(back),
+             ok[v] and "supported" or ("not supported, using " .. fb))
+        if not ok[v] then
+            local c = PL_CACHE[ent]
+            if c then c[field] = nil end
+            Write(ent, field, fb)
+        end
     end
 end
 
-local function AimPolicyFor(rec, ent, wpn)
-    local bd = BODY_DMG[wpn]
-    if not bd then return "-" end
-    local hp    = tonumber(entity.get_prop(ent, "m_iHealth")) or 100
-    local armor = tonumber(entity.get_prop(ent, "m_ArmorValue")) or 0
-    local body  = bd[1] * (armor > 0 and bd[2] or 1) * 0.92
-    if hp > 0 and hp <= body then return "body" end
-    if rec and (rec.aim_miss_streak or 0) >= 2 and rec.vuln_ttl == 0 then return "sp" end
+-- Highest traced damage to one hitbox from any of our eye points; 0 when
+-- the line reaches a different player or nobody.
+local function Traced(me, ne, target, hb)
+    local okp, x, y, z = pcall(entity.hitbox_position, target, hb)
+    if not (okp and isnum(x) and isnum(y) and isnum(z)) then return 0 end
+    local best = 0
+    for i = 1, ne do
+        local e = EYES[i]
+        local okt, hit, dmg = pcall(client.trace_bullet, me, e[1], e[2], e[3], x, y, z, false)
+        if okt and hit == target and isnum(dmg) and dmg > best then best = dmg end
+    end
+    return best
+end
+
+-- The decision itself, on numbers only (unit-tested in the harness).
+--   hp: enemy health; head, body: traced damage after calibration;
+--   dt2: a charged double tap fires two shots; unsure: our side is in
+--   doubt; air: enemy airborne.
+local function Decide(hp, head, body, dt2, unsure, air)
+    if not (isnum(hp) and hp > 0) then return "-" end
+    if body >= hp or (dt2 and body * 2 >= hp) then return "body" end
+    if head >= hp then return (unsure or air) and "headsp" or "head" end
+    if unsure then return "sp" end
     return "-"
 end
 
-local function AimPolicyTick()
+local function Median(t)
+    local c = {}
+    for i = 1, #t do c[i] = t[i] end
+    table.sort(c)
+    local m = math.floor((#c + 1) / 2)
+    return (#c % 2 == 1) and c[m] or (c[m] + c[m + 1]) / 2
+end
+
+-- aim_fire: the ragebot's predicted damage for the hitgroup it aimed at,
+-- against what we traced for that part.
+local function OnFire(rec, hitgroup, pred)
+    if not (rec and isnum(pred) and pred > 0) then return end
+    local group = (hitgroup == 1) and "head" or ((hitgroup == 2 or hitgroup == 3) and "body" or nil)
+    if not group then return end
+    local traced = (group == "head") and rec.aim_th or rec.aim_tb
+    if not (isnum(traced) and traced > 0) then return end
+    local t = CAL[group]
+    t[#t + 1] = pred / traced
+    if #t > 15 then table.remove(t, 1) end
+    if #t >= 5 then
+        local m = Clamp(Median(t), 0.2, 5)
+        local key = (group == "head") and "fh" or "fb"
+        if math.abs(m - CAL[key]) > 0.1 then
+            CAL[key] = m
+            info("aim", "calibration %s: ragebot damage = traced x%.2f (%d shots)", group, m, #t)
+        end
+    end
+end
+
+local function Tick(tc, threat, ti)
     local wpn = DET.aim and LocalWeaponClass() or nil
+    local armed = wpn and wpn ~= "?" and wpn ~= "other"
+    local me, ne = entity.get_local_player(), 0
+    if armed and me then
+        local ex, ey, ez = client.eye_position()
+        if isnum(ex) and isnum(ey) and isnum(ez) then
+            EYES[1][1], EYES[1][2], EYES[1][3] = ex, ey, ez
+            ne = 1
+            local vx, vy = entity.get_prop(me, "m_vecVelocity")
+            if isnum(vx) and isnum(vy) and vx * vx + vy * vy > 900 then   -- moving > 30 u/s
+                local k = PEEK_TICKS * ti
+                EYES[2][1], EYES[2][2], EYES[2][3] = ex + vx * k, ey + vy * k, ez
+                ne = 2
+            end
+        end
+    end
+    local dt2 = armed and DT_WEAPON[wpn] and DtReady() or false
     for i = 1, #LIVE_ENEMIES do
         local ent = LIVE_ENEMIES[i]
         local s64 = EIDX_S64[ent]
         local rec = s64 and REC[s64]
-        local pol = wpn and AimPolicyFor(rec, ent, wpn) or "-"
+        local pol = "-"
+        if rec and ne > 0 then
+            -- the threat every 2 ticks, anyone else every 6
+            local every = (ent == threat) and 2 or 6
+            if not rec.aim_t_tc or tc - rec.aim_t_tc >= every or tc < rec.aim_t_tc then
+                rec.aim_t_tc = tc
+                rec.aim_th = Traced(me, ne, ent, HB_HEAD)
+                local b = 0
+                for j = 1, #HB_BODY do
+                    local d = Traced(me, ne, ent, HB_BODY[j])
+                    if d > b then b = d end
+                end
+                rec.aim_tb = b
+            end
+            local hp = tonumber(entity.get_prop(ent, "m_iHealth"))
+            local unsure = (rec.aim_miss_streak or 0) >= 2 and rec.vuln_ttl == 0
+            local air = rec.state == STATE.AIR or rec.state == STATE.AIR_CROUCH
+            pol = Decide(hp, (rec.aim_th or 0) * CAL.fh, (rec.aim_tb or 0) * CAL.fb, dt2, unsure, air)
+        end
         if rec then rec.aim_pol = pol end
-        AimWrite(ent, AIM_F_BODY, pol == "body" and "On" or "-")
-        AimWrite(ent, AIM_F_SP,   pol == "sp"   and "On" or "-")
+        Write(ent, F_BODY, (pol == "body") and "On" or ((pol == "head" or pol == "headsp") and "Off" or "-"))
+        Write(ent, F_SP, (pol == "sp" or pol == "headsp") and "On" or "-")
     end
 end
+
+-- Round/match reset: both fields back to the ragebot default.
+local function Reset(ent)
+    pcall(plist.set, ent, F_BODY, "-")
+    pcall(plist.set, ent, F_SP, "-")
+end
+
+return {Tick = Tick, Decide = Decide, OnFire = OnFire, Reset = Reset, CAL = CAL, VAL_OK = VAL_OK}
+end)() -- aim policy scope
 
 -- Read by the info panel and ESP flags (paint runs every frame; these only
 -- change once per net update or on a shot event).
@@ -3510,7 +3647,7 @@ local function Update()
         end
     end
     CTX.threat = ctx.threat
-    AimPolicyTick()
+    AIMX.Tick(ctx.cur_tc, ctx.threat, ctx.ti)
     UpdateEspState()
     STATE_VER = STATE_VER + 1
 
@@ -3565,6 +3702,8 @@ local function on_aim_fire(e)
         -- per-weapon aim policy: inputs and the choice in effect
         wpn     = LocalWeaponClass(),
         pol     = r and r.aim_pol or "-",
+        aim_th  = r and math.floor(r.aim_th or 0) or 0,   -- traced head / body damage
+        aim_tb  = r and math.floor(r.aim_tb or 0) or 0,
         aim_hg  = tonumber(e.hitgroup) or -1,
         aim_dmg = isnum(e.damage) and math.floor(e.damage) or -1,
         thp     = tonumber(entity.get_prop(t, "m_iHealth")) or -1,
@@ -3591,6 +3730,8 @@ local function on_aim_fire(e)
     if r and r.vuln_ttl > 0 and r.vuln_type and r.vuln_profile[r.vuln_type] then
         r.vuln_profile[r.vuln_type].seen = r.vuln_profile[r.vuln_type].seen + 1
     end
+    -- Weapon aim calibration: the ragebot's predicted damage vs our trace
+    AIMX.OnFire(r, tonumber(e.hitgroup), tonumber(e.damage))
     -- Shot counter for CheatTrusts' probe (every 4th shot at a player)
     if r then r.shots_fired = (r.shots_fired or 0) + 1 end
 end
@@ -3688,11 +3829,12 @@ local function on_aim_hit(e)
         end
     end
 
-    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s wpn=%s pol=%s hp=%d ar=%d aim=%s pdmg=%d cf=%.2f%s%s",
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f%s%s",
         entity.get_player_name(e.target) or "?",
         HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
         isnum(e.damage) and math.floor(e.damage) or 0,
-        d.meth, d.val, d.bt, d.state or "?", d.wpn or "?", d.pol or "-", d.thp or -1, d.tarm or -1,
+        d.meth, d.val, d.bt, d.state or "?", d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
+        d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
@@ -3757,9 +3899,10 @@ local function on_aim_miss(e)
 
     local is_resolver = reason == "?" or reason == "" or reason == "prediction error"
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s wpn=%s pol=%s hp=%d ar=%d aim=%s pdmg=%d cf=%.2f%s%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f%s%s",
         entity.get_player_name(e.target) or "?",
-        reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.wpn or "?", d.pol or "-", d.thp or -1, d.tarm or -1,
+        reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
+        d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
@@ -4003,6 +4146,9 @@ local METH_LABEL = {
     [METH.SYM_FLIP] = "sym-flip",
     [METH.META_HOLD]= "meta",
 }
+-- Weapon aim policy in effect on the threat (WEAPON AIM POLICY)
+local AIM_TAG = {body = "BODY", head = "HEAD", headsp = "HEAD SP", sp = "SAFE PT"}
+
 local function MethTag(meth)
     return string.upper(((METH_LABEL[meth] or meth):gsub("[-_]", " ")))
 end
@@ -4127,7 +4273,8 @@ local function BuildOverlay(OV, threat)
         local tags = {}
         if rec.cheat then tags[#tags+1] = string.upper(rec.cheat) end
         -- weapon aim policy in effect on this enemy
-        if rec.aim_pol == "body" then tags[#tags+1] = "BODY" elseif rec.aim_pol == "sp" then tags[#tags+1] = "SAFE PT" end
+        local pt = AIM_TAG[rec.aim_pol or "-"]
+        if pt then tags[#tags+1] = pt end
         if rec.preferred_bt > 0 then tags[#tags+1] = "BT " .. rec.preferred_bt end
         if rec.config_type and rec.config_conf >= CFG.CFG_THRESH then
             tags[#tags+1] = string.upper((rec.config_type:gsub("_", " ")))
@@ -4370,10 +4517,7 @@ local function ResetPlist()
             plist.set(i, "Correction active", false)
             plist.set(i, "High priority", false)
         end)
-        if AIM.ok then
-            pcall(plist.set, i, AIM_F_BODY, "-")
-            pcall(plist.set, i, AIM_F_SP, "-")
-        end
+        AIMX.Reset(i)
     end
     PL_CACHE = {}; PL_KNOWN = {}
 end
