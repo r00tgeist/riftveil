@@ -1137,6 +1137,40 @@ do
     end
 end
 
+-- Cheat-profile crediting is symmetric: only head-aimed shots count, as a
+-- head hit or a resolver miss; a body-aimed miss must not count against
+-- the method (it could never have counted for it). Any hit ends a run of
+-- resolver misses for the aim policy's "side in doubt".
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local STATS, REC_T, EI = probe("CHEAT_STATS"), probe("REC"), probe("EIDX_S64")
+    local rec = REC_T and EI and EI[101] and REC_T[EI[101]]
+    if STATS and rec then
+        local c0, st0 = rec.cheat, rec.aim_miss_streak
+        rec.cheat, rec.aim_miss_streak, STATS.pl = "pl", 0, nil
+        local function shot(id, hg, outcome)
+            fire("aim_fire", {id = id, target = 101, backtrack = 0, hit_chance = 80, hitgroup = hg, damage = 30})
+            if outcome == "miss" then fire("aim_miss", {id = id, target = 101, reason = "?"})
+            else fire("aim_hit", {id = id, target = 101, hitgroup = outcome, damage = 30}) end
+        end
+        local function credited()
+            local n = 0
+            for _, c in pairs(STATS.pl or {}) do n = n + c.h + c.m end
+            return n
+        end
+        shot(90001, 3, "miss")
+        if credited() ~= 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "cheat credit: a body-aimed resolver miss was counted against the method" end
+        if rec.aim_miss_streak ~= 1 then UNIT_FAIL[#UNIT_FAIL + 1] = "aim_miss_streak: " .. tostring(rec.aim_miss_streak) .. " after one miss" end
+        shot(90002, 3, 3)
+        if rec.aim_miss_streak ~= 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "aim_miss_streak: a body hit didn't end the run of misses" end
+        shot(90003, 1, "miss")
+        shot(90004, 1, 1)
+        if credited() ~= 2 then UNIT_FAIL[#UNIT_FAIL + 1] = string.format("cheat credit: %d head-aimed shots counted, expected 2", credited()) end
+        rec.cheat, rec.aim_miss_streak, STATS.pl = c0, st0, nil
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "cheat credit test: CHEAT_STATS / REC / EIDX_S64[101] not reachable"
+    end
+end
+
 -- Resolver switched off mid-match: one update later every player must be
 -- back on the built-in (no forced yaw, no aim override) -- not only at the
 -- next round start. (Not in parity runs: v6.2 never released, and parity is

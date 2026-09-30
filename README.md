@@ -70,9 +70,9 @@ against the ragebot's own damage prediction. How and why, with sources:
    fingerprints (luasense beta/std, symmetric builders) are gamesense
    Luas; a neverlose or nixware player can't run them, so they get the
    default L/R table instead of a false fingerprint match.
-3. **What works per cheat is learned.** Every head hit and resolver miss is
-   filed under (enemy cheat, method) across all players on that cheat and
-   saved between sessions. A method at 30% or worse against a cheat after
+3. **What works per cheat is learned.** Every head-aimed shot (head hit or
+   resolver miss) is filed under (enemy cheat, method) across all players
+   on that cheat and saved between sessions. A method at 30% or worse against a cheat after
    8+ shots is skipped for that cheat (every 4th shot still tries it, so it
    can recover). Each save logs what was learned: `[cheat] learned nl: ...`.
 

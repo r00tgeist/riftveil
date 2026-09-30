@@ -5,7 +5,7 @@ and what comes next. Older versions are kept in `versions/` so none of the
 work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 (the decision engine), `riftveil_v8.1.lua`.
 
-## In the script (v8.5.3)
+## In the script (v8.5.4)
 
 | Area | Feature | Changes shots? |
 |---|---|---|

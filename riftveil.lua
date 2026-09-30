@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.5.3"
+local RV_VERSION = "8.5.4"
 
 local ffi = require "ffi"
 
@@ -3951,11 +3951,15 @@ local function on_aim_hit(e)
         -- confirmed head/neck hit, exactly the body-shot pollution this
         -- comment says it's guarding against.
         local is_head = e.hitgroup == 1 or e.hitgroup == 8
-        -- A head hit confirms the method that was applied, for this cheat
-        if is_head then
-            CheatCredit(d.cheat, d.meth, true)
-            rec.aim_miss_streak = 0
-        end
+        -- A head hit on a head-aimed shot confirms the method, for this
+        -- cheat. Only head-aimed shots are credited, hit or miss: a
+        -- body-aimed shot can't earn a head hit, so counting its misses
+        -- (as up to 8.5.3 did) only ever pushed methods toward "skip".
+        -- In the v7.7+ logs body-aimed shots were 5 of 15 credited misses
+        -- and 1 of 7 credited hits, while landing 11 of 16.
+        if is_head and d.aim_hg == 1 then CheatCredit(d.cheat, d.meth, true) end
+        -- Any hit ends a run of resolver misses ("two in a row")
+        rec.aim_miss_streak = 0
         if d.side ~= 0 and is_head then
             rec.hit_side  = d.flip and -d.side or d.side
             rec.hit_count = rec.hit_count + 1
@@ -4081,7 +4085,7 @@ local function on_aim_miss(e)
         d.in_vuln and (" !" .. d.vuln_t) or "")
 
     if is_resolver then
-        CheatCredit(d.cheat, d.meth, false)
+        if d.aim_hg == 1 then CheatCredit(d.cheat, d.meth, false) end
         do
             local rr = d.s64 and REC[d.s64]
             if rr then rr.aim_miss_streak = (rr.aim_miss_streak or 0) + 1 end

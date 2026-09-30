@@ -3,6 +3,24 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.5.4 – Explore / verify pass 4: cheat-profile crediting.
+          FIXED: cheat-profile learning counted every resolver miss
+          against the method but only head hits for it, so a body-aimed
+          shot could only ever count as a failure. In the v7.7+ logs
+          (aim= field) body-aimed shots were 5 of 15 credited misses and 1
+          of 7 credited hits while landing 11 of 16 -- a steady push toward
+          "skip this method". Only head-aimed shots are credited now, hit
+          or miss. Harness test fails on 8.5.3.
+          FIXED: the aim policy's "side in doubt" (two resolver misses in
+          a row) was only ended by a head hit: miss, body hit, miss still
+          counted as two in a row. Any hit ends the run now.
+          EXPLORED, NOT CHANGED: "prediction error" misses count as
+          resolver misses (v6.2 core, parity). Only 6 in all logs; too few
+          to say whether they carry side information (roadmap item 2).
+          EXPLORED, NOT CHANGED: calibration is one factor for all weapons.
+          If traces leave out armor, the factor would differ per weapon by
+          armor penetration; whether it does shows in log_report's TRACE
+          CALIBRATION once there are v8.4+ logs, so it waits for data.
   v8.5.3 – Explore / verify pass 3: aim fields, calibration, cheat stats.
           FIXED: trace calibration could be pulled down by lethal shots.
           If the ragebot caps its predicted damage at the target's health
