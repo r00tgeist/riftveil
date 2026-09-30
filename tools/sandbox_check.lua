@@ -1253,6 +1253,11 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
                or PLIST_STATE[ent .. "\tOverride prefer body aim"] ~= "-" then
                 UNIT_FAIL[#UNIT_FAIL + 1] = "resolver off: player " .. ent .. " still forced after an update"
             end
+            -- handed back to gamesense's own resolver, not left with none
+            if PLIST_STATE[ent .. "\tCorrection active"] ~= true then
+                UNIT_FAIL[#UNIT_FAIL + 1] = "resolver off: player " .. ent .. " left with Correction active "
+                    .. tostring(PLIST_STATE[ent .. "\tCorrection active"]) .. " (gamesense's resolver off)"
+            end
         end
         master.a = true
     else
@@ -1351,6 +1356,13 @@ if BENCH then
     end
 end
 if UNIT_OK then print("Unit: " .. UNIT_OK) end
+do
+    local bad = 0
+    for line in (LOG_CAPTURE[1] or ""):gmatch("[^\n]+") do
+        if line:find("meth=builtin", 1, true) and line:find(" cor=0", 1, true) then bad = bad + 1 end
+    end
+    if bad > 0 then UNIT_FAIL[#UNIT_FAIL + 1] = bad .. " builtin shot(s) fired with gamesense's resolver off (cor=0)" end
+end
 if #UNIT_FAIL > 0 then
     failed = true
     print("FAIL -- unit checks:")

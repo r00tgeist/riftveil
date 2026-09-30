@@ -3,6 +3,39 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.8   – Explore tickcount's projects (github.com/tickcount).
+          FIXED -- "Correction active" was inverted. It is gamesense's
+          own resolver for a player, on by default: vandal turns it off
+          while its resolver runs and ON to hand the player back, tsv4
+          turns it off for bots, angelwings keeps it on, tickcount's
+          Eagle ESP reads it as "FAKE". Every RIFTVEIL version, v6.2
+          included, set it OFF when "releasing to the built-in", in round
+          resets, when switched off and at unload -- so a released player
+          had no resolver, and turning RIFTVEIL off (to compare, say)
+          left gamesense's resolver off on all 64 slots. Releases now set
+          it on. Forced shots are unchanged (on, as before) and the v6.2
+          parity check (forced side and value) is unchanged. Only 15 of
+          the logged shots were "builtin", so match impact is small; the
+          after-effects were not. Shots log cor= (1 / 0 / ?), log_report
+          BY GAMESENSE CORRECTION ACTIVE. Harness test fails on 8.7.
+          ADDED -- primordial detection, ported from tickcount's
+          voice-listener.lua (by the cheat revealer's author; the revealer
+          we ported names primordial but never detects it): a non-reliable
+          packet with the 0x4D mark carrying the sender's own entindex,
+          13+ within 120 s (the library trusts 5). The loose gamesense read
+          also fires on those packets, so it may not replace a primordial
+          label. FFI tests: detected, stable over 1500 packets, not on
+          other senders' or reliable packets, 20000 random packets clean.
+          VERIFIED -- our animstate struct matches antiaim_funcs.lua field
+          for field; lagrecord skips backward-simtime frames and drops
+          records on a 4096 sq-unit origin jump (our threshold too).
+          NOTED -- 0xAFF1 is pandora in voice-listener (2022) and airflow
+          in the uploaded revealer (newer); kept as airflow. Both are
+          non-gamesense, so presets and decisions don't change.
+          Not ported: gamesense's shared-ESP check (runs shellcode via
+          VirtualAlloc), nixware/spirthack (need a bit reader over the
+          voice payload), the p2c icon set (would need textures in the
+          panel; the ESP flag stays text).
   v8.7   – Explore 2: the API, the meta, indicators.
           META, located in code: lag compensation writes no record while a
           player's simulation time is at or below the highest it sent

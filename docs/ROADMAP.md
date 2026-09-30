@@ -5,13 +5,13 @@ and what comes next. Older versions are kept in `versions/` so none of the
 work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 (the decision engine), `riftveil_v8.1.lua`.
 
-## In the script (v8.7)
+## In the script (v8.8)
 
 | Area | Feature | Changes shots? |
 |---|---|---|
 | Core | v6.2 decision chain: vulnerability windows, 6lex, hit memory, suppress, meta hold | yes, the core |
 | Core | Condition tracker by movement physics: slow walk vs peek, weapon/scope-aware thresholds, fake duck, unreadable flags/velocity (91.7% vs a 93.1% ceiling in tools/state_test.lua) | yes, `FEATURE.STATE_PHYSICS` |
-| Cheats | Built-in cheat revealer (voice packets, 10 cheats), ESP flag, panel | no |
+| Cheats | Built-in cheat revealer (voice packets, 11 cheats), ESP flag, panel | no |
 | Cheats | Gamesense Lua presets only for gamesense users | yes, with Cheat profiles on |
 | Cheats | Per-(cheat, method) learned trust, saved across sessions | yes, once a method fails 8+ shots on a cheat |
 | UI | v7.9 menu, info panel, VLN/RES/cheat flags, SHIFT marker | no |
@@ -68,6 +68,13 @@ post-v6.2 features off, the script forces the same side and value as v6.2.
    below the highest simtime seen) but it changes the v6.2 core, so it
    waits for the log: `df=` counts those frames per shot, and
    `BY DEFENSIVE FRAMES` / `BY ENEMY PITCH AT FIRE` show whether the
-   head rate drops with them.
+   head rate drops with them. Two more sources since v8.7: lagrecord's
+   own record loop skips exactly these frames for every player
+   (`simulation_time <= records[1].simulation_time`), and tickcount's
+   antiaim_funcs opens a "no history" window whenever simtime goes back.
+   Also open: antiaim_funcs counts an enemy as shifting when simtime is
+   6+ ticks BEHIND server time; our IsDefTick (v6.2) flags 3+ ticks
+   AHEAD of our tickcount. `fl=d` against `df=` in the log will show
+   which one tracks the real defensive frames.
 6. **Decision engine** (v7.2-v7.9, `versions/riftveil_v7.9.lua`): only if
    the logs show a gap it could close. It ran during the drop to 49%.

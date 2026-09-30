@@ -48,7 +48,7 @@ end
 
 local by_meth, by_arm, by_player, by_origin, by_state, by_wpn, by_cheat, by_pol = {}, {}, {}, {}, {}, {}, {}, {}
 local by_speed = {}
-local by_flag, by_pitch, by_df = {}, {}, {}   -- v8.6+: aim_fire flags, enemy eye pitch at fire
+local by_flag, by_pitch, by_df, by_cor = {}, {}, {}, {}   -- v8.6+: aim_fire flags, enemy eye pitch at fire
 local by_seed, seed_of = {}, {}   -- v8.5.6+: DB-seeded start vs cold start, per player
 local calib = {}          -- decile -> {n, heads, psum}
 local trace_ratio = {head = {}, body = {}}   -- v8.4+: ragebot predicted / traced damage
@@ -112,6 +112,11 @@ for _, path in ipairs(files) do
             local df = tonumber(field(line, "df") or "")
             if df then
                 targets[#targets + 1] = bucket(by_df, df == 0 and "0" or df <= 3 and "1-3" or df <= 8 and "4-8" or "9+")
+            end
+            -- cor= (v8.8+): gamesense "Correction active" for the target at fire
+            local cor = field(line, "cor")
+            if cor then
+                targets[#targets + 1] = bucket(by_cor, (cor == "1" and "on" or cor == "0" and "OFF" or "unread") .. " / " .. meth)
             end
             if seed_of[player] then targets[#targets + 1] = bucket(by_seed, seed_of[player]) end
             local st = field(line, "st")
@@ -217,6 +222,7 @@ report("BY MOVEMENT STATE (v7.5+ logs)", by_state)
 report("BY SHOT FLAGS (v8.6+: aim_fire flags; teleported / extrapolated shots carry no side information)", by_flag)
 report("BY ENEMY PITCH AT FIRE (v8.6+: pitch other than down = defensive AA frame)", by_pitch)
 report("BY DEFENSIVE FRAMES IN THE LAST SECOND (v8.7+: df=; frames lag compensation never records)", by_df)
+report("BY GAMESENSE CORRECTION ACTIVE / METHOD (v8.8+: a builtin shot with it OFF had no resolver)", by_cor)
 report("BY PROFILE START (v8.5.6+: confidence seeded from the saved DB vs cold start)", by_seed)
 report("BY ENEMY SPEED (mv=, u/s: 0-5 still, 5-40 micro / stopping, 40-110 slow walk, 200+ running; v8.2+ logs)", by_speed)
 report("BY WEAPON (v7.7+ logs)", by_wpn)

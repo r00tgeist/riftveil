@@ -66,7 +66,8 @@ against the ragebot's own damage prediction. How and why, with sources:
    packets it sends, even when nobody talks. RIFTVEIL reads them (the
    detectors from the cheat revealer script, ported) and labels each
    enemy: gamesense, neverlose, nixware, pandora, onetap, fatality,
-   plaguecheat, ev0lve, rifk7, airflow. The label is saved with the
+   plaguecheat, ev0lve, rifk7, airflow, primordial (from tickcount's
+   voice-listener). The label is saved with the
    player's profile.
 2. **Gamesense Lua presets only for gamesense users.** The AA config
    fingerprints (luasense beta/std, symmetric builders) are gamesense
@@ -93,7 +94,8 @@ lua5.3 tools/log_report.lua riftveil_debug_prev.txt riftveil_debug.txt
 Head rate per method, movement state (`st=`), enemy speed (`mv=`), weapon
 (`wpn=`, and weapon by aimed hitgroup), aim policy, shot flags (`fl=`:
 teleported, extrapolated, ...), enemy pitch at fire (`pit=`, defensive AA),
-defensive frames in the second before the shot (`df=`),
+defensive frames in the second before the shot (`df=`), gamesense's own
+resolver on/off for the target (`cor=`),
 DB-seeded vs cold start, enemy cheat (`cht=`) and player, with 95% intervals.
 
 ## Development

@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.7"
+local RV_VERSION = "8.8"
 
 local ffi = require "ffi"
 
@@ -2364,7 +2364,7 @@ end
 local CHEAT_OF    = {}   -- [entindex] = cheat id
 local CHEAT_NAMES = {gs = "gamesense", nl = "neverlose", nw = "nixware", pd = "pandora",
                      ot = "onetap", ft = "fatality", pl = "plaguecheat", ev = "ev0lve",
-                     r7 = "rifk7", af = "airflow"}
+                     r7 = "rifk7", af = "airflow", pm = "primordial"}
 
 local voice_data_t = ffi.typeof([[
     struct {
@@ -2410,7 +2410,7 @@ local function DupEvery(array, divisor)
 end
 
 local CS = {nl = {sig_count = {}, found = {}, n_found = 0}, nw = {}, pd = {}, ot = {},
-            ft = {}, pl = {}, ev = {}, r7 = {}, af = {}, gs = {}}
+            ft = {}, pl = {}, ev = {}, r7 = {}, af = {}, gs = {}, pm = {}}
 
 -- Counts a run of packets where test() holds; true once it exceeds need.
 local function Run(store, target, hit, need)
@@ -2512,7 +2512,35 @@ local DETECT = {
         return false
     end,
 }
-local DETECT_ORDER = {"nl", "nw", "pd", "ot", "ft", "pl", "ev", "r7", "af", "gs"}
+DETECT.pm = function(p, t)
+    -- Primordial, from tickcount/voice-listener.lua (the cheat revealer
+    -- author's library; the revealer ported above names primordial but has
+    -- no detector for it). Its shared-ESP packets are NOT the "reliable"
+    -- kind, carry 0x4D in (sequence_bytes low byte XOR offset byte) minus
+    -- sequence_bytes' high half, and encode the sender's own entindex.
+    -- Reliability is decided here without dereferencing voice_data (the
+    -- library reads its size through that pointer): a packet whose
+    -- has_bits / format already rule "reliable" out qualifies, else not.
+    local hb = p.has_bits
+    if bit.band(bit.rshift(hb, 6), 1) ~= 0 and p.format == 0 and bit.band(hb, 0x185) == 0x185 then
+        return false
+    end
+    local sb, uo = p.sequence_bytes, p.uncompressed_sample_offset
+    if sb == 0 and p.section_number == 0 and uo == 0 then return false end
+    local mark = bit.bxor(bit.band(sb, 0xFF), bit.band(bit.rshift(uo, 16), 0xFF)) - bit.rshift(sb, 16)
+    if bit.band(mark, 0xFF) ~= 0x4D then return false end
+    if bit.band(bit.bxor(bit.rshift(sb, 16), bit.rshift(sb, 8)), 0xFF) ~= t then return false end
+    -- Counted within 120 s, not as a run. The library trusts more than 4;
+    -- 12 here, in line with the 17-45 packet runs of the detectors above.
+    local now = globals.realtime()
+    local h = CS.pm[t]
+    if not h then h = {}; CS.pm[t] = h end
+    h[#h + 1] = now
+    while h[1] and now - h[1] > 120 do table.remove(h, 1) end
+    if #h > 12 then CS.pm[t] = {}; return true end
+    return false
+end
+local DETECT_ORDER = {"nl", "nw", "pd", "ot", "ft", "pl", "ev", "r7", "af", "pm", "gs"}
 
 -- Which detections may replace an existing one: the revealer's precedence
 -- (a neverlose read can't overwrite ev/gs/pl/pd/r7/af/ft, and so on).
@@ -2520,7 +2548,11 @@ local CHEAT_KEEP = {
     nl = {ev = true, gs = true, pl = true, pd = true, r7 = true, af = true, ft = true},
     nw = {nl = true},
     ev = {pd = true, nl = true, ft = true},
-    gs = {ev = true, ot = true, pl = true, pd = true, r7 = true, ft = true},
+    gs = {ev = true, ot = true, pl = true, pd = true, r7 = true, ft = true,
+          -- the gamesense read only needs sequence bytes and xuid to keep
+          -- changing, which primordial's packets also do; the primordial
+          -- read (mark + own entindex, ~1 in 65536 by chance) is stricter
+          pm = true},
     ot = {nw = true, ft = true, pd = true, pl = true},
     ft = {nw = true, pd = true},
 }
@@ -2552,7 +2584,7 @@ end
 local function ForgetAllCheats()
     for ent in pairs(CHEAT_OF) do CHEAT_OF[ent] = nil end
     CS = {nl = {sig_count = {}, found = {}, n_found = 0}, nw = {}, pd = {}, ot = {},
-          ft = {}, pl = {}, ev = {}, r7 = {}, af = {}, gs = {}}
+          ft = {}, pl = {}, ev = {}, r7 = {}, af = {}, gs = {}, pm = {}}
 end
 
 -- ══════════════════════════════════════════════════════════════════
@@ -2827,10 +2859,17 @@ local function GetRec(player)
     return rec, s64
 end
 
+-- "Correction active" is gamesense's own resolver for that player, on by
+-- default: vandal turns it off while its resolver runs and back on to hand
+-- the player back, tsv4 turns it off for bots (no desync), angelwings keeps
+-- it on, tickcount's Eagle ESP reads it as "FAKE". Up to 8.7 every release
+-- here set it OFF -- "release to the built-in" left the player with no
+-- resolver at all, and after a round reset, switching RIFTVEIL off or
+-- unloading it, all 64 slots stayed that way. Releases now hand it back on.
 local function ClearEnt(player)
     PSet(player, "Force body yaw", false)
     PSet(player, "Force body yaw value", 0)
-    PSet(player, "Correction active", false)
+    PSet(player, "Correction active", true)
     PSet(player, "High priority", false)
     local s64 = EIDX_S64[player]
     if s64 and REC[s64] then
@@ -3503,9 +3542,10 @@ local function ProcessPlayer(player, ctx)
             if not sup_pausing then rec._sup_streak = 0; rec._sup_pause = 0 end
 
         else
+            -- release: gamesense's own resolver takes the player (see ClearEnt)
             PSet(player, "Force body yaw", false)
             PSet(player, "Force body yaw value", 0)
-            PSet(player, "Correction active", false)
+            PSet(player, "Correction active", true)
             PSet(player, "High priority", false)
             rec.active = false; rec.resolved = false
             rec.last_val = 0; rec.last_meth = "builtin"
@@ -3902,6 +3942,12 @@ end
 
 -- A game value for a "%d" log field: an integer, or -1 when it isn't a
 -- finite number (NaN / inf reached the shot log through hp and traces).
+local function CorrectionActive(ent)
+    local ok, v = pcall(plist.get, ent, "Correction active")
+    if not ok or v == nil then return "?" end
+    return v and "1" or "0"
+end
+
 -- Defensive frames (see ProcessPlayer) received from this player in the
 -- last 64 ticks (one second)
 local function DefFrames(rec, now)
@@ -3974,6 +4020,11 @@ local function on_aim_fire(e)
         -- policy's miss run (the v6.2 core still sees it, as it did)
         nolearn = (e.teleported or e.extrapolated) and true or false,
         df      = r and DefFrames(r, globals.tickcount()) or 0,
+        -- gamesense's per-player "Correction active" (its own resolver for
+        -- this player; tsv4 turns it off for bots, angelwings forces it on
+        -- with every body-yaw write): a "builtin" shot with it off had no
+        -- resolver at all
+        cor     = CorrectionActive(t),
     }
     -- Credit a vuln_profile "seen" (trial) here, once per actual shot fired
     -- during an open vuln window -- not once per detection (see the
@@ -4084,14 +4135,14 @@ local function on_aim_hit(e)
         end
     end
 
-    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d%s%s",
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s%s%s",
         entity.get_player_name(e.target) or "?",
         HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
         isnum(e.damage) and math.floor(e.damage) or 0,
         d.meth, d.val, d.bt, d.state or "?", d.sspd or -1, d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
-        (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0,
+        (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0, d.cor or "?",
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
     SHOTS[e.id] = nil
@@ -4155,12 +4206,12 @@ local function on_aim_miss(e)
 
     local is_resolver = reason == "?" or reason == "" or reason == "prediction error"
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d%s%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s%s%s",
         entity.get_player_name(e.target) or "?",
         reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.sspd or -1, d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
-        (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0,
+        (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0, d.cor or "?",
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
 
@@ -4793,7 +4844,7 @@ ResetPlist = function(all_written)
         pcall(function()
             plist.set(i, "Force body yaw", false)
             plist.set(i, "Force body yaw value", 0)
-            plist.set(i, "Correction active", false)
+            plist.set(i, "Correction active", true)    -- back to gamesense's resolver
             plist.set(i, "High priority", false)
         end)
         AIMX.Reset(i)

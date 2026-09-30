@@ -19,10 +19,13 @@ end
 local a = banner_start("CHEAT REVEALER")
 local b = banner_start("RECORD MANAGEMENT") - 1
 local LOGS = {}
+CLOCK = 0   -- globals.realtime() in the block: 10 ms per packet
 local env = setmetatable({
     ffi = ffi,
     info = function(_, fmt, ...) LOGS[#LOGS + 1] = string.format(fmt, ...) end,
     entity = {get_player_name = function(i) return "p" .. i end},
+    globals = {realtime = function() return CLOCK end},
+    bit = require("bit"),
     -- the CHEAT PROFILES block that follows loads its table at startup
     database = {read = function() return nil end},
     isnum = function(v, lo) return type(v) == "number" and v == v and (not lo or v >= lo) end,
@@ -44,6 +47,7 @@ local function word(off, v) ffi.cast("uint16_t*", buf + off)[0] = v end
 local function send(ent, fill)
     ffi.fill(buf, 64, 0)
     buf[8] = ent - 1
+    CLOCK = CLOCK + 0.01
     fill()
     M.OnVoice({data = buf})
 end
@@ -72,6 +76,19 @@ local SIG = {
     ot = function() noise(); P.xuid_low = 777; P.section_number = 5 end,
     gs = function() noise(); P.xuid_high = rnd(1, 2^31); P.sequence_bytes = rnd(1e5, 2^31) end,
 }
+-- primordial (tickcount/voice-listener.lua): not a reliable packet
+-- (has_bits 0), 0x4D mark, the sender's own entindex in sequence_bytes
+local pm_ent = 2
+SIG.pm = function()
+    noise()
+    P.has_bits = 0
+    local A = rnd(0, 32767)
+    local B = bit.bxor(bit.band(A, 0xFF), pm_ent)
+    local U = rnd(0, 255)
+    local C = bit.bxor(bit.band(0x4D + A, 0xFF), U)
+    P.sequence_bytes = A * 65536 + B * 256 + C
+    P.uncompressed_sample_offset = U * 65536 + rnd(0, 65535)
+end
 -- neverlose: one fixed xuid_high on every 4th packet, the rest unique
 local nl_i = 0
 SIG.nl = function()
@@ -129,6 +146,23 @@ M.ForgetAllCheats()
 for _ = 1, 60 do send(3, SIG.pd) end
 M.ForgetCheat(3)
 check("ForgetCheat clears the label", M.CHEAT_OF[3] == nil)
+
+print("5. Primordial: long runs, other senders, reliable packets")
+M.ForgetAllCheats()
+local flips = 0
+local last
+for _ = 1, 1500 do
+    send(2, SIG.pm)
+    if M.CHEAT_OF[2] ~= last then flips = flips + 1; last = M.CHEAT_OF[2] end
+end
+check("1500 primordial packets: labelled pm once, never replaced", M.CHEAT_OF[2] == "pm" and flips == 1,
+      "label " .. tostring(M.CHEAT_OF[2]) .. ", " .. flips .. " label change(s)")
+M.ForgetAllCheats()
+for _ = 1, 60 do send(3, SIG.pm) end   -- the packets name entity 2, sent by 3
+check("a pm packet naming another player is not labelled pm", M.CHEAT_OF[3] ~= "pm", "got " .. tostring(M.CHEAT_OF[3]))
+M.ForgetAllCheats()
+for _ = 1, 60 do send(2, function() SIG.pm(); P.has_bits = 0x1C5; P.format = 0 end) end
+check("a reliable packet with the pm mark labels nobody", M.CHEAT_OF[2] ~= "pm", "got " .. tostring(M.CHEAT_OF[2]))
 
 print(fails == 0 and "ALL PASS" or (fails .. " FAILED"))
 os.exit(fails == 0 and 0 or 1)
