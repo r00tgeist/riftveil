@@ -3,6 +3,25 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.5.6 – Explore / verify pass 6: v6.2 core internals, logging.
+          FOUND, NOT CHANGED (v6.2 decisions, data first): the saved hit
+          rate divides head hits by head hits + a miss STREAK (reset on
+          every hit), so it reads near 100% and every player with 3+ hits
+          starts the next match at the 0.35 seed. The 74% was measured
+          with it. New: the "new profile" line logs seed=, and log_report
+          has BY PROFILE START (seeded vs cold start) to decide it.
+          FOUND, NOT CHANGED: "Tight interpolation" sets cl_interp 0.031,
+          ratio 1, so lerp = max(0.031, 1/64) = 31 ms -- the default lerp,
+          not a lower one (Source: GetClientInterpAmount). Every uploaded
+          log, the 74% ones included, ran with it on; it stays as is.
+          FOUND, NOT CHANGED: our defensive-shift reading (brk) keeps its
+          last shift until death, a hit or a 64-tick jump. v6.2 core,
+          feeds the backtrack window only while "ahead".
+          FIXED: rv_stats labelled the miss streak "rmiss", read as a
+          total; it says "miss streak" now.
+          VERIFIED: 32 more fuzz seeds (9-40, LuaJIT) clean; the Detection
+          chain's trust gates key on the same method names the shot log
+          credits.
   v8.5.5 – Explore / verify pass 5: saved data and console commands.
           FIXED: rv_wipe left the learned cheat profiles (their own saved
           key) in place; they came back on the next load. It clears them

@@ -5,7 +5,7 @@ and what comes next. Older versions are kept in `versions/` so none of the
 work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 (the decision engine), `riftveil_v8.1.lua`.
 
-## In the script (v8.5.5)
+## In the script (v8.5.6)
 
 | Area | Feature | Changes shots? |
 |---|---|---|
@@ -48,5 +48,12 @@ post-v6.2 features off, the script forces the same side and value as v6.2.
 3. **Vulnerability window credit fix** (v7.9): score windows on head hits
    and resolver misses only. It never triggered in the logs, so it's low
    value.
-4. **Decision engine** (v7.2-v7.9, `versions/riftveil_v7.9.lua`): only if
+4. **Saved hit rate** (found in v8.5.6). FlushDB saves
+   hit_count / (hit_count + resolver_misses), but resolver_misses is a
+   streak (0 after every hit, 0 again after 3 misses), so the saved rate
+   sits near 100% and every player with 3+ hits starts the next match at
+   the 0.35 seed cap. v6.2 did the same while it measured 74%, so it stays
+   until `BY PROFILE START` in log_report (seeded vs cold start) shows
+   whether the seed helps or hurts.
+5. **Decision engine** (v7.2-v7.9, `versions/riftveil_v7.9.lua`): only if
    the logs show a gap it could close. It ran during the drop to 49%.

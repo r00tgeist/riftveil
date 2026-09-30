@@ -48,6 +48,7 @@ end
 
 local by_meth, by_arm, by_player, by_origin, by_state, by_wpn, by_cheat, by_pol = {}, {}, {}, {}, {}, {}, {}, {}
 local by_speed = {}
+local by_seed, seed_of = {}, {}   -- v8.5.6+: DB-seeded start vs cold start, per player
 local calib = {}          -- decile -> {n, heads, psum}
 local trace_ratio = {head = {}, body = {}}   -- v8.4+: ragebot predicted / traced damage
 local versions, engine_lines, resets = {}, {}, 0
@@ -68,6 +69,9 @@ for _, path in ipairs(files) do
         if line:find("%]%[engine%]") then engine_lines[#engine_lines + 1] = line end
         if line:find("soft reset", 1, true) then resets = resets + 1 end
 
+        -- "new profile player=NAME s64=... seed=0.35": this match's start for NAME
+        local np, sd = line:match("%]%[rec%] new profile player=(.-) s64=%S+ seed=([%d%.]+)")
+        if np then seed_of[np] = tonumber(sd) > 0 and "DB-seeded start" or "cold start" end
         local is_hit  = line:find("%]%[hit%]") ~= nil
         local is_miss = line:find("%]%[miss%]") ~= nil and line:find("reason=") ~= nil
         if is_hit or is_miss then
@@ -87,6 +91,7 @@ for _, path in ipairs(files) do
                 kind = ((reason == "?" or reason == "") and not extra) and "rmiss" or "other"
             end
             local targets = {bucket(by_meth, meth), bucket(by_player, player)}
+            if seed_of[player] then targets[#targets + 1] = bucket(by_seed, seed_of[player]) end
             local st = field(line, "st")
             if st then targets[#targets + 1] = bucket(by_state, st) end
             -- mv= (v8.2+): the enemy's speed the state tracker saw, a check
@@ -187,6 +192,7 @@ print(("soft resets: %d   engine log lines: %d"):format(resets, #engine_lines))
 
 report("BY METHOD (what was applied)", by_meth)
 report("BY MOVEMENT STATE (v7.5+ logs)", by_state)
+report("BY PROFILE START (v8.5.6+: confidence seeded from the saved DB vs cold start)", by_seed)
 report("BY ENEMY SPEED (mv=, u/s: 0-5 still, 5-40 micro / stopping, 40-110 slow walk, 200+ running; v8.2+ logs)", by_speed)
 report("BY WEAPON (v7.7+ logs)", by_wpn)
 report("BY ENEMY CHEAT (v7.9+ logs, cheat revealer running)", by_cheat)

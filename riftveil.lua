@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.5.5"
+local RV_VERSION = "8.5.6"
 
 local ffi = require "ffi"
 
@@ -1080,7 +1080,7 @@ client.set_event_callback("console_input", function(text)
             table.sort(vp_parts)
 
             out[#out+1] = string.format(
-                "  %s | %s | conf:%d%% | %d/%d (%d%%) | head:%d rmiss:%d | 6lex:%d/%d | bt:%d | cfg:%s | cond[%d]:%s | vuln:%s",
+                "  %s | %s | conf:%d%% | %d/%d (%d%%) | head:%d miss streak:%d | 6lex:%d/%d | bt:%d | cfg:%s | cond[%d]:%s | vuln:%s",
                 entity.get_player_name(rec.eidx or 0) or s64,
                 rec.aa_type, math.floor(rec.conf*100),
                 rec.total_hits or 0, tot, hr,
@@ -2814,8 +2814,10 @@ local function GetRec(player)
     local s64 = GetS64(player); if not s64 then return nil end
     if not REC[s64] then
         REC[s64] = NewRec(player, s64)
-        info("rec", "new profile player=%s s64=%s",
-             entity.get_player_name(player) or "?", s64)
+        -- seed= : the DB-seeded starting confidence (0 = cold start), so a
+        -- log can show whether seeding pays (see ROADMAP, DB hit rate)
+        info("rec", "new profile player=%s s64=%s seed=%.2f",
+             entity.get_player_name(player) or "?", s64, REC[s64].conf or 0)
     end
     local rec = REC[s64]
     rec.eidx = player
