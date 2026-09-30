@@ -3,6 +3,15 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.5.5 – Explore / verify pass 5: saved data and console commands.
+          FIXED: rv_wipe left the learned cheat profiles (their own saved
+          key) in place; they came back on the next load. It clears them
+          now. rv_db lists them (cheat | method=heads/shots), so they can
+          be checked without waiting for an autosave line.
+          FIXED: a saved cheat id was taken as-is. An unknown one ("zz",
+          a hand edit) switched off the gamesense presets for that player
+          and showed in the panel. Only the 10 known ids load now.
+          Each harness-tested (fail on 8.5.4).
   v8.5.4 – Explore / verify pass 4: cheat-profile crediting.
           FIXED: cheat-profile learning counted every resolver miss
           against the method but only head hits for it, so a body-aimed

@@ -36,7 +36,9 @@ header while the menu is open. The info panel's INFO row shows the current
 threat's cheat. Suppress and asymmetric angles are fixed on and jitter
 prediction off, as v6.2 ran in the logs.
 
-Console: `rv_stats`, `rv_db`, `rv_perf`, `rv_save`, `rv_clear`, `rv_reset`, `rv_wipe`.
+Console: `rv_stats`, `rv_db` (saved profiles and learned cheat profiles),
+`rv_perf`, `rv_save`, `rv_clear`, `rv_reset`, `rv_wipe` (everything saved,
+cheat profiles included).
 
 Status of every feature, what's waiting on a match log, and what comes
 next: `docs/ROADMAP.md`. Earlier versions are kept in `versions/`.

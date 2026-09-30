@@ -44,6 +44,8 @@ local PLIST_LOG = {}
 local PLIST_STATE = {}
 -- [field .. "\t" .. value] = true: plist.set raises for that value (unit checks)
 local PLIST_THROW = {}
+-- unit failures found during the scenario, before UNIT_FAIL exists
+local EARLY_FAIL = {}
 -- Values the aim policy may write to gamesense's player-list combo fields
 local AIM_FIELD_VALUES = {
     ["Override prefer body aim"] = {["-"] = true, ["On"] = true, ["Off"] = true, ["Force"] = true},
@@ -857,7 +859,7 @@ do
     local DB_T = probe("DB")
     if DB_T then
         DB_T["1888056103"] = {kills = "x", hit_rate = {}, config_type = 5, bt_pref = "a",
-                              vuln_pref = 7, eng = "bad", samples = "q", gen = "z"}
+                              vuln_pref = 7, eng = "bad", samples = "q", gen = "z", cheat = "zz"}
         DB_T["1888056104"] = "garbage"
         -- right types, wrong shape: fractional counters (a hand edit, an
         -- old version's float) reached "%d" in the db flush line
@@ -892,6 +894,11 @@ do
             else fire("aim_miss", {id = id, target = 103, reason = "?"}) end
         end
     end
+    do  -- a saved cheat id must be a known one
+        local REC_T, EI = probe("REC"), probe("EIDX_S64")
+        local r = REC_T and EI and EI[103] and REC_T[EI[103]]
+        if r and r.cheat == "zz" then EARLY_FAIL[#EARLY_FAIL + 1] = "DB load: unknown saved cheat id \"zz\" taken as the player's cheat" end
+    end
     -- 104: brand-new jittering opponent, small torso offset (no UNK
     -- window), whose records arrive late (simtime 4 ticks old on arrival,
     -- 2 beyond our latency). On late records the lagcomp source is skipped
@@ -918,6 +925,7 @@ end
 -- DB cap: 600 profiles through the real FlushDB must leave exactly 500,
 -- keeping the most recently stamped ones.
 local UNIT_FAIL, UNIT_OK = {}, nil
+for _, f in ipairs(EARLY_FAIL) do UNIT_FAIL[#UNIT_FAIL + 1] = f end
 -- ClassifyState against Source movement physics (sv_accelerate 5.5,
 -- friction 5.2, stopspeed 80, 64 tick): a peek-and-stop must read as
 -- running, not slow walk; a capped slow walk must read as slow walk; a
@@ -1210,6 +1218,23 @@ fire("console_input", "rv_save")
 fire("console_input", "rv_engine")
 fire("console_input", "rv_perf")
 fire("console_input", "rv_perf")
+-- rv_wipe clears everything saved, the learned cheat profiles included
+-- (up to 8.5.4 they survived it). Last: it drops every profile.
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local STATS = probe("CHEAT_STATS")
+    if STATS then
+        STATS.nl = {suppress = {h = 3, m = 9}}
+        fire("console_input", "rv_db")
+        if not (LOG_CAPTURE[1] or ""):find("cheat nl | suppress=3/12", 1, true) then
+            local FL = probe("flush_log"); if FL then FL() end
+        end
+        if not (LOG_CAPTURE[1] or ""):find("cheat nl | suppress=3/12", 1, true) then
+            UNIT_FAIL[#UNIT_FAIL + 1] = "rv_db: learned cheat profiles not listed"
+        end
+        fire("console_input", "rv_wipe")
+        if next(STATS) then UNIT_FAIL[#UNIT_FAIL + 1] = "rv_wipe: learned cheat profiles survived" end
+    end
+end
 fire("round_start")
 fire("game_end")
 fire("shutdown")

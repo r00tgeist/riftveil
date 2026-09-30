@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.5.4"
+local RV_VERSION = "8.5.5"
 
 local ffi = require "ffi"
 
@@ -1026,6 +1026,7 @@ SyncMenu()
 local FlushDB
 local PERF
 local ResetPlist   -- CLEANUP; Update calls it when the resolver is switched off
+local CheatDB      -- CHEAT PROFILES: Lines() for rv_db, Wipe() for rv_wipe
 
 
 -- ══════════════════════════════════════════════════════════════════
@@ -1034,7 +1035,8 @@ local ResetPlist   -- CLEANUP; Update calls it when the resolver is switched off
 --    rv_db      permanent DB contents
 --    rv_clear   wipe log file
 --    rv_reset   hard reset match + DB entries for CURRENT enemies only
---    rv_wipe    wipe the ENTIRE permanent DB, every steam64 ever saved
+--    rv_wipe    wipe the ENTIRE permanent DB, every steam64 ever saved,
+--               and the learned cheat profiles
 -- ══════════════════════════════════════════════════════════════════
 -- Returning true suppresses the engine's own command processing (per
 -- docs.gamesense.gs/docs/events/console_input) -- without it, rv_* isn't
@@ -1101,6 +1103,8 @@ client.set_event_callback("console_input", function(text)
                 tostring(e.bt_pref), math.floor((e.hit_rate or 0)*100),
                 e.samples or 0, e.kills or 0)
         end
+        -- learned per-cheat method stats (saved separately, same wipe)
+        if CheatDB then for _, l in ipairs(CheatDB.Lines()) do out[#out+1] = "  cheat " .. l end end
         local s = table.concat(out, "\n")
         client.log(s); log_write("CMD","db", s)
 
@@ -1138,7 +1142,10 @@ client.set_event_callback("console_input", function(text)
         DB = {}
         database.write(DB_KEY, DB)
         REC = {}; DT_HIST = {}; SHOTS = {}; EIDX_S64 = {}
-        client.log(string.format("[RIFTVEIL] wiped entire DB (%d entries)", n))
+        -- the learned cheat profiles are permanent data too; up to 8.5.4
+        -- they survived rv_wipe and came back on the next load
+        if CheatDB then CheatDB.Wipe() end
+        client.log(string.format("[RIFTVEIL] wiped entire DB (%d entries) and learned cheat profiles", n))
         info("reset", "full DB wipe, %d entries cleared", n)
     else
         return
@@ -2607,6 +2614,35 @@ local function CheatTrusts(rec, meth)
     return ((rec.shots_fired or 0) % CP.PROBE_EVERY) == 0
 end
 
+-- [cheat id] = "meth=heads/shots ..." (sorted), for the log and rv_db
+local function CheatTexts()
+    local out = {}
+    for id, T in pairs(CHEAT_STATS) do
+        local parts = {}
+        for meth, c in pairs(T) do
+            parts[#parts + 1] = string.format("%s=%.0f/%.0f", meth, c.h, c.h + c.m)
+        end
+        table.sort(parts)
+        if #parts > 0 then out[id] = table.concat(parts, " ") end
+    end
+    return out
+end
+CheatDB = {
+    Texts = CheatTexts,
+    Lines = function()
+        local lines = {}
+        for id, text in pairs(CheatTexts()) do lines[#lines + 1] = id .. " | " .. text end
+        table.sort(lines)
+        return lines
+    end,
+    Wipe = function()
+        for id in pairs(CHEAT_STATS) do CHEAT_STATS[id] = nil end
+        for id in pairs(CP.logged) do CP.logged[id] = nil end
+        database.write(CHEAT_DB_KEY, CHEAT_STATS)
+        info("cheat", "learned cheat profiles wiped")
+    end,
+}
+
 local function CheatCredit(cheat, meth, head)
     if not (cheat and CHEAT_NAMES[cheat] and type(meth) == "string") then return end
     local T = CHEAT_STATS[cheat]
@@ -2695,7 +2731,10 @@ local function NewRec(player, s64)
     return {
         hist=RNew(CFG.HIST_SIZE), tm={}, yc={}, fl={},
         -- DB entry as this match started: FlushDB merges into it (see there)
-        db_base=CleanDBEntry(DB[s64]), cheat=db.cheat,
+        db_base=CleanDBEntry(DB[s64]),
+        -- a known cheat id only: a saved "zz" (hand edit, other script)
+        -- would switch off the gamesense presets and show in the panel
+        cheat=CHEAT_NAMES[db.cheat] and db.cheat or nil,
         side=0, period=0, conf=seeded_conf,
         aa_type=AA.UNKNOWN, flip=false, lt=-1,
         hit_side=0, hit_count=0, resolver_misses=0,
@@ -2863,15 +2902,9 @@ FlushDB = function()
     end
     database.write(DB_KEY, DB)
     database.write(CHEAT_DB_KEY, CHEAT_STATS)
-    for id, T in pairs(CHEAT_STATS) do
-        local parts = {}
-        for meth, c in pairs(T) do
-            parts[#parts + 1] = string.format("%s=%.0f/%.0f", meth, c.h, c.h + c.m)
-        end
-        table.sort(parts)
-        -- only what changed since the last save: the autosave runs every
-        -- 60 s and every cheat ever seen is in the table
-        local text = table.concat(parts, " ")
+    -- only what changed since the last save: the autosave runs every 60 s
+    -- and every cheat ever seen is in the table
+    for id, text in pairs(CheatDB.Texts()) do
         if CP.logged[id] ~= text then
             CP.logged[id] = text
             info("cheat", "learned %s: %s", id, text)
