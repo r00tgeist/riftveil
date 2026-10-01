@@ -245,7 +245,7 @@ local mock = {
                 if prop == "m_vecMins"          then return -16, -16, 0 end
                 if prop == "m_vecMaxs"          then return 16, 16, 72 end
                 if prop == "m_vecViewOffset"    then return 0, 0, 64 end
-                if prop == "m_nTickBase"        then return W.tick end
+                if prop == "m_nTickBase"        then return W.tick + (W.tb_off or 0) end
                 if prop == "m_iHealth"          then return p and p.hp or 100 end
                 if prop == "m_ArmorValue"       then return p and p.armor or 100 end
                 if prop == "m_iItemDefinitionIndex" then return ent == 900 and W.weapon or 0 end
@@ -769,6 +769,24 @@ if FUZZ_SEED then
             end
         end
 
+        -- events the v8.16+ features listen to: impacts for the shot log
+        -- (ours and others', broken coordinates), grenade / fire / knife
+        -- damage, and our tickbase jumping both ways (local LC box, our
+        -- own shift) -- including NaN
+        if rnd() < 0.05 then
+            fire("bullet_impact", {userid = (rnd() < 0.7) and 1 or rint(1, 70), x = nasty(rint(-2000, 2000)),
+                                   y = nasty(rint(-2000, 2000)), z = nasty(rint(-100, 300))})
+        end
+        if rnd() < 0.01 then
+            local WPN = {"hegrenade", "inferno", "knife", "awp", "", "x"}
+            fire("player_hurt", {attacker = (rnd() < 0.6) and 1 or rint(0, 70),
+                                 userid = (#W.live > 0 and rnd() < 0.9) and W.live[rint(#W.live)] or rint(0, 70),
+                                 weapon = WPN[rint(#WPN)], hitgroup = nasty(rint(-1, 10)),
+                                 dmg_health = nasty(rint(0, 150)), health = nasty(rint(-5, 100))})
+        end
+        if rnd() < 0.02 then W.tb_off = (rnd() < 0.95) and rint(-20, 20) or NAN end
+        fire("run_command", {}); fire("predict_command", {})
+
         if rnd() < 0.002 then fire("round_start") end
         if rnd() < 0.0004 then fire(rnd() < 0.5 and "game_end" or "level_init") end
         if rnd() < 0.003 then fire("console_input", CMDS[rint(#CMDS)]) end
@@ -798,6 +816,7 @@ if FUZZ_SEED then
         if el.kind == "checkbox" then el.a = true
         elseif el.kind == "multi" then el.a = {}; for i, it in ipairs(el.items) do el.a[i] = it end end
     end
+    W.tb_off = nil   -- the unit tests below need a readable tickbase
     FUZZ_REPORT = {ticks = TICKS, secs = os.clock() - t0, mem = mem}
     W.live, W.s64, W.names, W.dead = nil, nil, nil, nil
     debug.sethook(hook, "l")
@@ -1437,11 +1456,20 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         label()
         if not (LC.S.bx and LC.S.bx > W.tick * 4) then fail("box fell behind us: " .. tostring(LC.S.bx)) end
         W.real = W.real + 0.55
+        -- an unreadable (NaN) tickbase as the first read of a life doesn't
+        -- break detection for the rest of it
+        W.real = W.real + 0.6
+        LC.S.tb_max, LC.S.tb_prev = nil, nil
+        W.tb_off = 0 / 0; run(5003); W.tb_off = nil
+        for t = 5003, 5012 do run(t) end
+        run(5002)
+        if label() ~= "LC  9t" then fail("no flash after a NaN tickbase: " .. tostring(label())) end
+        W.real = W.real + 0.6
         -- forward: caught up, then a 13-tick jump between two commands
-        for t = 5002, 5012 do run(t) end
-        run(5026)
+        for t = 5003, 5014 do run(t) end
+        run(5028)
         if label() ~= "LC  13t" then fail("teleport label " .. tostring(label()) .. ", expected LC  13t") end
-        if not (LC.S.bx and math.abs(LC.S.bx - (5026 + 13) * 4) < 0.01) then fail("teleport box not 13 ticks ahead: " .. tostring(LC.S.bx)) end
+        if not (LC.S.bx and math.abs(LC.S.bx - (5028 + 13) * 4) < 0.01) then fail("teleport box not 13 ticks ahead: " .. tostring(LC.S.bx)) end
         W.real = W.real + 0.6
         IND_T.lc = false
         LC.S.t = -1

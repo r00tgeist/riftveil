@@ -3,6 +3,25 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.27  – Bug hunt, continued.
+          COVERAGE GAP closed -- the hostile fuzz world never fired
+          bullet_impact, player_hurt, run_command or predict_command, so the
+          shot log's impact matching, the grenade lines, the local LC box
+          and our own-shift tracker had never seen random or broken input.
+          The fuzz now fires all four every run: impacts from us and others
+          with NaN / inf / missing coordinates, hurt events with odd weapons
+          and values, and our tickbase jumping both ways, NaN included.
+          FIXED -- a NaN tickbase as the first read of a life made the local
+          LC tracker's max NaN; every later comparison failed and the box
+          stayed dead until death. The own-shift tracker (predict_command)
+          took a missing tickbase as 0. Both now skip unreadable values.
+          Clean under the extended fuzz: seeds 1-8 in check_all plus 24
+          fresh seeds, both runtimes, identical writes; 200k-tick soak flat.
+          Harness: the fuzz phase no longer leaves its tickbase offset (NaN
+          at times) to the unit tests after it, which failed 2 of the first
+          24 fresh seeds.
+          Checked, no change: after a hit-memory miss the next hit-memory
+          shot repeats the sign 4/8 head, switches 4/4 -- 15 shots, too few.
   v8.26  – Bug hunt.
           FIXED -- our own shift (brk.def, read by WeDefensive / LCTicks)
           never went back to 0 once the tickbase caught up: after one

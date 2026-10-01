@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.26"
+local RV_VERSION = "8.27"
 
 local ffi = require "ffi"
 
@@ -1882,7 +1882,10 @@ local brk = {def=0, check=0, ahead=false}
 client.set_event_callback("predict_command", function()
     local me = entity.get_local_player()
     if not me or not entity.is_alive(me) then brk.def = 0; brk.check = 0; return end
-    local tb = entity.get_prop(me, "m_nTickBase") or 0
+    local tb = entity.get_prop(me, "m_nTickBase")
+    -- unreadable / NaN: skip (a NaN max would stick until death, and the
+    -- runtimes disagree on math.max with NaN)
+    if not isnum(tb) then return end
     brk.check = math.max(tb, brk.check)
     if math.abs(tb - brk.check) > 64 then brk.def = 0; brk.check = 0 end
     if brk.check > tb then brk.def = math.abs(tb - brk.check)
@@ -4202,7 +4205,7 @@ local function OnRun()
     local me = entity.get_local_player()
     if not (me and entity.is_alive(me)) then S.tb_max, S.tb_prev, S.shift = nil, nil, 0; return end
     local tb = tonumber(entity.get_prop(me, "m_nTickBase"))
-    if not tb then return end
+    if not isnum(tb) then return end   -- a NaN max would never recover
     -- a new life / reconnect starts the tickbase over
     if not S.tb_max or tb > S.tb_max or S.tb_max - tb > 64 then S.tb_max = tb end
     -- back: tickbase below its highest (defensive / recharge);
