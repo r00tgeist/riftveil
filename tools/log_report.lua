@@ -48,8 +48,14 @@ end
 
 local by_meth, by_arm, by_player, by_origin, by_state, by_wpn, by_cheat, by_pol = {}, {}, {}, {}, {}, {}, {}, {}
 local by_speed = {}
-local by_flag, by_pitch, by_df, by_cor, by_ls, by_prv = {}, {}, {}, {}, {}, {}
-local by_mag, by_lby = {}, {}   -- by_lby: eye-LBY delta sign vs forced side   -- forced |value| per method (clamped at 60, as written)   -- v8.6+: aim_fire flags, enemy eye pitch at fire
+local by_flag, by_pitch, by_df, by_cor, by_ls, by_prv = {}, {}, {}, {}, {}, {}   -- v8.6+ / v8.7+ / v8.8+ / v8.11+ fields
+local by_mag = {}         -- forced |value| per method (clamped at 60, as written)
+local by_lby = {}         -- v8.14+: eye-LBY delta sign vs forced side
+-- AA type at the shot: aa= on the shot line (v8.15+), else the player's last
+-- [corr] aa= (debug logs of any version). by_xway: 3-way / 5-way after a
+-- resolver miss on them less than 10 s before (FEATURE.XWAY_UNSURE).
+local by_aa, by_xway = {}, {}
+local corr_aa, last_shot = {}, {}   -- per player: last [corr] aa=, last {kind, t}
 local by_seed, seed_of = {}, {}   -- v8.5.6+: DB-seeded start vs cold start, per player
 local calib = {}          -- decile -> {n, heads, psum}
 local trace_ratio = {head = {}, body = {}}   -- v8.4+: ragebot predicted / traced damage
@@ -70,6 +76,9 @@ for _, path in ipairs(files) do
         if v then versions[#versions + 1] = v end
         if line:find("%]%[engine%]") then engine_lines[#engine_lines + 1] = line end
         if line:find("soft reset", 1, true) then resets = resets + 1 end
+        if line:find("%]%[init%]") or line:find("%]%[match%] ended") then corr_aa, last_shot = {}, {} end
+        local cp, caa = line:match("%]%[corr%] player=(.-) aa=(%S+)")
+        if cp then corr_aa[cp] = caa end
 
         -- "new profile player=NAME s64=... seed=0.35": this match's start for NAME
         local np, sd = line:match("%]%[rec%] new profile player=(.-) s64=%S+ seed=([%d%.]+)")
@@ -134,6 +143,27 @@ for _, path in ipairs(files) do
                 -- unit radius, gamesense's 100 (docs/REPO_SURVEY.md)
                 local c = field(line, "cht")
                 if c then targets[#targets + 1] = bucket(by_prv, c .. " " .. name) end
+            end
+            -- aa= (v8.15+) or the last [corr] aa= for this player. The shot
+            -- before at them: prv= / ls= (v8.11+), else the log's own order;
+            -- any shot replaces it, as rec.last_outcome does in the script.
+            local h, mi, sec = line:match("^%[(%d+):(%d+):([%d%.]+)%]")
+            local now = h and (tonumber(h) * 3600 + tonumber(mi) * 60 + tonumber(sec)) or nil
+            local prv, ls = field(line, "prv"), tonumber(field(line, "ls") or "")
+            local after_miss
+            if prv and ls then
+                after_miss = prv == "m" and ls >= 0 and ls < 10
+            else
+                local ps = last_shot[player]
+                local dt = (ps and now) and (now - ps.t) % 86400 or nil
+                after_miss = ps ~= nil and ps.kind == "rmiss" and dt ~= nil and dt < 10
+            end
+            if now then last_shot[player] = {kind = kind, t = now} end
+            local aa = field(line, "aa") or corr_aa[player]
+            if aa and aa ~= "?" then
+                targets[#targets + 1] = bucket(by_aa, aa)
+                local xw = (aa == "3way" or aa == "5way") and "3/5-way" or "other AA"
+                targets[#targets + 1] = bucket(by_xway, xw .. (after_miss and ", rmiss < 10 s ago" or ", rest"))
             end
             -- lbyd= (v8.14+): does sign(eye - LBY target) agree with our side?
             local lbyd = tonumber(field(line, "lbyd") or "")
@@ -253,6 +283,8 @@ report("BY DEFENSIVE FRAMES IN THE LAST SECOND (v8.7+: df=; frames lag compensat
 report("BY GAMESENSE CORRECTION ACTIVE / METHOD (v8.8+: a builtin shot with it OFF had no resolver)", by_cor)
 report("BY TIME SINCE OUR LAST SHOT AT THEM (v8.11+: anti-bruteforce switches on our bullet, resets after 1-5 s)", by_ls)
 report("BY PREVIOUS SHOT AT THEM (v8.11+)", by_prv)
+report("BY AA TYPE (aa= v8.15+, else the last [corr] line of a debug log)", by_aa)
+report("3/5-WAY AFTER A RESOLVER MISS ON THEM (v8.15: safe point on the head in the 3/5-way rmiss row; pre-v8 logs 43% there)", by_xway)
 report("BY EYE - LBY DELTA vs OUR FORCED SIDE (v8.14+: 262 public uses read its sign as the side)", by_lby)
 report("BY FORCED VALUE PER METHOD (|val| clamped at 60, as the player list takes it)", by_mag)
 report("BY PROFILE START (v8.5.6+: confidence seeded from the saved DB vs cold start)", by_seed)

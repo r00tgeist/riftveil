@@ -96,6 +96,37 @@ No sign anti-bruteforce cost us in that match; the misses are on fresh
 re-engagements. v8.11 logs `ls=` (seconds since our last shot at them) and
 `prv=` (its outcome) on every shot so log_report can keep checking.
 
+**v8.15: where it does cost us -- 3-way / 5-way after a resolver miss.**
+The pre-v8 debug logs carry the AA type on every `[corr]` line. Joining each
+shot to the last one before it (resolver-decided shots, head / resolver
+miss; log_report `3/5-WAY AFTER A RESOLVER MISS ON THEM`):
+
+| Enemy AA, shot before at them | Head | Miss | Rate |
+|---|---|---|---|
+| 3 / 5-way, resolver miss < 10 s ago | 25 | 33 | **43%** |
+| 3 / 5-way, anything else | 249 | 170 | 59% |
+| other AA, resolver miss < 10 s ago | 33 | 10 | 77% |
+| other AA, anything else | 194 | 79 | 71% |
+
+Fisher p = 0.023 against the same x-way enemies at other times, 0.001
+against other AA after a miss; 9 of the 12 logs with such shots sit at or
+under 50%. Ten seconds or more after the miss, x-way is back at 75% (18 / 24).
+Within the window neither side choice works: we kept the missed side 7 of
+22 (32%), flipped 13 of 27 (48%), and hit memory reusing its side went 3 of
+16. x-way is in 57% of neverlose AA scripts and anti-bruteforce in 59%; they
+are the same scripts' menus, and a phase switch on top of a 3- or 5-way
+cycle leaves no side to bet on.
+
+The reset timers, by family rather than by copy: 600 ticks (9.4 s) in one
+gamesense family copied 10 times (Interitus / Dash / Winterwells / alive /
+aai: 70-unit radius, 3-tick debounce), 5 s (Fumosight, outlaw aimtools on
+neverlose), 3 s (acidtech, idealyaw), 2 s, 1 s, 0.5-1.1 s (semirage). The
+10 s window covers the longest of them.
+
+RIFTVEIL's answer (FEATURE.XWAY_UNSURE) is in the aim policy, not the side:
+such an enemy counts as "side in doubt", so the head is taken on safe points
+(and safe point is on when nothing kills). The forced body yaw is unchanged.
+
 ## 4. Presets and settings exports
 
 - **Neverlose luasense beta** ships 5 built-in presets; its first is
@@ -248,7 +279,9 @@ extrapolated; 147 used accuracy boost.
    enemy's switch. If `BY PREVIOUS SHOT AT THEM` shows "after a head hit"
    falling well below the rest, hit memory should not reuse a side within the
    reset window. v8.8: 64% after a head hit vs 73% after a body hit -- no
-   gap yet.
+   gap yet. After a resolver miss on a 3/5-way enemy it is a gap (section 3:
+   43%, hit memory 3 of 16); v8.15 answers that with safe point, and leaves
+   the side alone because neither keeping nor flipping it worked there.
 3. **Freestand side** (trace from either side of the enemy's head to our eye;
    freestanding body yaw hides the real side from the threat). Needs a log
    field first, and in 2v2 the enemy's threat may be our teammate.

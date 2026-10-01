@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.14"
+local RV_VERSION = "8.15"
 
 local ffi = require "ffi"
 
@@ -876,6 +876,18 @@ local FEATURE = {
     -- second before the shot against 55% (12/22) with 9+ (Fisher p 0.045,
     -- 4 of 5 players). v6.2 sampled them. One word to revert.
     SKIP_DEF_FRAMES = true,
+    -- v8.15: a 3-way / 5-way enemy we missed on the resolver less than
+    -- 10 s ago counts as "side in doubt" for the aim policy (safe point
+    -- on the head; see AIMX). Every pre-v8 debug log, joined on the last
+    -- [corr] aa= before each shot (log_report 3/5-WAY AFTER A RESOLVER
+    -- MISS): next head shot at such an enemy 25 of 58 (43%), 9 of 12 logs
+    -- at or under 50%; the same enemies otherwise 59% (249/419), other AA
+    -- after a resolver miss 77% (33/43), x-way 10 s+ after the miss 75%
+    -- (18/24). x-way (57% of neverlose AA
+    -- scripts) and anti-bruteforce (59%) travel together; the longest
+    -- anti-bruteforce reset in the public scripts is 600 ticks (9.4 s).
+    -- Aim policy only: the forced body yaw is untouched.
+    XWAY_UNSURE = true,
     -- These three are the v6.2 [EXP] switches as the logs show them
     -- running when the resolver hit 74% (suppress fired in every v6.2
     -- match; jitter prediction never did).
@@ -3639,6 +3651,9 @@ end
 --                               the air.
 --    neither kills            -> ragebot default; safe point when our side
 --                               is in doubt.
+--  "In doubt" since v8.15 also covers a 3-way / 5-way enemy we missed on
+--  the resolver less than 10 s ago (FEATURE.XWAY_UNSURE): the next head
+--  shot at one landed 43% in the old logs, against 59-77% elsewhere.
 --  Nothing is ever forced to body while a head kill is the only kill: the
 --  head is always available when it's what kills.
 --
@@ -3736,6 +3751,18 @@ local function Traced(me, ne, target, hb)
     return best
 end
 
+-- FEATURE.XWAY_UNSURE: last shot at a 3-way / 5-way enemy was a resolver
+-- miss less than XWAY_WINDOW seconds ago (last_outcome "m" is set by
+-- on_aim_miss, last_fire_t at aim_fire; a hit or another shot clears it).
+local XWAY_WINDOW = 10
+local function XwayAfterMiss(rec, now)
+    if not FEATURE.XWAY_UNSURE then return false end
+    if rec.aa_type ~= AA.THREE_WAY and rec.aa_type ~= AA.FIVE_WAY then return false end
+    if rec.last_outcome ~= "m" or not isnum(rec.last_fire_t) then return false end
+    local dt = now - rec.last_fire_t
+    return dt >= 0 and dt < XWAY_WINDOW
+end
+
 -- The decision itself, on numbers only (unit-tested in the harness).
 --   hp: enemy health; head, body: traced damage after calibration;
 --   dt2: a charged double tap fires two shots; unsure: our side is in
@@ -3801,6 +3828,7 @@ local function Tick(tc, threat, ti)
         end
     end
     local dt2 = armed and DT_WEAPON[wpn] and DtReady() or false
+    local now = globals.realtime()
     for i = 1, #LIVE_ENEMIES do
         local ent = LIVE_ENEMIES[i]
         local s64 = EIDX_S64[ent]
@@ -3820,7 +3848,10 @@ local function Tick(tc, threat, ti)
                 rec.aim_tb = b
             end
             local hp = tonumber(entity.get_prop(ent, "m_iHealth"))
-            local unsure = (rec.aim_miss_streak or 0) >= 2 and rec.vuln_ttl == 0
+            -- vuln windows don't exempt the x-way case: vuln shots there
+            -- went 10 of 25 (40%)
+            local unsure = ((rec.aim_miss_streak or 0) >= 2 and rec.vuln_ttl == 0)
+                or XwayAfterMiss(rec, now)
             local air = rec.state == STATE.AIR or rec.state == STATE.AIR_CROUCH
             pol = Decide(hp, (rec.aim_th or 0) * CAL.fh, (rec.aim_tb or 0) * CAL.fb, dt2, unsure, air)
         end
@@ -3836,7 +3867,8 @@ local function Reset(ent)
     pcall(plist.set, ent, F_SP, "-")
 end
 
-return {Tick = Tick, Decide = Decide, OnFire = OnFire, Reset = Reset, Write = Write, CAL = CAL, VAL_OK = VAL_OK}
+return {Tick = Tick, Decide = Decide, OnFire = OnFire, Reset = Reset, Write = Write, CAL = CAL, VAL_OK = VAL_OK,
+        XwayAfterMiss = XwayAfterMiss}
 end)() -- aim policy scope
 
 
@@ -4180,7 +4212,7 @@ local function on_aim_hit(e)
         end
     end
 
-    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d%s%s",
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d aa=%s%s%s",
         entity.get_player_name(e.target) or "?",
         HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
         isnum(e.damage) and math.floor(e.damage) or 0,
@@ -4188,6 +4220,7 @@ local function on_aim_hit(e)
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
         (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0, d.cor or "?", d.ls or -1, d.prv or "-", d.lbyd or 999,
+        AA_SHORT[d.aa] or "?",
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
     SHOTS[e.id] = nil
@@ -4255,12 +4288,13 @@ local function on_aim_miss(e)
         if ro then ro.last_outcome = is_resolver and "m" or "o" end
     end
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d%s%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d aa=%s%s%s",
         entity.get_player_name(e.target) or "?",
         reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.sspd or -1, d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
         (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0, d.cor or "?", d.ls or -1, d.prv or "-", d.lbyd or 999,
+        AA_SHORT[d.aa] or "?",
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
 

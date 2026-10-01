@@ -1194,6 +1194,51 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     end
 end
 
+-- FEATURE.XWAY_UNSURE: a 3-way / 5-way enemy we missed on the resolver
+-- less than 10 s ago puts the aim policy in "side in doubt"; a hit, another
+-- kind of miss, other AA, the window running out or the flag off don't.
+-- The shot line carries the AA type (aa=).
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local AX, FEAT, REC_T, EI = probe("AIMX"), probe("FEATURE"), probe("REC"), probe("EIDX_S64")
+    local rec = REC_T and EI and EI[101] and REC_T[EI[101]]
+    if AX and AX.XwayAfterMiss and FEAT and rec then
+        local aa0, out0, ft0, st0 = rec.aa_type, rec.last_outcome, rec.last_fire_t, rec.aim_miss_streak
+        local function shot(id, outcome)
+            rec.aa_type = "3way"
+            fire("aim_fire", {id = id, target = 101, backtrack = 0, hit_chance = 80, hitgroup = 1, damage = 30})
+            if outcome == "hit" then fire("aim_hit", {id = id, target = 101, hitgroup = 1, damage = 30})
+            else fire("aim_miss", {id = id, target = 101, reason = outcome}) end
+        end
+        local function xw(dt) return AX.XwayAfterMiss(rec, W.real + (dt or 0)) end
+        shot(90101, "?")
+        if not xw() then UNIT_FAIL[#UNIT_FAIL + 1] = "x-way: a resolver miss on a 3-way enemy didn't put the side in doubt" end
+        if not xw(9.5) then UNIT_FAIL[#UNIT_FAIL + 1] = "x-way: doubt ended before 10 s" end
+        if xw(10.5) then UNIT_FAIL[#UNIT_FAIL + 1] = "x-way: doubt outlived the 10 s window" end
+        rec.aa_type = "5way"
+        if not xw() then UNIT_FAIL[#UNIT_FAIL + 1] = "x-way: 5-way not covered" end
+        rec.aa_type = "hold"
+        if xw() then UNIT_FAIL[#UNIT_FAIL + 1] = "x-way: a hold-AA enemy after one miss counted as in doubt" end
+        rec.aa_type = "3way"
+        FEAT.XWAY_UNSURE = false
+        if xw() then UNIT_FAIL[#UNIT_FAIL + 1] = "x-way: FEATURE.XWAY_UNSURE = false still put the side in doubt" end
+        FEAT.XWAY_UNSURE = true
+        local FL = probe("flush_log")
+        if FL then
+            FL()
+            if not (LOG_CAPTURE[1] or ""):find("%]%[miss%] [^\n]* aa=3way") then
+                UNIT_FAIL[#UNIT_FAIL + 1] = "x-way: the miss line carries no aa=3way"
+            end
+        end
+        shot(90102, "hit")
+        if xw() then UNIT_FAIL[#UNIT_FAIL + 1] = "x-way: still in doubt after a head hit" end
+        shot(90103, "spread")
+        if xw() then UNIT_FAIL[#UNIT_FAIL + 1] = "x-way: a spread miss put the side in doubt" end
+        rec.aa_type, rec.last_outcome, rec.last_fire_t, rec.aim_miss_streak = aa0, out0, ft0, st0
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "x-way test: AIMX.XwayAfterMiss / FEATURE / REC[101] not reachable"
+    end
+end
+
 -- Defensive frames: a frame whose simulation time is below the highest
 -- already received (lag compensation writes no record for it) is counted,
 -- and the next shot at that player carries the count (df=)

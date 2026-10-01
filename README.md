@@ -54,7 +54,8 @@ body, through whatever is in between.
   deagle or pistol) → prefer body.
 - **Only the head kills** (wallbang, body behind cover, scout on a full-HP
   enemy) → body preference off for that enemy, so the head is taken. On
-  safe points if the resolver just missed twice or they're in the air.
+  safe points if the resolver just missed twice, if they run 3-way / 5-way
+  and the resolver missed them in the last 10 s, or they're in the air.
 - **Nothing kills** → your ragebot config as it is.
 
 The script checks the player-list fields in game and calibrates its traces
@@ -101,8 +102,9 @@ teleported, extrapolated, ...), enemy pitch at fire (`pit=`, defensive AA),
 defensive frames in the second before the shot (`df=`), gamesense's own
 resolver on/off for the target (`cor=`), seconds since our previous shot
 at them and its outcome (`ls=`, `prv=`; anti-bruteforce windows), eye yaw
-minus the networked LBY target (`lbyd=`),
-DB-seeded vs cold start, enemy cheat (`cht=`) and player, with 95% intervals.
+minus the networked LBY target (`lbyd=`), the enemy's AA type (`aa=`,
+or the debug log's `[corr]` lines in older logs) and 3/5-way after a
+resolver miss, DB-seeded vs cold start, enemy cheat (`cht=`) and player, with 95% intervals.
 
 ## Development
 

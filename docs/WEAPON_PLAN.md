@@ -42,7 +42,7 @@ move, also from 4 ticks ahead.
 |---|---|---|
 | A body shot kills (or two with a charged DT on auto / deagle / pistol) | prefer body **On** | a body kill doesn't depend on the desync side |
 | Only the head kills (wallbang, body behind cover, scout at full HP) | prefer body **Off** | a global "prefer body" must not trade a lethal head for a non-lethal body |
-| ...and our side is in doubt (2 resolver misses in a row) or they're airborne | + safe point **On** | the head kill, on points that hit whatever the side |
+| ...and our side is in doubt (2 resolver misses in a row, or a 3-way / 5-way enemy missed on the resolver in the last 10 s -- v8.15) or they're airborne | + safe point **On** | the head kill, on points that hit whatever the side |
 | Nothing kills, side in doubt | safe point **On** | |
 | Nothing kills | both **"-"** | your ragebot config decides |
 

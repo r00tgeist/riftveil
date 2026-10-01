@@ -5,7 +5,7 @@ and what comes next. Older versions are kept in `versions/` so none of the
 work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 (the decision engine), `riftveil_v8.1.lua`.
 
-## In the script (v8.12)
+## In the script (v8.15)
 
 | Area | Feature | Changes shots? |
 |---|---|---|
@@ -19,6 +19,7 @@ work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 | Logging | Every shot: `st= wpn= hp= ar= aim= pdmg= cf= cht=`; bounded log, flushed each round | no |
 | Tools | `rv_perf` profiler, `rv_stats`, `rv_db`, `rv_save` | no |
 | Weapons | Aim policy on traced damage: prefer body only when a body shot kills from here, body preference off when only the head kills, safe point when in doubt or airborne; values verified, traces self-calibrated | yes, Detection › Weapon aim |
+| Weapons | "In doubt" includes a 3-way / 5-way enemy missed on the resolver in the last 10 s (43% head there in the pre-v8 logs vs 59-77% elsewhere) | yes, `FEATURE.XWAY_UNSURE` |
 
 Every release proves with `tools/check_all.sh` step 7 that, with the
 post-v6.2 features off, the script forces the same side and value as v6.2.
@@ -58,6 +59,23 @@ post-v6.2 features off, the script forces the same side and value as v6.2.
   PER METHOD to keep checking.
 - **Low-offset neverlose family** (chimera / idealyaw / exscord, ~10/20) as
   a fingerprint -- no evidence either way; not added.
+
+## v8.15: 3-way / 5-way after a resolver miss
+
+From the "take the AA scripts' patterns" pass. x-way (57% of neverlose AA
+scripts, 24% of gamesense) and anti-bruteforce (59% / 36%) come together;
+the pre-v8 debug logs show what that does to us. Head rate on the next shot
+at a 3/5-way enemy within 10 s of a resolver miss on them: **43% (25/58)**,
+against 59% for the same enemies otherwise and 77% for other AA after a miss
+(p 0.023 / 0.001; 9 of 12 logs at or under 50%). By AA type overall: 5-way
+56%, 3-way 59%, hold 69%, 2-way 75%, skitter 79%.
+
+No side choice fixed it (kept 32%, flipped 48%, hit memory 3/16), so v8.15
+changes the aim policy instead: that enemy counts as "side in doubt" and the
+head is taken on safe points. Shot lines now carry `aa=`; log_report has
+`BY AA TYPE` and `3/5-WAY AFTER A RESOLVER MISS ON THEM`. The next log
+decides it: the first row's `pol=` shows `headsp` / `sp`, and its head rate
+and body share against the old 43% say whether safe point paid.
 
 ## Next, in order
 

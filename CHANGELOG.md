@@ -3,6 +3,28 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.15  – AA-script patterns, applied: 3-way / 5-way after a resolver
+          miss. x-way (57% of neverlose AA scripts, 24% of gamesense) and
+          anti-bruteforce (59% / 36%) ship together; joining every pre-v8
+          shot to the AA type on the debug log's last [corr] line:
+          - next head shot at a 3/5-way enemy within 10 s of a resolver
+            miss on them: 43% (25/58), vs 59% for the same enemies
+            otherwise and 77% for other AA after a miss (p 0.023 / 0.001;
+            9 of 12 logs at or under 50%; 75% again after 10 s).
+          - no side choice fixes it: kept 32%, flipped 48%, hit memory
+            3 of 16.
+          - by AA type overall: 5-way 56%, 3-way 59%, hold 69%, 2-way 75%,
+            skitter 79%.
+          - anti-bruteforce reset timers by family: 600 ticks (9.4 s, one
+            family x10 copies), 5 s, 3 s, 2 s, 1 s, 0.5-1.1 s.
+          ADDED -- FEATURE.XWAY_UNSURE: such an enemy counts as "side in
+          doubt" for the aim policy (safe point on the head; safe point when
+          nothing kills). Vuln windows don't exempt it (40% there). The
+          forced body yaw is untouched; v6.2 parity unchanged.
+          ADDED -- aa= on every shot line; log_report BY AA TYPE and 3/5-WAY
+          AFTER A RESOLVER MISS ON THEM (falls back to [corr] aa= on older
+          debug logs). Harness: window, 5-way, hold, flag off, hit, spread
+          miss, aa= on the miss line.
   v8.14  – Repo pass: player-list field and enemy-prop inventory
           (REPO_SURVEY 6b). The LBY target is read by 191 scripts, 262
           times as sign(eye - LBY) = desync side; RIFTVEIL never read it.
