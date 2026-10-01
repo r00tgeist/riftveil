@@ -784,6 +784,8 @@ if FUZZ_SEED then
                                  weapon = WPN[rint(#WPN)], hitgroup = nasty(rint(-1, 10)),
                                  dmg_health = nasty(rint(0, 150)), health = nasty(rint(-5, 100))})
         end
+        -- our shots and others' (the local LC box: a DT shot arms it)
+        if rnd() < 0.03 then fire("weapon_fire", {userid = (rnd() < 0.7) and 1 or rint(0, 70), weapon = "weapon_ssg08"}) end
         if rnd() < 0.02 then W.tb_off = (rnd() < 0.95) and rint(-20, 20) or NAN end
         fire("run_command", {}); fire("predict_command", {})
 
@@ -1426,7 +1428,8 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     if IND_T and LC and AX and AX.DtReady then
         local lc0, p0, tick0, dt0 = IND_T.lc, W.players[1], W.tick, AX.DtReady
         IND_T.lc = true
-        AX.DtReady = function() return false end   -- the menu read must not matter
+        local dt_on = true
+        AX.DtReady = function() return dt_on end
         local function label()
             for i = #SCREEN, 1, -1 do SCREEN[i] = nil; SCREEN_RGB[i] = nil end
             CONSOLE_ON = true; fire("paint"); CONSOLE_ON = false
@@ -1435,19 +1438,26 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         end
         local function fail(m) UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: " .. m end
         local function run(t) W.tick = t; fire("run_command", {}) end
-        W.players[1] = {vx = 256, jump = 0}
-        LC.S.t = -1
+        local function shoot() fire("weapon_fire", {userid = 1, weapon = "weapon_scar20"}) end
+        local function settle(a, b) W.real = W.real + 0.6; for t = a, b do run(t) end end
+        -- 640 u/s (air strafe): 9 shifted ticks = 90 u, past the 64 u break
+        W.players[1] = {vx = 640, jump = 0}
+        LC.S.t, LC.S.shot = -1, -1
         for t = 5000, 5010 do run(t) end            -- one tick per command
         fire("setup_command", {chokedcommands = 0})
         if label() ~= nil or LC.S.t ~= -1 then fail("drawn without a shift") end
-        -- back shift: 10 below the max = 9 ticks; the box leads us by them
+        -- a shift with no shot (defensive, DT toggled): nothing
         run(5000)
+        if label() ~= nil then fail("drawn on a shift without a double-tap shot") end
+        -- DT shot, back shift of 9 ticks, 90 u: the box, 9 ticks ahead
+        settle(5000, 5010)
+        shoot(); run(5000)
         local txt, rgb = label()
-        local ox = W.tick * 256 / 64
-        if txt ~= "LC  9t" then fail("back shift label " .. tostring(txt) .. ", expected LC  9t") end
+        local ox = W.tick * 640 / 64
+        if txt ~= "LC  9t" then fail("DT-shot shift label " .. tostring(txt) .. ", expected LC  9t") end
         if rgb ~= "240,64,64" then fail("label colour " .. tostring(rgb) .. ", expected red 240,64,64") end
-        if not (LC.S.bx and math.abs(LC.S.bx - (ox + 36)) < 0.01) then
-            fail(string.format("back-shift box at x=%s, expected %.1f", tostring(LC.S.bx), ox + 36))
+        if not (LC.S.bx and math.abs(LC.S.bx - (ox + 90)) < 0.01) then
+            fail(string.format("box at x=%s, expected %.1f", tostring(LC.S.bx), ox + 90))
         end
         local t1 = LC.S.t
         W.real = W.real + 0.01; run(5001)
@@ -1458,26 +1468,42 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         W.real = W.real - 0.55
         run(5001); W.tick = 5040
         label()
-        if not (LC.S.bx and LC.S.bx > W.tick * 4) then fail("box fell behind us: " .. tostring(LC.S.bx)) end
-        W.real = W.real + 0.55
+        if not (LC.S.bx and LC.S.bx > W.tick * 10) then fail("box fell behind us: " .. tostring(LC.S.bx)) end
+        -- a DT shot on the ground at 256 u/s: 9 ticks = 36 u, not broken
+        W.players[1].vx = 256
+        settle(5003, 5012)
+        shoot(); run(5002)
+        if label() ~= nil then fail("drawn when the shift moved us 36 u (lag comp not broken)") end
+        W.players[1].vx = 640
+        -- the shot too long before the shift (> 0.25 s): nothing
+        settle(5003, 5012)
+        shoot(); W.real = W.real + 0.3; run(5002)
+        if label() ~= nil then fail("drawn for a shot 0.3 s before the shift") end
+        -- a shot with double tap off: nothing
+        settle(5003, 5012)
+        dt_on = false; shoot(); dt_on = true; run(5002)
+        if label() ~= nil then fail("drawn for a shot with double tap off") end
+        -- someone else's shot: nothing
+        settle(5003, 5012)
+        fire("weapon_fire", {userid = 2, weapon = "weapon_ssg08"}); run(5002)
+        if label() ~= nil then fail("drawn for another player's shot") end
         -- an unreadable (NaN) tickbase as the first read of a life doesn't
         -- break detection for the rest of it
         W.real = W.real + 0.6
         LC.S.tb_max, LC.S.tb_prev = nil, nil
         W.tb_off = 0 / 0; run(5003); W.tb_off = nil
         for t = 5003, 5012 do run(t) end
-        run(5002)
+        shoot(); run(5002)
         if label() ~= "LC  9t" then fail("no flash after a NaN tickbase: " .. tostring(label())) end
-        W.real = W.real + 0.6
         -- forward: caught up, then a 13-tick jump between two commands
-        for t = 5003, 5014 do run(t) end
-        run(5028)
+        settle(5003, 5014)
+        shoot(); run(5028)
         if label() ~= "LC  13t" then fail("teleport label " .. tostring(label()) .. ", expected LC  13t") end
-        if not (LC.S.bx and math.abs(LC.S.bx - (5028 + 13) * 4) < 0.01) then fail("teleport box not 13 ticks ahead: " .. tostring(LC.S.bx)) end
+        if not (LC.S.bx and math.abs(LC.S.bx - (5028 + 13) * 10) < 0.01) then fail("teleport box not 13 ticks ahead: " .. tostring(LC.S.bx)) end
         W.real = W.real + 0.6
         IND_T.lc = false
         LC.S.t = -1
-        run(9000); run(8980)
+        shoot(); run(9000); run(8980)
         if LC.S.t ~= -1 or label() ~= nil then fail("ran with the option off") end
         IND_T.lc, W.players[1], W.tick, AX.DtReady = lc0, p0, tick0, dt0
     else
@@ -1505,12 +1531,16 @@ end
 -- ExtrapolateOrigin (the boxes): the trace skips the player it moves, and
 -- a standing player stays on the ground
 if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
-    local IND_T, LC = probe("IND"), probe("LOCALLC")
-    if IND_T and LC then
-        local lc0, p0, tick0 = IND_T.lc, W.players[1], W.tick
+    local IND_T, LC, AX = probe("IND"), probe("LOCALLC"), probe("AIMX")
+    if IND_T and LC and AX then
+        local lc0, p0, tick0, dt0 = IND_T.lc, W.players[1], W.tick, AX.DtReady
         IND_T.lc = true
-        W.players[1] = {vx = 256, jump = 0}
-        W.tick = 30000; fire("run_command", {}); W.tick = 29990; fire("run_command", {})
+        AX.DtReady = function() return true end
+        -- a DT shot whose 9-tick shift breaks lag comp (640 u/s: 90 u)
+        W.players[1] = {vx = 640, jump = 0}
+        W.tick = 30000; fire("run_command", {})
+        fire("weapon_fire", {userid = 1, weapon = "weapon_scar20"})
+        W.tick = 29990; fire("run_command", {})
         for i = #TRACE_SKIP, 1, -1 do TRACE_SKIP[i] = nil end
         CONSOLE_ON = true; fire("paint"); CONSOLE_ON = false
         local bad
@@ -1518,7 +1548,7 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         if #TRACE_SKIP == 0 or bad then UNIT_FAIL[#UNIT_FAIL + 1] = "extrapolation: trace skip -1 (or no trace) for the local box" end
         if LC.S.bz ~= 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "extrapolation: a standing player's box moved to z=" .. tostring(LC.S.bz) end
         W.real = W.real + 1
-        IND_T.lc, W.players[1], W.tick = lc0, p0, tick0
+        IND_T.lc, W.players[1], W.tick, AX.DtReady = lc0, p0, tick0, dt0
     end
 end
 

@@ -79,11 +79,18 @@ Turn off other aimbot-log scripts to avoid duplicate lines.
 
 ## Local lagcomp box
 
-When double tap shifts your tickbase by more than 2 ticks -- back
-(defensive) or forward (the teleport) -- a red box flashes for half a
-second **ahead of you** -- where the shift is taking you, following as you
-move -- labelled `LC` with the shifted ticks, the way the public `lagcomp-box-gs` script boxes an enemy. Third person.
-Fakelag alone draws nothing. The enemy SHIFT box is red too.
+Only when **you fire with double tap and the shift really breaks lag
+compensation**: double tap on, your shot, and within 0.25 s the tickbase
+shifts by more than 2 ticks (back or forward) carrying you more than 64
+units -- the break rule the enemy SHIFT box uses. Then a red box flashes
+for half a second **ahead of you**, where the shift takes you, following
+as you move, labelled `LC` with the shifted ticks (as `lagcomp-box-gs`
+boxes an enemy). Third person.
+
+At 64 tick a ground double tap at 250 u/s moves ~55 units in 14 ticks,
+which doesn't break lag comp, so the box shows when you are moving fast
+(air strafing, ~290+ u/s). Toggling double tap, defensive and fakelag draw
+nothing. The enemy SHIFT box is red too.
 
 ## Weapon aim
 

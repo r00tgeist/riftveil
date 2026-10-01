@@ -3,6 +3,17 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.30  – Local lagcomp box: only a double-tap shot that breaks lag comp.
+          It flashed on any tickbase shift over 2 ticks, so toggling DT and
+          defensive lit it too. Now it needs all of: double tap on and our
+          own shot (weapon_fire), the shift within 0.25 s of it (one batch
+          of commands, sv_maxusrcmdprocessticks 16), and the shifted ticks
+          carrying us more than 64 units -- the lag-comp break rule the
+          enemy SHIFT box uses (lagcomp-box-gs). A ground DT at 250 u/s
+          moves ~55 u in 14 ticks at 64 tick and draws nothing; fast moves
+          (air strafing) do. Harness: no shot, slow, stale shot, DT off,
+          another player's shot -- each gate mutation-checked; weapon_fire
+          added to the fuzz. Display only, no resolver change.
   v8.29  – vuln_unk forces torso - eye, not the torso world yaw.
           The v8.28 match (29 shots, 8 decided by the resolver: 3 head, 5
           resolver misses) is too small to blame on v8.28 by itself, and its
