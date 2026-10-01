@@ -15,7 +15,6 @@ work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 | Cheats | Gamesense Lua presets only for gamesense users | yes, with Cheat profiles on |
 | Cheats | Per-(cheat, method) learned trust, saved across sessions | yes, once a method fails 8+ shots on a cheat |
 | UI | v7.9 menu, info panel, VLN/RES/cheat flags, SHIFT marker | no |
-| Movement | Fast ladder; jumpscout hit chance (scout, airborne) | ragebot hit chance in the air, when set |
 | Speed | Player-list writes only on change (-68% writes), player list refreshed once a second | no |
 | Logging | Every shot: `st= wpn= hp= ar= aim= pdmg= cf= cht=`; bounded log, flushed each round | no |
 | Tools | `rv_perf` profiler, `rv_stats`, `rv_db`, `rv_save` | no |
@@ -51,12 +50,14 @@ post-v6.2 features off, the script forces the same side and value as v6.2.
 - **Hit memory inside the anti-bruteforce window** -- `BY PREVIOUS SHOT AT
   THEM` / `BY TIME SINCE OUR LAST SHOT AT THEM`.
 - **Freestand side** -- needs its own log field first.
-- **Correction magnitude** -- forced values under 20 hit 51% across all
-  logs (40-50: 77%, 50-60: 63%); neverlose presets and players run the
-  desync limit at 58-60. Not monotonic, so open; a per-magnitude table in
-  log_report would settle it with more v8.x logs.
+- **Correction magnitude -- checked, no change.** Overall, forced values
+  under 20 hit 51% (33/65) vs 64% (p 0.053), but within each method the gap
+  disappears (vuln_lby 50% vs 56%, vuln_unk 53% vs 59%, vuln_dck 75% vs
+  78%): the dip was vuln_lby producing most small values. hit_mem /
+  suppress under 20 went 2/8, too few. log_report now has BY FORCED VALUE
+  PER METHOD to keep checking.
 - **Low-offset neverlose family** (chimera / idealyaw / exscord, ~10/20) as
-  a fingerprint -- only if the magnitude question says small values work.
+  a fingerprint -- no evidence either way; not added.
 
 ## Next, in order
 

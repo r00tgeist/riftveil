@@ -48,7 +48,8 @@ end
 
 local by_meth, by_arm, by_player, by_origin, by_state, by_wpn, by_cheat, by_pol = {}, {}, {}, {}, {}, {}, {}, {}
 local by_speed = {}
-local by_flag, by_pitch, by_df, by_cor, by_ls, by_prv = {}, {}, {}, {}, {}, {}   -- v8.6+: aim_fire flags, enemy eye pitch at fire
+local by_flag, by_pitch, by_df, by_cor, by_ls, by_prv = {}, {}, {}, {}, {}, {}
+local by_mag = {}   -- forced |value| per method (clamped at 60, as written)   -- v8.6+: aim_fire flags, enemy eye pitch at fire
 local by_seed, seed_of = {}, {}   -- v8.5.6+: DB-seeded start vs cold start, per player
 local calib = {}          -- decile -> {n, heads, psum}
 local trace_ratio = {head = {}, body = {}}   -- v8.4+: ragebot predicted / traced damage
@@ -133,6 +134,10 @@ for _, path in ipairs(files) do
                 -- unit radius, gamesense's 100 (docs/REPO_SURVEY.md)
                 local c = field(line, "cht")
                 if c then targets[#targets + 1] = bucket(by_prv, c .. " " .. name) end
+            end
+            if val and meth ~= "builtin" then
+                local v = math.min(math.abs(val), 60)
+                targets[#targets + 1] = bucket(by_mag, meth .. (v < 20 and " <20" or v < 40 and " 20-40" or " 40-60"))
             end
             if seed_of[player] then targets[#targets + 1] = bucket(by_seed, seed_of[player]) end
             local st = field(line, "st")
@@ -241,6 +246,7 @@ report("BY DEFENSIVE FRAMES IN THE LAST SECOND (v8.7+: df=; frames lag compensat
 report("BY GAMESENSE CORRECTION ACTIVE / METHOD (v8.8+: a builtin shot with it OFF had no resolver)", by_cor)
 report("BY TIME SINCE OUR LAST SHOT AT THEM (v8.11+: anti-bruteforce switches on our bullet, resets after 1-5 s)", by_ls)
 report("BY PREVIOUS SHOT AT THEM (v8.11+)", by_prv)
+report("BY FORCED VALUE PER METHOD (|val| clamped at 60, as the player list takes it)", by_mag)
 report("BY PROFILE START (v8.5.6+: confidence seeded from the saved DB vs cold start)", by_seed)
 report("BY ENEMY SPEED (mv=, u/s: 0-5 still, 5-40 micro / stopping, 40-110 slow walk, 200+ running; v8.2+ logs)", by_speed)
 report("BY WEAPON (v7.7+ logs)", by_wpn)

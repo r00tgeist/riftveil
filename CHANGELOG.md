@@ -3,6 +3,14 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.13  – REMOVED the StarSync movement features (v8.9): Fast ladder and
+          Jumpscout hit chance, with their menu rows, setup_command
+          callback and harness tests. Includes v8.12.1 below.
+  v8.12.1 – Correction magnitude checked within method: the "small values
+          hit less" dip (51% vs 64%, p 0.053) is a method-mix effect --
+          vuln_lby 50% vs 56%, vuln_unk 53% vs 59%, vuln_dck 75% vs 78%
+          below / above 20. No change. log_report: BY FORCED VALUE PER
+          METHOD.
   v8.12  – Neverlose deep dive (docs/REPO_SURVEY.md section 5).
           117 unique NL scripts (108 AA), 18 with built-in presets, 215
           settings files (152 decode; the angelwings MessagePack exports
