@@ -141,6 +141,7 @@ local LOG_CAPTURE, LOG_SCANNED, ERR_LINES = {}, {}, {}
 -- print / client.color_log: every call is checked; the text is kept only
 -- while a test sets CONSOLE_ON, so the soak stays flat
 local CONSOLE, CONSOLE_ON, CONSOLE_BAD = {}, false, {}
+local TRACE_SKIP = {}   -- client.trace_line skip entities while CONSOLE_ON
 local SCREEN, SCREEN_RGB = {}, {}   -- renderer.text strings / "r,g,b" while CONSOLE_ON
 
 -- UI elements carry their kind so ui.get returns the right shape.
@@ -165,7 +166,10 @@ local mock = {
         if k == "screen_size"        then return function() return 1920, 1080 end end
         if k == "current_threat"     then return function() return W.threat end end
         if k == "key_state"          then return function(key) return key == 0x01 and W.m1 == true end end
-        if k == "trace_line"         then return function() return 1.0, -1 end end
+        if k == "trace_line"         then return function(skip)
+            if CONSOLE_ON then TRACE_SKIP[#TRACE_SKIP + 1] = skip end
+            return 1.0, -1
+        end end
         if k == "eye_position"       then return function()
             if W.eye_bad then return W.eye_bad, 0, 64 end
             return 0, 0, 64
@@ -382,7 +386,11 @@ local mock = {
         LOG_SCANNED[name] = #content
         LOG_CAPTURE[1] = content
     end,
-    readfile  = function() return "" end,
+    -- the debug log as a crash mid-write leaves it: zero bytes, then text
+    readfile  = function(name)
+        if name == "riftveil_debug.txt" then return string.rep("\0", 64) .. "[00:00:00.000][INF][init] old\n" end
+        return ""
+    end,
     -- the shot log's output: one string per line, kept while CONSOLE_ON
     print = function(...)
         local n, msg = select("#", ...), (...)
@@ -474,6 +482,8 @@ debug.sethook(hook, "l")
 local ok, run_err = pcall(chunk)
 if not ok then print("RUNTIME ERROR during top-level load: " .. tostring(run_err)) end
 
+
+
 -- RV_PARITY=1: switch off the post-v6.2 decision features (FEATURE flags
 -- that change a correction) before the first tick, for the v6.2 parity run.
 if os.getenv("RV_PARITY") then
@@ -493,7 +503,7 @@ if os.getenv("RV_PARITY") then
     end
     local F
     for _, cb in pairs(CALLBACKS) do F = F or find(cb, 0) end
-    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false end
+    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false end
 end
 
 local cb_errors = {}
@@ -603,6 +613,20 @@ local function probe(name)
     end
 end
 local function count(t) local n = 0; if type(t) == "table" then for _ in pairs(t) do n = n + 1 end end; return n end
+
+-- A debug log left as zero bytes by a crash: the zeros are dropped at load
+-- and the drop is logged; the old text after them is kept (right after
+-- load: the scenarios below run rv_clear)
+do
+    local FL = probe("flush_log")
+    if FL then
+        FL()
+        local c = LOG_CAPTURE[1] or ""
+        if c:find("%z") then EARLY_FAIL[#EARLY_FAIL + 1] = "debug log: zero bytes from a damaged file written back" end
+        if not c:find("[INF][init] old", 1, true) then EARLY_FAIL[#EARLY_FAIL + 1] = "debug log: the old text after the zeros was lost" end
+        if not c:find("64 zero bytes dropped", 1, true) then EARLY_FAIL[#EARLY_FAIL + 1] = "debug log: the dropped zeros weren't logged" end
+    end
+end
 
 -- ── Fuzz + soak phase (RV_FUZZ) ──────────────────────────────────────
 local FUZZ_REPORT
@@ -1426,6 +1450,43 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         IND_T.lc, W.players[1], W.tick, AX.DtReady = lc0, p0, tick0, dt0
     else
         UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp test: IND / LOCALLC / AIMX.DtReady not reachable"
+    end
+end
+
+-- Our own shift (WeDefensive / LCTicks): back to 0 once the tickbase has
+-- caught up (FEATURE.DEF_RESET); v6.2 kept the last value.
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local B = probe("brk")
+    if B then
+        local tick0 = W.tick
+        local function pc(t) W.tick = t; fire("predict_command", {}) end
+        pc(20000); pc(19990)
+        if not (B.def and B.def >= 9) then UNIT_FAIL[#UNIT_FAIL + 1] = "our shift: 10 ticks back read as " .. tostring(B.def) end
+        for t = 19991, 20005 do pc(t) end
+        if B.def ~= 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "our shift: still " .. tostring(B.def) .. " after the tickbase caught up" end
+        W.tick = tick0
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "our shift test: brk not reachable"
+    end
+end
+
+-- ExtrapolateOrigin (the boxes): the trace skips the player it moves, and
+-- a standing player stays on the ground
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local IND_T, LC = probe("IND"), probe("LOCALLC")
+    if IND_T and LC then
+        local lc0, p0, tick0 = IND_T.lc, W.players[1], W.tick
+        IND_T.lc = true
+        W.players[1] = {vx = 256, jump = 0}
+        W.tick = 30000; fire("run_command", {}); W.tick = 29990; fire("run_command", {})
+        for i = #TRACE_SKIP, 1, -1 do TRACE_SKIP[i] = nil end
+        CONSOLE_ON = true; fire("paint"); CONSOLE_ON = false
+        local bad
+        for _, sk in ipairs(TRACE_SKIP) do if sk == -1 then bad = true end end
+        if #TRACE_SKIP == 0 or bad then UNIT_FAIL[#UNIT_FAIL + 1] = "extrapolation: trace skip -1 (or no trace) for the local box" end
+        if LC.S.bz ~= 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "extrapolation: a standing player's box moved to z=" .. tostring(LC.S.bz) end
+        W.real = W.real + 1
+        IND_T.lc, W.players[1], W.tick = lc0, p0, tick0
     end
 end
 

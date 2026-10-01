@@ -3,6 +3,34 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.26  – Bug hunt.
+          FIXED -- our own shift (brk.def, read by WeDefensive / LCTicks)
+          never went back to 0 once the tickbase caught up: after one
+          defensive / DT shift it kept its last value, and LCTicks kept
+          adding up to 13 phantom ticks to the lag-comp lookup until we
+          died or hit someone. In v6.2 too, so FEATURE.DEF_RESET, off in
+          the parity run.
+          FIXED -- a debug log left as zero bytes by a crash mid-write was
+          read back at load and rewritten at the top of every later log
+          (the uploaded 106 KB log was nothing but zeros); most viewers stop
+          at the first zero, so the log looked empty. Zeros are dropped at
+          load and the drop is logged.
+          FIXED (boxes only) -- ExtrapolateOrigin traced with skip -1 (could
+          stop on the player's own hull), at foot level (a stair froze the
+          box), and lifted standing players by sv_jump_impulse * ti per
+          tick. Now skips the player, traces at step height, keeps standing
+          players on the ground.
+          FIXED -- the enemy SHIFT box stayed up to 1 s on a record that
+          arrived late or without animstate (the origin history is dropped
+          there; now the box is too).
+          Checked clean: all 17 event names, the 3 menu references (Menu
+          color, Double tap, Force safe point), all 15 netvars, every
+          variable division. Fuzz, fresh seeds, both runtimes, identical
+          writes: 64 x 60k ticks on v8.25, 32 x 20k on v8.26.
+          Lead, not changed: hit memory taught by a vuln head hit lands 51%
+          (22/43) when its forced value's sign is opposite to the teaching
+          hit's, 66% (21/32) when the same (p ~0.24); suppress logs side and
+          value with opposite signs (99%), hit memory with the same (95%).
   v8.25  – Enemy SHIFT box drawn live, as lagcomp-box-gs does: while the
           enemy's last record broke lag comp, every frame at their current
           origin carried forward by that record's gap, gone as soon as a

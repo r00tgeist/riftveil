@@ -5,7 +5,7 @@ and what comes next. Older versions are kept in `versions/` so none of the
 work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 (the decision engine), `riftveil_v8.1.lua`.
 
-## In the script (v8.25)
+## In the script (v8.26)
 
 | Area | Feature | Changes shots? |
 |---|---|---|
@@ -78,6 +78,16 @@ head is taken on safe points. Shot lines now carry `aa=`; log_report has
 `BY AA TYPE` and `3/5-WAY AFTER A RESOLVER MISS ON THEM`. The next log
 decides it: the first row's `pol=` shows `headsp` / `sp`, and its head rate
 and body share against the old 43% say whether safe point paid.
+
+## Lead from the v8.26 bug hunt (not changed)
+
+Hit memory replays the side learned from a head hit (`d.side`, flipped if
+the shot was flipped). Across methods the logged side and the forced value
+don't share a sign convention: suppress logs them opposite (99%), hit memory
+the same (95%), vuln 50/50. Hit-memory shots taught by a vuln head hit land
+51% (22/43) when their value's sign is opposite to the teaching hit's and
+66% (21/32) when it matches (p ~0.24). If a bigger log keeps that gap,
+teach hit memory the forced value's sign instead of the tracked side.
 
 ## Next, in order
 

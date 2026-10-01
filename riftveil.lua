@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.25"
+local RV_VERSION = "8.26"
 
 local ffi = require "ffi"
 
@@ -728,6 +728,13 @@ local LOG_ROLL_BYTES  = 512000
 local log_buf   = {}
 local log_total = 0
 local log_disk  = readfile(LOG_FILE) or ""
+-- A crash while writefile rewrote the file can leave it as zero bytes
+-- (one uploaded log was 106 KB of nothing else). Read back and rewritten on
+-- every flush, those zeros stayed at the top of every later log, and most
+-- viewers stop at the first one -- the log looked empty. Dropped here
+-- ("%z": LuaJIT patterns don't take a literal "\0").
+local log_nul = 0
+if log_disk:find("%z") then log_disk, log_nul = log_disk:gsub("%z", "") end
 
 local function ts()
     local h, m, s, ms = client.system_time()
@@ -896,6 +903,12 @@ local FEATURE = {
     -- lit the SHIFT box and set the lagcomp distrust streak. Off in the
     -- v6.2 parity run.
     SHIFT_GAP = true,
+    -- v8.26: our own shift (brk.def, read by WeDefensive / LCTicks) goes
+    -- back to 0 once the tickbase catches up. In v6.2 it was only written
+    -- while behind, so after one defensive / DT shift it kept its last
+    -- value and LCTicks kept adding up to 13 phantom ticks to the lag-comp
+    -- lookup until we died or hit someone. Off in the v6.2 parity run.
+    DEF_RESET = true,
     -- These three are the v6.2 [EXP] switches as the logs show them
     -- running when the resolver hit 74% (suppress fired in every v6.2
     -- match; jitter prediction never did).
@@ -1872,7 +1885,8 @@ client.set_event_callback("predict_command", function()
     local tb = entity.get_prop(me, "m_nTickBase") or 0
     brk.check = math.max(tb, brk.check)
     if math.abs(tb - brk.check) > 64 then brk.def = 0; brk.check = 0 end
-    if brk.check > tb then brk.def = math.abs(tb - brk.check) end
+    if brk.check > tb then brk.def = math.abs(tb - brk.check)
+    elseif FEATURE.DEF_RESET then brk.def = 0 end
     brk.ahead = globals.tickcount() > tb
 end)
 
@@ -2230,15 +2244,20 @@ local function ExtrapolateOrigin(player, ox, oy, oz, ticks)
         local vx, vy, vz = entity.get_prop(player, "m_vecVelocity")
         vx, vy, vz = vx or 0, vy or 0, vz or 0
 
-        local sv_g, sv_j = 800 * ti, 301 * ti  -- CS:GO defaults, used if the cvars are unavailable
-        pcall(function() sv_g = cvar.sv_gravity:get_float() * ti end)
-        pcall(function() sv_j = cvar.sv_jump_impulse:get_float() * ti end)
-        local gravity = vz > 0 and -sv_g or sv_j
+        local g = 800
+        pcall(function() g = cvar.sv_gravity:get_float() end)
 
+        -- v8.26 (drawing only -- the boxes): the trace skips the player
+        -- itself (was -1, which could stop on their own hull) and runs at
+        -- step height (18u) so a stair or slope doesn't freeze the box at
+        -- the first bump; standing players stay on the ground (the ported
+        -- formula lifted them by sv_jump_impulse * ti each tick).
+        local airborne = math.abs(vz) > 1
         local cx, cy, cz = ox, oy, oz
         for _ = 1, math.min(ticks, 32) do
-            local nx, ny, nz = cx + vx*ti, cy + vy*ti, cz + (vz + gravity)*ti
-            local frac = client.trace_line(-1, cx, cy, cz, nx, ny, nz)
+            local nx, ny, nz = cx + vx*ti, cy + vy*ti, cz
+            if airborne then nz = cz + vz*ti; vz = vz - g*ti end
+            local frac = client.trace_line(player, cx, cy, cz + 18, nx, ny, nz + 18)
             if isnum(frac) and frac <= 0.99 then return cx, cy, cz end
             cx, cy, cz = nx, ny, nz
         end
@@ -3076,6 +3095,7 @@ local function ProcessPlayer(player, ctx)
             rec.prev_pose = nil  -- prevent stale LBY trigger next tick
             rec.prev_origin_x, rec.prev_origin_y, rec.prev_origin_z = nil, nil, nil  -- gap ahead; don't compare across it
             rec.prev_origin_tick = nil
+            rec._lc_on = false
             break
         end
 
@@ -3084,6 +3104,7 @@ local function ProcessPlayer(player, ctx)
             rec.prev_pose = nil
             rec.prev_origin_x, rec.prev_origin_y, rec.prev_origin_z = nil, nil, nil
             rec.prev_origin_tick = nil
+            rec._lc_on = false
             break
         end
 
@@ -5426,4 +5447,5 @@ client.set_event_callback("shutdown",    FullShutdown)
 client.set_event_callback("disconnect",  FullShutdown)
 
 info("init", "RIFTVEIL v" .. RV_VERSION .. " loaded -- commands: rv_stats  rv_db  rv_perf  rv_save  rv_clear  rv_reset  rv_wipe")
+if log_nul > 0 then warn("init", "the previous log was damaged: %d zero bytes dropped (a crash during a write)", log_nul) end
 flush_log()
