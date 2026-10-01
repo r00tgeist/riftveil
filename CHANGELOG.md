@@ -3,6 +3,13 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.25  – Enemy SHIFT box drawn live, as lagcomp-box-gs does: while the
+          enemy's last record broke lag comp, every frame at their current
+          origin carried forward by that record's gap, gone as soon as a
+          normal record arrives (1 s safety timeout). It was computed once
+          per break and left in the world for a 0.5 s fade, so it trailed a
+          moving enemy and outlived the break. Decision side
+          (_shift_streak) unchanged; parity exact.
   v8.24  – Local LC box leads instead of trailing: it was fixed in the world
           at the moment the shift was seen, so we walked past it and it sat
           behind us for its half second. Now every frame it's drawn at our

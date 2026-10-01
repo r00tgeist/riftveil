@@ -1446,20 +1446,34 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     for _ = 1, 10 do step(true) end
     local r = REC_T and EI and EI[105] and REC_T[EI[105]]
     if r then
-        r._shift_flash = 0
         W.players[105].jump = 1500; step(true)
-        if (r._shift_flash or 0) > 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "SHIFT box: a bot moved 1500u in one record lit it" end
+        if r._lc_on then UNIT_FAIL[#UNIT_FAIL + 1] = "SHIFT box: a bot moved 1500u in one record lit it" end
         for _ = 1, 10 do step(true) end
-        r._shift_flash = 0
         for _ = 1, 14 do step(false) end
         W.players[105].jump = 1600; step(true)
-        if not ((r._shift_flash or 0) > 0) then UNIT_FAIL[#UNIT_FAIL + 1] = "SHIFT box: a 100u fakelag break (15-tick gap) didn't light it" end
+        if not r._lc_on then UNIT_FAIL[#UNIT_FAIL + 1] = "SHIFT box: a 100u fakelag break (15-tick gap) didn't light it" end
         -- drawn red, like the local box
         for i = #SCREEN, 1, -1 do SCREEN[i] = nil; SCREEN_RGB[i] = nil end
         CONSOLE_ON = true; fire("paint"); CONSOLE_ON = false
         local red
         for i, t in ipairs(SCREEN) do if t == "SHIFT" then red = SCREEN_RGB[i] end end
         if red ~= "240,64,64" then UNIT_FAIL[#UNIT_FAIL + 1] = "SHIFT box: label colour " .. tostring(red) .. ", expected red 240,64,64" end
+        -- drawn ahead of where they stand now (15-tick gap, vx 0 here: on
+        -- them), and gone once a normal record arrives
+        if not (r._lc_box and math.abs(r._lc_box[1] - 1600) < 0.01) then
+            UNIT_FAIL[#UNIT_FAIL + 1] = "SHIFT box: not at their current origin carried forward: " .. tostring(r._lc_box and r._lc_box[1])
+        end
+        W.players[105].vx = 640; r._lc_box = nil
+        fire("paint")
+        local exp = W.tick * 640 / 64 + 1600 + 15 * 10
+        if not (r._lc_box and math.abs(r._lc_box[1] - exp) < 0.01) then
+            UNIT_FAIL[#UNIT_FAIL + 1] = string.format("SHIFT box: didn't follow a moving enemy: %s, expected %.1f", tostring(r._lc_box and r._lc_box[1]), exp)
+        end
+        W.players[105].vx = 0
+        step(true)
+        r._lc_box = nil
+        fire("paint")
+        if r._lc_on or r._lc_box then UNIT_FAIL[#UNIT_FAIL + 1] = "SHIFT box: still drawn after a normal record" end
     else
         UNIT_FAIL[#UNIT_FAIL + 1] = "SHIFT box test: player 105 has no record"
     end

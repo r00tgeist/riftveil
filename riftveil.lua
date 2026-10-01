@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.24"
+local RV_VERSION = "8.25"
 
 local ffi = require "ffi"
 
@@ -2891,8 +2891,8 @@ local function NewRec(player, s64)
         _shift_streak = 0,
         prev_origin_x = nil, prev_origin_y = nil, prev_origin_z = nil,
         prev_origin_tick = nil,  -- for the origin-jump shift check + box extrapolation
-        _shift_flash = 0,  -- 0..1, decayed in DrawOverlay; world-space "SHIFT" tag alpha
-        _shift_box = nil,  -- {x,y,z} extrapolated origin, drawn as a wireframe while _shift_flash > 0
+        _lc_on = false,    -- last record broke lag comp: SHIFT box drawn (DrawShiftMarkers)
+        _lc_ticks = 0, _lc_t = 0,  -- its record gap in ticks, when it came
         -- Blind-guess brute cycle: index into the last-resort NIXWARE-style
         -- shot-cycle fallback (meta_aggressive with zero side data). _brute_half
         -- marks the half-magnitude phase of that cycle.
@@ -3165,9 +3165,9 @@ local function ProcessPlayer(player, ctx)
         -- standalone "lag comp breaker" ESP tool that draws a 3D box on it.
         -- Stronger and more immediate than the indirect tm[]-gap proxy
         -- below, so it sets _shift_streak straight to the distrust floor
-        -- instead of accumulating gradually. _shift_flash/_shift_box drive
-        -- a brief world-space "SHIFT" tag + box in DrawOverlay, adapted
-        -- from that same ESP tool's extrapolation technique.
+        -- instead of accumulating gradually. _lc_on / _lc_ticks drive the
+        -- world-space "SHIFT" tag + box in DrawOverlay, adapted from that
+        -- same ESP tool's extrapolation technique.
         if isnum(ox) and isnum(oy) and rec.prev_origin_x and rec.prev_origin_y then
             local dx, dy = ox - rec.prev_origin_x, oy - rec.prev_origin_y
             local d2 = dx*dx + dy*dy
@@ -3181,11 +3181,12 @@ local function ProcessPlayer(player, ctx)
             end
             if shifted then
                 rec._shift_streak = math.max(rec._shift_streak or 0, 3)
-                rec._shift_flash  = 1.0
-                local ticks = Clamp(gap, 1, 32)
-                local ex, ey, ez = ExtrapolateOrigin(player, ox, oy, oz, ticks)
-                rec._shift_box = {ex, ey, ez}
             end
+            -- the SHIFT box (DrawShiftMarkers) shows while this holds, as
+            -- lagcomp-box-gs shows its box while net_data.lagcomp holds:
+            -- until a record arrives that doesn't break lag comp
+            rec._lc_on = shifted and true or false
+            if shifted then rec._lc_ticks, rec._lc_t = Clamp(gap, 1, 32), globals.realtime() end
         end
         rec.prev_origin_x, rec.prev_origin_y, rec.prev_origin_z = ox, oy, oz
         rec.prev_origin_tick = st
@@ -5212,60 +5213,44 @@ end
 -- live enemy whose backtrack record just broke (the origin-jump check in
 -- ProcessPlayer), not only the current threat. The flash decays even with
 -- the marker hidden, so switching it back on never replays a stale one.
+-- SHIFT box: while an enemy's last record broke lag comp, every frame,
+-- their hull at their current origin carried forward by that record's gap
+-- -- where the next record will land, as lagcomp-box-gs draws it. Up to
+-- v8.24 it was computed once per break and left in the world for 0.5 s,
+-- so it trailed behind a moving enemy and outlived the break.
 local function DrawShiftMarkers(show)
-    local decay = globals.frametime() * 2  -- fades out over ~0.5s
+    if not show then return end
+    local now = globals.realtime()
     for _, p in ipairs(LIVE_ENEMIES) do
         local s2 = EIDX_S64[p]
         local r2 = s2 and REC[s2]
-        if r2 and (r2._shift_flash or 0) > 0 then
-            r2._shift_flash = math.max(0, r2._shift_flash - decay)
-            if show and r2._shift_flash > 0 then
-                local ox2, oy2, oz2 = entity.get_origin(p)
-                local a = math.floor(r2._shift_flash * 255)
-                local sx, sy
-                if isnum(ox2) and isnum(oy2) and isnum(oz2) then
-                    sx, sy = renderer.world_to_screen(ox2, oy2, oz2 + 78)
-                    if sx then
-                        renderer.text(sx, sy, C_LAG[1], C_LAG[2], C_LAG[3], a, "-c", 0, "SHIFT")
-                    end
+        if r2 and r2._lc_on and now - (r2._lc_t or 0) < 1 then
+            local ox2, oy2, oz2 = entity.get_origin(p)
+            local mnx, mny, mnz = entity.get_prop(p, "m_vecMins")
+            local mxx, mxy, mxz = entity.get_prop(p, "m_vecMaxs")
+            if isnum(ox2) and isnum(oy2) and isnum(oz2) and isnum(mnx) and isnum(mxx) and isnum(mnz) and isnum(mxz) then
+                local sx, sy = renderer.world_to_screen(ox2, oy2, oz2 + 78)
+                if sx then renderer.text(sx, sy, C_LAG[1], C_LAG[2], C_LAG[3], 255, "-c", 0, "SHIFT") end
+                local bx, by, bz = ExtrapolateOrigin(p, ox2, oy2, oz2, r2._lc_ticks or 1)
+                local corners = {
+                    {bx+mnx, by+mny, bz+mnz}, {bx+mxx, by+mny, bz+mnz},
+                    {bx+mnx, by+mxy, bz+mnz}, {bx+mxx, by+mxy, bz+mnz},
+                    {bx+mnx, by+mny, bz+mxz}, {bx+mxx, by+mny, bz+mxz},
+                    {bx+mnx, by+mxy, bz+mxz}, {bx+mxx, by+mxy, bz+mxz},
+                }
+                local scr = {}
+                for ci = 1, 8 do
+                    local ssx, ssy = renderer.world_to_screen(corners[ci][1], corners[ci][2], corners[ci][3])
+                    if ssx then scr[ci] = {ssx, ssy} end
                 end
-
-                local box = r2._shift_box
-                if box then
-                    local mnx, mny, mnz = entity.get_prop(p, "m_vecMins")
-                    local mxx, mxy, mxz = entity.get_prop(p, "m_vecMaxs")
-                    if isnum(mnx) and isnum(mxx) then
-                        local bx, by, bz = box[1], box[2], box[3]
-                        local corners = {
-                            {bx+mnx, by+mny, bz+mnz}, {bx+mxx, by+mny, bz+mnz},
-                            {bx+mnx, by+mxy, bz+mnz}, {bx+mxx, by+mxy, bz+mnz},
-                            {bx+mnx, by+mny, bz+mxz}, {bx+mxx, by+mny, bz+mxz},
-                            {bx+mnx, by+mxy, bz+mxz}, {bx+mxx, by+mxy, bz+mxz},
-                        }
-                        local scr = {}
-                        for ci = 1, 8 do
-                            local cx, cy, cz = corners[ci][1], corners[ci][2], corners[ci][3]
-                            local ssx, ssy = renderer.world_to_screen(cx, cy, cz)
-                            if ssx then scr[ci] = {ssx, ssy} end
-                        end
-                        local ba = math.floor(a * 0.8)
-                        for _, e in ipairs(BOX_EDGES) do
-                            local p1, p2 = scr[e[1]], scr[e[2]]
-                            if p1 and p2 then
-                                renderer.line(p1[1], p1[2], p2[1], p2[2], C_LAG[1], C_LAG[2], C_LAG[3], ba)
-                            end
-                        end
-                        -- Tether to the box centre, not a corner: a corner
-                        -- sits on the far side of the box at many angles.
-                        local ccx = bx + (mnx + mxx) / 2
-                        local ccy = by + (mny + mxy) / 2
-                        local ccz = bz + (mnz + mxz) / 2
-                        local tsx, tsy = renderer.world_to_screen(ccx, ccy, ccz)
-                        if sx and tsx then
-                            renderer.line(sx, sy, tsx, tsy, C_LAG[1], C_LAG[2], C_LAG[3], ba)
-                        end
-                    end
+                for _, e in ipairs(BOX_EDGES) do
+                    local p1, p2 = scr[e[1]], scr[e[2]]
+                    if p1 and p2 then renderer.line(p1[1], p1[2], p2[1], p2[2], C_LAG[1], C_LAG[2], C_LAG[3], 220) end
                 end
+                -- tether from the label to the box centre
+                local tsx, tsy = renderer.world_to_screen(bx + (mnx + mxx) / 2, by + (mny + mxy) / 2, bz + (mnz + mxz) / 2)
+                if sx and tsx then renderer.line(sx, sy, tsx, tsy, C_LAG[1], C_LAG[2], C_LAG[3], 160) end
+                r2._lc_box = {bx, by, bz}   -- last drawn, for the harness
             end
         end
     end
