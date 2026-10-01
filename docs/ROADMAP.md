@@ -96,7 +96,9 @@ teach hit memory the forced value's sign instead of the tracked side.
 - **vuln_unk values** -- triggered and done in v8.29 (`UNK_DELTA`: raw
   36% since v8.15, p 0.01). Judge it on `BY METHOD` vuln_unk head rate in
   the next logs: the delta era measured 59%. If it comes back under the
-  raw era's 55% overall, switch the flag off. STP / PKA / LND / DCK / CTR
+  raw era's 55% overall, switch the flag off. First v8.29 match: 78%
+  (7 head / 2 resolver misses, every value inside +-58; raw since v8.15
+  11/31, p 0.05). The one world-yaw window shot (vuln_lnd 145) missed. STP / PKA / LND / DCK / CTR
   still force world yaws (few shots: DCK 67%, the rest n < 10).
 - **LBY on 3/5-way** is mostly the jitter's centre pass. `LBY WINDOWS BY AA
   TYPE` in log_report: 59% vs 56% other vuln so far.
