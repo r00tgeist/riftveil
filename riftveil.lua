@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.20"
+local RV_VERSION = "8.21"
 
 local ffi = require "ffi"
 
@@ -3044,10 +3044,16 @@ local function ProcessPlayer(player, ctx)
     -- it like any other; the shot log's df= says how many there were.
     local def_frame = rec.st_max and st < rec.st_max and rec.st_max - st <= 64
     if def_frame then
-        local r = rec.dfr
-        if not r then r = {}; rec.dfr = r end
-        r[#r + 1] = ctx.cur_tc
-        if #r > 32 then table.remove(r, 1) end
+        -- counted once per frame: rec.lt stays on the last real record, so
+        -- an enemy choking inside its defensive window shows the same lower
+        -- simtime on every net update (v8.7-8.20 counted each of them)
+        if st ~= rec.def_st then
+            rec.def_st = st
+            local r = rec.dfr
+            if not r then r = {}; rec.dfr = r end
+            r[#r + 1] = ctx.cur_tc
+            if #r > 32 then table.remove(r, 1) end
+        end
         -- Not sampled (FEATURE.SKIP_DEF_FRAMES): it would go into the pose
         -- ring, the yaw cache and, on a tick never recorded (fakelag skips
         -- many), the lag-comp table that the LAGCOMP method reads. rec.lt
@@ -3912,7 +3918,7 @@ local function Reset(ent)
 end
 
 return {Tick = Tick, Decide = Decide, OnFire = OnFire, Reset = Reset, Write = Write, CAL = CAL, VAL_OK = VAL_OK,
-        XwayAfterMiss = XwayAfterMiss, InDoubt = InDoubt}
+        XwayAfterMiss = XwayAfterMiss, InDoubt = InDoubt, DtReady = DtReady}
 end)() -- aim policy scope
 
 
@@ -4139,75 +4145,40 @@ end)() -- shot log scope
 -- ══════════════════════════════════════════════════════════════════
 --  LOCAL LAGCOMP BOX  (Indicators > Local lagcomp)
 --
---  Flashes for half a second where breaking lag compensation puts US, the
---  way lagcomp-box-gs boxes an enemy at its extrapolated origin. Two
---  triggers:
+--  When double tap breaks lag compensation, flashes our hull for half a
+--  second where the shift puts us, red, labelled with the shifted ticks --
+--  the way lagcomp-box-gs boxes an enemy at its extrapolated origin.
 --
---  LC (double tap / defensive): our m_nTickBase is read in run_command and
---  its highest value kept; max - tickbase - 1 (0..14) is the ticks being
---  shifted -- the check enthusiasm, universe and excellentsanty use for
---  their own defensive / LC indicator. Over 2, the box is drawn at our
---  origin extrapolated that many ticks (ExtrapolateOrigin: velocity,
---  gravity, stops at walls). v8.18-8.19 had only the fakelag trigger and
---  showed nothing on double tap.
---
---  Fakelag: in setup_command, chokedcommands == 0 means the previous
---  command was sent, so our origin then is the server's record. Two
---  records more than 64 units apart, the move one we could make in the
---  commands between them, broke lag comp: the box goes on the new record.
---
---  Label: LC and the ticks. Visible in third person.
+--  Our m_nTickBase is read in run_command and its highest value kept;
+--  max - tickbase - 1 (0..14) is the ticks being shifted, the check
+--  enthusiasm, universe and excellentsanty use for their own defensive / LC
+--  indicator. Over 2, with double tap on and its key held (AIMX.DtReady),
+--  the box goes on our origin extrapolated that many ticks
+--  (ExtrapolateOrigin: velocity, gravity, stops at walls). Fakelag alone
+--  draws nothing (v8.18-8.20 also flashed on fakelag breaks, which made up
+--  most of what it showed).
 -- ══════════════════════════════════════════════════════════════════
 local LOCALLC = (function()
-local C_LC = {120, 220, 110}
+local C_LAG = {240, 64, 64}
 local FLASH = 0.5
 local EDGES = {{1, 2}, {2, 3}, {3, 4}, {4, 1}, {5, 6}, {6, 7}, {7, 8}, {8, 5}, {1, 5}, {2, 6}, {3, 7}, {4, 8}}
--- x,y,z,tb: last sent record and our tickbase then; n: commands since it;
 -- tb_max / shift: the LC check; bx,by,bz,t,ticks: the box being flashed
-local S = {n = 0, shift = 0, t = -1, ticks = 0}
-
-local function Flash(x, y, z, ticks)
-    S.bx, S.by, S.bz, S.t, S.ticks = x, y, z, globals.realtime(), ticks
-end
-
-local function Reset() S.x, S.tb_max, S.shift, S.n = nil, nil, 0, 0 end
-
-local function OnCommand(cmd)
-    if not IND.lc then return end
-    local me = entity.get_local_player()
-    if not (me and entity.is_alive(me)) then return Reset() end
-    S.n = S.n + 1
-    local choked = tonumber(cmd and cmd.chokedcommands) or tonumber(globals.chokedcommands()) or 0
-    if choked ~= 0 then return end
-    local x, y, z = entity.get_origin(me)
-    if not (isnum(x) and isnum(y) and isnum(z)) then return end
-    local tb = tonumber(entity.get_prop(me, "m_nTickBase"))
-    if S.x then
-        -- commands between the records: counted here, or by tickbase when
-        -- a shift ran commands this callback never saw
-        local n = S.n
-        if tb and S.tb and tb - S.tb > n and tb - S.tb <= 64 then n = tb - S.tb end
-        local dx, dy = x - S.x, y - S.y
-        local d2, reach = dx * dx + dy * dy, n * 3500 * globals.tickinterval()
-        if n >= 2 and d2 > 4096 and d2 <= reach * reach then Flash(x, y, z, n) end
-    end
-    S.x, S.y, S.z, S.tb, S.n = x, y, z, tb, 0
-end
+local S = {shift = 0, t = -1, ticks = 0}
 
 local function OnRun()
     if not IND.lc then return end
     local me = entity.get_local_player()
-    if not (me and entity.is_alive(me)) then return Reset() end
+    if not (me and entity.is_alive(me)) then S.tb_max, S.shift = nil, 0; return end
     local tb = tonumber(entity.get_prop(me, "m_nTickBase"))
     if not tb then return end
     -- a new life / reconnect starts the tickbase over
     if not S.tb_max or tb > S.tb_max or S.tb_max - tb > 64 then S.tb_max = tb end
     local shift = math.min(14, math.max(0, S.tb_max - tb - 1))
-    if shift > 2 and S.shift <= 2 then
+    if shift > 2 and S.shift <= 2 and AIMX.DtReady() then
         local x, y, z = entity.get_origin(me)
         if isnum(x) and isnum(y) and isnum(z) then
-            local ex, ey, ez = ExtrapolateOrigin(me, x, y, z, shift)
-            Flash(ex, ey, ez, shift)
+            S.bx, S.by, S.bz = ExtrapolateOrigin(me, x, y, z, shift)
+            S.t, S.ticks = globals.realtime(), shift
         end
     end
     S.shift = shift
@@ -4223,7 +4194,7 @@ local function Draw()
     local mxx, mxy, mxz = entity.get_prop(me, "m_vecMaxs")
     if not (isnum(mnx) and isnum(mxx) and isnum(mnz) and isnum(mxz)) then return end
     local al = 1 - age / FLASH
-    local c, x, y, z = C_LC, S.bx, S.by, S.bz
+    local c, x, y, z = C_LAG, S.bx, S.by, S.bz
     local P = {
         {x + mnx, y + mny, z + mnz}, {x + mxx, y + mny, z + mnz},
         {x + mxx, y + mxy, z + mnz}, {x + mnx, y + mxy, z + mnz},
@@ -4251,7 +4222,7 @@ local function Draw()
     if tx then renderer.text(tx, ty, c[1], c[2], c[3], math.floor(255 * al), "-c", 0, string.format("LC  %dt", S.ticks)) end
 end
 
-return {OnCommand = OnCommand, OnRun = OnRun, Draw = Draw, S = S}
+return {OnRun = OnRun, Draw = Draw, S = S}
 end)() -- local lagcomp scope
 
 
@@ -4874,6 +4845,7 @@ local C_BUILD = {220, 168, 72}
 local C_TEXT  = {205, 205, 205}
 local C_DIM   = {112, 112, 112}
 local C_ALT   = {140, 140, 140}
+local C_LAG   = {240, 64, 64}    -- lag-comp boxes (enemy SHIFT, local LC)
 
 local ui_panel_x = ui.new_slider("LUA","B","  Panel X", 0, PANEL_RES, 6800)
 local ui_panel_y = ui.new_slider("LUA","B","  Panel Y", 0, PANEL_RES, 1400)
@@ -5242,7 +5214,7 @@ local function DrawShiftMarkers(show)
                 if isnum(ox2) and isnum(oy2) and isnum(oz2) then
                     sx, sy = renderer.world_to_screen(ox2, oy2, oz2 + 78)
                     if sx then
-                        renderer.text(sx, sy, C_BUILD[1], C_BUILD[2], C_BUILD[3], a, "-c", 0, "SHIFT")
+                        renderer.text(sx, sy, C_LAG[1], C_LAG[2], C_LAG[3], a, "-c", 0, "SHIFT")
                     end
                 end
 
@@ -5268,7 +5240,7 @@ local function DrawShiftMarkers(show)
                         for _, e in ipairs(BOX_EDGES) do
                             local p1, p2 = scr[e[1]], scr[e[2]]
                             if p1 and p2 then
-                                renderer.line(p1[1], p1[2], p2[1], p2[2], C_BUILD[1], C_BUILD[2], C_BUILD[3], ba)
+                                renderer.line(p1[1], p1[2], p2[1], p2[2], C_LAG[1], C_LAG[2], C_LAG[3], ba)
                             end
                         end
                         -- Tether to the box centre, not a corner: a corner
@@ -5278,7 +5250,7 @@ local function DrawShiftMarkers(show)
                         local ccz = bz + (mnz + mxz) / 2
                         local tsx, tsy = renderer.world_to_screen(ccx, ccy, ccz)
                         if sx and tsx then
-                            renderer.line(sx, sy, tsx, tsy, C_BUILD[1], C_BUILD[2], C_BUILD[3], ba)
+                            renderer.line(sx, sy, tsx, tsy, C_LAG[1], C_LAG[2], C_LAG[3], ba)
                         end
                     end
                 end
@@ -5439,7 +5411,6 @@ client.set_event_callback("aim_hit",     Instrument("aim_hit", on_aim_hit))
 -- grenade / fire / knife damage
 client.set_event_callback("bullet_impact", Instrument("bullet_impact", SHOTLOG.Impact))
 client.set_event_callback("player_hurt",   Instrument("player_hurt", SHOTLOG.Hurt))
-client.set_event_callback("setup_command", Instrument("setup_command", LOCALLC.OnCommand))
 client.set_event_callback("run_command",   Instrument("run_command", LOCALLC.OnRun))
 -- The log also reaches disk every round, so a match with the debug log
 -- off still leaves its shots on disk.

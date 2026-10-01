@@ -141,7 +141,7 @@ local LOG_CAPTURE, LOG_SCANNED, ERR_LINES = {}, {}, {}
 -- print / client.color_log: every call is checked; the text is kept only
 -- while a test sets CONSOLE_ON, so the soak stays flat
 local CONSOLE, CONSOLE_ON, CONSOLE_BAD = {}, false, {}
-local SCREEN = {}   -- renderer.text strings while CONSOLE_ON
+local SCREEN, SCREEN_RGB = {}, {}   -- renderer.text strings / "r,g,b" while CONSOLE_ON
 
 -- UI elements carry their kind so ui.get returns the right shape.
 local UI_ELEMS = {}
@@ -363,7 +363,11 @@ local mock = {
         if k == "measure_text"   then return function(_, text) return #tostring(text or "") * 6, 12 end end
         if k == "world_to_screen" then return function() return 500, 500 end end
         if k == "text" then return function(...)
-            if CONSOLE_ON then SCREEN[#SCREEN + 1] = tostring(select(9, ...)) end
+            if CONSOLE_ON then
+                local _, _, r, g, b = ...
+                SCREEN[#SCREEN + 1] = tostring(select(9, ...))
+                SCREEN_RGB[#SCREEN] = string.format("%s,%s,%s", tostring(r), tostring(g), tostring(b))
+            end
         end end
         return function() end
     end}),
@@ -1268,7 +1272,8 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     local IND_T, REC_T, EI = probe("IND"), probe("REC"), probe("EIDX_S64")
     local rec = REC_T and EI and EI[101] and REC_T[EI[101]]
     if IND_T and rec then
-        local log0 = IND_T.log
+        local log0, eyebad0 = IND_T.log, W.eye_bad
+        W.eye_bad = nil   -- the fuzz phase can leave the eye NaN / inf
         local keep = {}
         for _, f in ipairs({"aa_type", "last_outcome", "last_fire_t", "aim_miss_streak"}) do keep[f] = rec[f] end
         local PF = {"Force body yaw", "Force body yaw value", "Correction active"}
@@ -1344,11 +1349,19 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
             fire("player_hurt", {attacker = 1, userid = 101, weapon = "hegrenade", hitgroup = 0, dmg_health = 34, health = 66})
         end), "Naded bot101 for 34 damage (66 remaining)")
 
+        -- an unreadable (infinite) eye: no angle rather than ":nan°"
+        W.eye_bad = math.huge
+        local inf = lines(function() shoot(92010); impact(1000, t2); miss(92010, "spread") end)
+        W.eye_bad = nil
+        if (inf[1] or ""):find("nan", 1, true) or not (inf[1] or ""):find("due to spread · ", 1, true) then
+            UNIT_FAIL[#UNIT_FAIL + 1] = "shot log: infinite eye position printed: " .. tostring(inf[1])
+        end
+
         IND_T.log = false
         local off = lines(function() shoot(92009); impact(1000, 0); miss(92009, "spread") end)
         if #off > 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "shot log: printed with the option off: " .. off[1] end
 
-        IND_T.log = log0
+        IND_T.log, W.eye_bad = log0, eyebad0
         for f, v in pairs(keep) do rec[f] = v end
         for _, f in ipairs(PF) do PLIST_STATE["101\t" .. f] = pl0[f] end
     else
@@ -1357,58 +1370,54 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     if #CONSOLE_BAD > 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "shot log: bad output call " .. CONSOLE_BAD[1] end
 end
 
--- LOCAL LAGCOMP BOX: a flash where breaking lag comp puts us -- on a
--- tickbase shift (double tap / defensive) at our origin extrapolated by the
--- shifted ticks, and on a fakelag break (sent records > 64u apart) at the
--- new record; nothing without a break, on a teleport no move could make,
--- after the flash, or with the option off.
+-- LOCAL LAGCOMP BOX: a red flash where a double-tap shift puts us -- our
+-- origin extrapolated by the shifted ticks -- only with double tap on; not
+-- again while the same shift runs; gone after 0.5 s; nothing with the
+-- option off. Fakelag alone draws nothing (no setup_command trigger).
 if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
-    local IND_T, LC = probe("IND"), probe("LOCALLC")
-    if IND_T and LC then
-        local lc0, p0, tick0 = IND_T.lc, W.players[1], W.tick
+    local IND_T, LC, AX = probe("IND"), probe("LOCALLC"), probe("AIMX")
+    if IND_T and LC and AX and AX.DtReady then
+        local lc0, p0, tick0, dt0 = IND_T.lc, W.players[1], W.tick, AX.DtReady
         IND_T.lc = true
-        W.players[1] = {vx = 0, jump = 0}
-        local function cmd(choked, x) W.players[1].jump = x; fire("setup_command", {chokedcommands = choked}) end
         local function label()
-            for i = #SCREEN, 1, -1 do SCREEN[i] = nil end
+            for i = #SCREEN, 1, -1 do SCREEN[i] = nil; SCREEN_RGB[i] = nil end
             CONSOLE_ON = true; fire("paint"); CONSOLE_ON = false
-            for _, t in ipairs(SCREEN) do if t:find("^LC  ") then return t end end
+            for i, t in ipairs(SCREEN) do if t:find("^LC  ") then return t, SCREEN_RGB[i] end end
             return nil
         end
         local function fail(m) UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: " .. m end
+        local function shift(from, to) W.tick = from; fire("run_command", {}); W.tick = to; fire("run_command", {}) end
+        W.players[1] = {vx = 256, jump = 0}
         LC.S.t = -1
-        -- no fakelag: a record every command, 5u apart
-        for i = 0, 5 do cmd(0, i * 5) end
-        if label() ~= nil then fail("drawn with no break") end
-        -- respawn-like jump in one command: no move covers 1000u in a tick
-        cmd(0, 1000)
-        if label() ~= nil then fail("a one-command 1000u teleport flashed") end
-        -- fakelag: 3 commands choked, then sent 100u away
-        cmd(1, 1040); cmd(2, 1080); cmd(0, 1100)
-        if label() ~= "LC  3t" then fail("fakelag break label " .. tostring(label()) .. ", expected LC  3t") end
-        if LC.S.bx ~= 1100 then fail("fakelag box at " .. tostring(LC.S.bx) .. ", expected the new record 1100") end
+        -- double tap off: a shift draws nothing
+        AX.DtReady = function() return false end
+        shift(5000, 4990)
+        if label() ~= nil or LC.S.t ~= -1 then fail("flashed with double tap off") end
+        -- double tap on: 10 below the max = 9 ticks shifted
+        AX.DtReady = function() return true end
+        shift(7000, 6990)
+        local ox = W.tick * 256 / 64
+        local txt, rgb = label()
+        if txt ~= "LC  9t" then fail("double-tap shift label " .. tostring(txt) .. ", expected LC  9t") end
+        if rgb ~= "240,64,64" then fail("label colour " .. tostring(rgb) .. ", expected red 240,64,64") end
+        if not (LC.S.bx and math.abs(LC.S.bx - (ox + 36)) < 0.01) then
+            fail(string.format("box at x=%s, expected %.1f (9 ticks at 256 u/s)", tostring(LC.S.bx), ox + 36))
+        end
+        local t1 = LC.S.t
+        W.real = W.real + 0.01; W.tick = 6991; fire("run_command", {})
+        if LC.S.t ~= t1 then fail("re-flashed while the same shift ran") end
         W.real = W.real + 0.6
         if label() ~= nil then fail("still drawn after the 0.5 s flash") end
-        -- double tap / defensive: tickbase 10 below its max = 9 ticks shifted
-        W.players[1] = {vx = 256, jump = 0}
-        W.tick = 5000; fire("run_command", {})
-        W.tick = 4990; fire("run_command", {})
-        local ox = W.tick * 256 / 64
-        if label() ~= "LC  9t" then fail("tickbase shift label " .. tostring(label()) .. ", expected LC  9t") end
-        if not (LC.S.bx and math.abs(LC.S.bx - (ox + 9 * 4)) < 0.01) then
-            fail(string.format("shift box at x=%s, expected %.1f (9 ticks at 256 u/s)", tostring(LC.S.bx), ox + 36))
-        end
-        -- still shifting next command: no second flash, the first one stands
-        local t1 = LC.S.t
-        W.real = W.real + 0.01; W.tick = 4991; fire("run_command", {})
-        if LC.S.t ~= t1 then fail("re-flashed while the same shift ran") end
+        -- fakelag: nothing listens to setup_command any more
+        fire("setup_command", {chokedcommands = 0})
+        if label() ~= nil then fail("drawn on a sent command") end
         IND_T.lc = false
         LC.S.t = -1
-        W.tick = 6000; fire("run_command", {}); W.tick = 5980; fire("run_command", {})
+        shift(9000, 8980)
         if LC.S.t ~= -1 or label() ~= nil then fail("ran with the option off") end
-        IND_T.lc, W.players[1], W.tick = lc0, p0, tick0
+        IND_T.lc, W.players[1], W.tick, AX.DtReady = lc0, p0, tick0, dt0
     else
-        UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp test: IND / LOCALLC not reachable"
+        UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp test: IND / LOCALLC / AIMX.DtReady not reachable"
     end
 end
 
@@ -1437,6 +1446,12 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         for _ = 1, 14 do step(false) end
         W.players[105].jump = 1600; step(true)
         if not ((r._shift_flash or 0) > 0) then UNIT_FAIL[#UNIT_FAIL + 1] = "SHIFT box: a 100u fakelag break (15-tick gap) didn't light it" end
+        -- drawn red, like the local box
+        for i = #SCREEN, 1, -1 do SCREEN[i] = nil; SCREEN_RGB[i] = nil end
+        CONSOLE_ON = true; fire("paint"); CONSOLE_ON = false
+        local red
+        for i, t in ipairs(SCREEN) do if t == "SHIFT" then red = SCREEN_RGB[i] end end
+        if red ~= "240,64,64" then UNIT_FAIL[#UNIT_FAIL + 1] = "SHIFT box: label colour " .. tostring(red) .. ", expected red 240,64,64" end
     else
         UNIT_FAIL[#UNIT_FAIL + 1] = "SHIFT box test: player 105 has no record"
     end
@@ -1466,6 +1481,26 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
             UNIT_FAIL[#UNIT_FAIL + 1] = "defensive frames: " .. tostring(d and d.df) .. " counted, expected >= 2"
         end
         SH[91001] = nil
+        -- one defensive frame seen on five net updates (the enemy chokes
+        -- inside its window) counts once
+        W.tick = W.tick + 1; W.real = W.real + TI
+        p.sim = (top + 2) * TI
+        W.players[101].sim = W.tick * TI
+        fire("net_update_end")
+        fire("aim_fire", {id = 91002, target = 102, backtrack = 0, hit_chance = 80, hitgroup = 1, damage = 30})
+        local before = SH[91002] and SH[91002].df or 0
+        SH[91002] = nil
+        for _ = 1, 5 do
+            W.tick = W.tick + 1; W.real = W.real + TI
+            W.players[101].sim = W.tick * TI
+            fire("net_update_end")
+        end
+        fire("aim_fire", {id = 91003, target = 102, backtrack = 0, hit_chance = 80, hitgroup = 1, damage = 30})
+        local after = SH[91003] and SH[91003].df or 0
+        SH[91003] = nil
+        if after ~= before then
+            UNIT_FAIL[#UNIT_FAIL + 1] = string.format("defensive frames: one frame seen on 5 updates counted %d times", after - before + 1)
+        end
         -- FEATURE.SKIP_DEF_FRAMES: none of them reached the pose history,
         -- and the last record stayed the highest one
         local REC_T, EI = probe("REC"), probe("EIDX_S64")

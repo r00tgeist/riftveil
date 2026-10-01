@@ -3,6 +3,25 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.21  – Lag-comp boxes, simpler, and a bug hunt.
+          LOCAL box: double tap only. It flashes when double tap is on (key
+          held, AIMX.DtReady) and the tickbase is shifted > 2 ticks; the
+          fakelag trigger (setup_command, sent records > 64u apart) is gone
+          -- it was most of what the box showed. Labelled with the shifted
+          ticks.
+          Both boxes red (240,64,64): the local LC box and the enemy SHIFT
+          box, label and tether.
+          FIXED -- df= (defensive frames before a shot) counted one frame on
+          every net update while the enemy choked inside its defensive
+          window: rec.lt stays on the last real record, so the same lower
+          simtime came round again each update. Each frame now counts once.
+          Measurement only; old logs' df= read high when it was choked.
+          Bug hunt otherwise clean: no remove-while-iterating, player-list
+          cache resyncs every second, 48 fresh fuzz seeds x 2 runtimes.
+          Harness: the shot-log test no longer inherits a NaN / inf eye from
+          the fuzz phase; an infinite eye prints no angle (isnum already
+          rejects it); DT off / on, re-flash, expiry, option off and red for
+          both boxes; mutation-checked.
   v8.20  – Lag-comp boxes fixed.
           ENEMY SHIFT box (and the lagcomp distrust streak it sets) fired on
           bots: the origin-jump check compared a new record with the last

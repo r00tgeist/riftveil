@@ -5,7 +5,7 @@ and what comes next. Older versions are kept in `versions/` so none of the
 work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 (the decision engine), `riftveil_v8.1.lua`.
 
-## In the script (v8.20)
+## In the script (v8.21)
 
 | Area | Feature | Changes shots? |
 |---|---|---|
@@ -17,7 +17,7 @@ work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 | UI | v7.9 menu, info panel, VLN/RES/cheat flags, SHIFT marker | no |
 | Speed | Player-list writes only on change (-68% writes), player list refreshed once a second | no |
 | Logging | Every shot: `st= wpn= hp= ar= aim= pdmg= cf= cht=`; bounded log, flushed each round | no |
-| UI | Local lagcomp box: 0.5 s flash where breaking lag comp puts us: tickbase shift (DT / defensive) extrapolated by the shifted ticks, or a fakelag break (> 64u between sent records) | no (Indicators › Local lagcomp) |
+| UI | Local lagcomp box: red 0.5 s flash where a double-tap shift puts us (DT on + tickbase shifted > 2 ticks), extrapolated by the shifted ticks | no (Indicators › Local lagcomp) |
 | Logging | Shot log (console + top-left, via print like the original), `[id] [fire/now] Missed x's head(98)(76%) due to spread:1.84°` plus who resolved the shot (RIFTVEIL method + forced yaw, or GAMESENSE), AA, policy, flags, chokes | no (Indicators › Shot log) |
 | Tools | `rv_perf` profiler, `rv_stats`, `rv_db`, `rv_save` | no |
 | Weapons | Aim policy on traced damage: prefer body only when a body shot kills from here, body preference off when only the head kills, safe point when in doubt or airborne; values verified, traces self-calibrated | yes, Detection › Weapon aim |

@@ -79,17 +79,12 @@ Turn off other aimbot-log scripts to avoid duplicate lines.
 
 ## Local lagcomp box
 
-Flashes for half a second where breaking lag compensation puts **you**,
-the way the public `lagcomp-box-gs` script boxes an enemy (third person),
-labelled `LC` with the ticks:
-
-- **Double tap / defensive:** your tickbase drops below its highest value
-  (more than 2 ticks shifted, the check the public defensive indicators use);
-  the box is your position carried forward by the shifted ticks.
-- **Fakelag:** your last two sent positions are more than 64 units apart;
-  the box is where the new one put you.
-
-Nothing is drawn without a break.
+When double tap breaks lag compensation (double tap on, key held, your
+tickbase shifted more than 2 ticks -- the check the public defensive / LC
+indicators use), a red box flashes for half a second where the shift puts
+**you**, labelled `LC` with the shifted ticks: your position carried forward
+by those ticks, the way the public `lagcomp-box-gs` script boxes an enemy.
+Third person. Fakelag alone draws nothing. The enemy SHIFT box is red too.
 
 ## Weapon aim
 
