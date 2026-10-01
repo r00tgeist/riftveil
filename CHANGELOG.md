@@ -3,6 +3,15 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.14  – Repo pass: player-list field and enemy-prop inventory
+          (REPO_SURVEY 6b). The LBY target is read by 191 scripts, 262
+          times as sign(eye - LBY) = desync side; RIFTVEIL never read it.
+          Not adopted (an LBY update sets the target to the eye yaw), but
+          now logged per shot as lbyd=, and log_report BY EYE - LBY DELTA
+          vs OUR FORCED SIDE says whether it carries side information.
+          "Override simulation time" / "Override hitbox" exist only in one
+          machine-written script -- not used. On-shot / teleport /
+          extrapolated: 0 of 149 v8.x shots.
   v8.13  – REMOVED the StarSync movement features (v8.9): Fast ladder and
           Jumpscout hit chance, with their menu rows, setup_command
           callback and harness tests. Includes v8.12.1 below.

@@ -100,7 +100,8 @@ Head rate per method, movement state (`st=`), enemy speed (`mv=`), weapon
 teleported, extrapolated, ...), enemy pitch at fire (`pit=`, defensive AA),
 defensive frames in the second before the shot (`df=`), gamesense's own
 resolver on/off for the target (`cor=`), seconds since our previous shot
-at them and its outcome (`ls=`, `prv=`; anti-bruteforce windows),
+at them and its outcome (`ls=`, `prv=`; anti-bruteforce windows), eye yaw
+minus the networked LBY target (`lbyd=`),
 DB-seeded vs cold start, enemy cheat (`cht=`) and player, with 95% intervals.
 
 ## Development

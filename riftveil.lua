@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.13"
+local RV_VERSION = "8.14"
 
 local ffi = require "ffi"
 
@@ -3966,6 +3966,13 @@ end
 
 -- A game value for a "%d" log field: an integer, or -1 when it isn't a
 -- finite number (NaN / inf reached the shot log through hp and traces).
+local function LbyDelta(ent)
+    local lby = entity.get_prop(ent, "m_flLowerBodyYawTarget")
+    local _, eye = entity.get_prop(ent, "m_angEyeAngles")
+    if not (isnum(lby) and isnum(eye)) then return 999 end
+    return math.floor(NA(eye - lby) + 0.5)
+end
+
 local function CorrectionActive(ent)
     local ok, v = pcall(plist.get, ent, "Correction active")
     if not ok or v == nil then return "?" end
@@ -4056,6 +4063,10 @@ local function on_aim_fire(e)
         -- shot at this player (-1 = first), prv= its outcome (h head hit,
         -- b other hit, m resolver miss, o other miss, - none).
         ls      = (r and r.last_fire_t) and (globals.realtime() - r.last_fire_t) or -1,
+        -- eye yaw minus the networked LBY target, -180..180 (999 unread).
+        -- 262 uses in the public scripts take its sign as the desync side;
+        -- logged to test that against our forced side (measurement only)
+        lbyd    = LbyDelta(t),
         prv     = r and r.last_outcome or "-",
     }
     if r then r.last_fire_t = globals.realtime(); r.last_outcome = "-" end
@@ -4169,14 +4180,14 @@ local function on_aim_hit(e)
         end
     end
 
-    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s%s%s",
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d%s%s",
         entity.get_player_name(e.target) or "?",
         HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
         isnum(e.damage) and math.floor(e.damage) or 0,
         d.meth, d.val, d.bt, d.state or "?", d.sspd or -1, d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
-        (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0, d.cor or "?", d.ls or -1, d.prv or "-",
+        (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0, d.cor or "?", d.ls or -1, d.prv or "-", d.lbyd or 999,
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
     SHOTS[e.id] = nil
@@ -4244,12 +4255,12 @@ local function on_aim_miss(e)
         if ro then ro.last_outcome = is_resolver and "m" or "o" end
     end
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s%s%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d%s%s",
         entity.get_player_name(e.target) or "?",
         reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.sspd or -1, d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
-        (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0, d.cor or "?", d.ls or -1, d.prv or "-",
+        (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0, d.cor or "?", d.ls or -1, d.prv or "-", d.lbyd or 999,
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
 

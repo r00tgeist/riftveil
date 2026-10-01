@@ -212,6 +212,32 @@ result would measure RIFTVEIL against a model of the enemy's animation,
 not against the game -- the route that led v7.x from 74% to 49%.
 Decisions stay on match logs.
 
+## 6b. Inventory: player-list fields and enemy props (v8.14)
+
+Every `plist.set/get` field name across 1,371 gamesense scripts and the
+resolvers (uses / files): Force body yaw 690/181, Force body yaw value
+466/179, Override prefer body aim 238/52, Correction active 168/107,
+Override safe point 148/73, Force pitch 144/32, High priority 62/27,
+Force pitch value 51/31, Add to whitelist 37/21, Allow shared ESP updates
+and Disable visuals 6/2. Some scripts spell them in other capitalisation
+("Correction Active", "force pitch"). "Override simulation time" /
+"Simulation time override" / "Override hitbox" appear only in Insanity.lua,
+which looks machine-written; nothing confirms they exist -- not used.
+
+Enemy props read most: velocity 873, origin 736, eye angles 581, flags
+470, pose parameters 368, simulation time 294, health 198, **LBY target
+191** (not read by RIFTVEIL), view offset 184, duck amount 141. The LBY
+target is used 262 times as `sign(eye yaw - LBY)` = desync side. That
+reading is debatable after the 2018 desync update (an LBY update sets the
+target to the eye yaw), so v8.14 logs it per shot (`lbyd=`) and
+log_report compares head rate when its sign agrees / disagrees with our
+forced side, instead of adopting it.
+
+On-shot records: 32 scripts read the enemy weapon's m_fLastShotTime;
+gamesense marks on-shot backtrack itself (aim_fire.high_priority, fl=p).
+In all 149 v8.x shots logged so far: 0 on-shot, 0 teleported, 0
+extrapolated; 147 used accuracy boost.
+
 ## 7. Candidates, ranked, and what decides each
 
 1. **Force pitch on a pitch breaker** (GILVzQi: pitch jump > 37 deg -> force
