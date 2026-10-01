@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.18"
+local RV_VERSION = "8.19"
 
 local ffi = require "ffi"
 
@@ -4133,14 +4133,15 @@ end)() -- shot log scope
 --  Two consecutive sent records more than 64 units apart (4096 squared,
 --  horizontal -- the same check as the enemy SHIFT marker and the public
 --  lagcomp scripts) mean lag compensation is broken: enemies can't
---  backtrack us between them. The box turns green and says LAGCOMP; a
---  record that only trails us is amber with the distance. Nothing is
---  drawn while the record is on us (under 2 units) or older than 1 s.
+--  backtrack us between them. Only then is the box drawn (v8.19; v8.18
+--  also drew a record that merely trailed us), green with LAGCOMP, until
+--  a sent record lands back within 64 units. Nothing while the record is
+--  on us (under 2 units) or older than 1 s.
 --  Visible in third person; in first person the box sits around the
 --  camera.
 -- ══════════════════════════════════════════════════════════════════
 local LOCALLC = (function()
-local C_BROKEN, C_TRAIL = {120, 220, 110}, {220, 168, 72}
+local C_BROKEN = {120, 220, 110}
 local EDGES = {{1, 2}, {2, 3}, {3, 4}, {4, 1}, {5, 6}, {6, 7}, {7, 8}, {8, 5}, {1, 5}, {2, 6}, {3, 7}, {4, 8}}
 local S = {x = nil, y = nil, z = nil, t = 0, broken = false, ticks = 0}
 
@@ -4164,7 +4165,7 @@ local function OnCommand(cmd)
 end
 
 local function Draw()
-    if not (IND.lc and S.x) then return end
+    if not (IND.lc and S.x and S.broken) then return end
     if globals.realtime() - S.t > 1 then return end
     local me = entity.get_local_player()
     if not (me and entity.is_alive(me)) then return end
@@ -4176,7 +4177,7 @@ local function Draw()
     local mnx, mny, mnz = entity.get_prop(me, "m_vecMins")
     local mxx, mxy, mxz = entity.get_prop(me, "m_vecMaxs")
     if not (isnum(mnx) and isnum(mxx) and isnum(mnz) and isnum(mxz)) then return end
-    local c = S.broken and C_BROKEN or C_TRAIL
+    local c = C_BROKEN
     local P = {
         {S.x + mnx, S.y + mny, S.z + mnz}, {S.x + mxx, S.y + mny, S.z + mnz},
         {S.x + mxx, S.y + mxy, S.z + mnz}, {S.x + mnx, S.y + mxy, S.z + mnz},
@@ -4199,7 +4200,7 @@ local function Draw()
     if bx and ox then renderer.line(bx, by, ox, oy, c[1], c[2], c[3], 140) end
     local tx, ty = renderer.world_to_screen(S.x, S.y, S.z + mxz + 6)
     if tx then
-        local label = S.broken and "LAGCOMP" or string.format("%du", math.floor(dist + 0.5))
+        local label = "LAGCOMP"
         if S.ticks > 0 then label = label .. string.format("  %dt", S.ticks) end
         renderer.text(tx, ty, c[1], c[2], c[3], 255, "-c", 0, label)
     end

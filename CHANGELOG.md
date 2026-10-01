@@ -3,6 +3,9 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.19  – Local lagcomp box only when lag compensation is actually broken
+          (two sent records > 64u apart). v8.18 also drew an amber box
+          whenever the record trailed us, i.e. on any choke.
   v8.18  – Local lagcomp box (Indicators > Local lagcomp, on once). The
           repo's lagcomp box scripts (lagcomp-box-gs and copies) box
           enemies only; this is ours. setup_command with chokedcommands 0

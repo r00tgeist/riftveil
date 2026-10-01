@@ -1358,7 +1358,7 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
 end
 
 -- LOCAL LAGCOMP BOX: our record is the origin of the last command sent;
--- it trails us while we choke, breaks lag compensation past 64 units,
+-- drawn only when lag compensation is broken (records > 64 units apart),
 -- is dropped after 1 s, and nothing happens with the option off
 if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     local IND_T, LC = probe("IND"), probe("LOCALLC")
@@ -1375,7 +1375,7 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         end
         cmd(0, 0)
         cmd(1, 10); cmd(2, 30)
-        if label() ~= "30u  2t" then UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: trailing label " .. tostring(label()) .. ", expected 30u  2t" end
+        if label() ~= nil then UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: drawn while only trailing (lag comp intact)" end
         cmd(0, 30)
         if LC.S.broken or LC.S.x ~= 30 then UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: a 30u step counted as broken / record not taken" end
         if label() ~= nil then UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: drawn while the record is on us" end

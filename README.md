@@ -84,11 +84,11 @@ fakelag chokes or double tap shifts, the server only has the position of the
 last command you actually sent; the box is your hull there, with a line to
 where you stand now (third person).
 
-- **Amber, `30u  2t`:** the record trails you by 30 units, 2 commands choked.
-- **Green, `LAGCOMP`:** your last two sent records are more than 64 units
-  apart (the same check as the enemy SHIFT marker): lag compensation is
-  broken and enemies can't backtrack you between them.
-- Nothing is drawn while the record is on you, or once it's over 1 s old.
+It only appears when lag compensation is actually broken: your last two
+sent records more than 64 units apart (the same check as the enemy SHIFT
+marker), so enemies can't backtrack you between them. Then it's green with
+`LAGCOMP` and the choked count. A record that merely trails you draws
+nothing; it also hides once it's on you or over 1 s old.
 
 ## Weapon aim
 
