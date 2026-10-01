@@ -71,10 +71,13 @@ against the ragebot's own damage prediction. How and why, with sources:
    plaguecheat, ev0lve, rifk7, airflow, primordial (from tickcount's
    voice-listener). The label is saved with the
    player's profile.
-2. **Gamesense Lua presets only for gamesense users.** The AA config
-   fingerprints (luasense beta/std, symmetric builders) are gamesense
-   Luas; a neverlose or nixware player can't run them, so they get the
-   default L/R table instead of a false fingerprint match.
+2. **A Lua's presets only for the cheat that runs it.** The `luasense_beta`
+   fingerprint is the built-in preset of the **Neverlose** luasense beta,
+   all 7 states exact (`luasense_std` is the same family). A player
+   detected on any other cheat can't be running it, so they get the
+   default L/R table instead of a false match. `symmetric` is a desync
+   shape, not a Lua, and applies to everyone. (v8.0–v8.9 had this
+   backwards: only gamesense users got the luasense presets.)
 3. **What works per cheat is learned.** Every head-aimed shot (head hit or
    resolver miss) is filed under (enemy cheat, method) across all players
    on that cheat and saved between sessions. A method at 30% or worse against a cheat after

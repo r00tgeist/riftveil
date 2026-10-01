@@ -5,7 +5,7 @@ and what comes next. Older versions are kept in `versions/` so none of the
 work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 (the decision engine), `riftveil_v8.1.lua`.
 
-## In the script (v8.9)
+## In the script (v8.10)
 
 | Area | Feature | Changes shots? |
 |---|---|---|
@@ -24,19 +24,26 @@ work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 Every release proves with `tools/check_all.sh` step 7 that, with the
 post-v6.2 features off, the script forces the same side and value as v6.2.
 
-## Waiting on a match log
+## First match log on v8.x (v8.8, 43 resolver-decided shots)
 
-1. **Is the head rate back?** The target is v6.2's 74% on resolver-decided
-   shots. `lua5.3 tools/log_report.lua` on the two log files shows it per
-   method, state, weapon, cheat and player.
-2. **Does condition detection help?** Compare `st=running` and
-   `st=slowmotion` against the v6.2-era logs. If it's worse, set
-   `FEATURE.STATE_PHYSICS = false` (one word).
-3. **Is the aim policy active and calibrated?** The log's `[aim]` lines
-   say which player-list values work and the trace calibration factor.
-   `BY AIM POLICY` and `TRACE CALIBRATION` in log_report show the rest.
-4. **Does the cheat revealer fire in game?** Look for `[cheat] player=...`
-   lines, and `[cheat] learned ...` after a save.
+1. **Head rate is back: 70% (30/43, 95% interval 55-81%)** on
+   resolver-decided shots, against v6.2's 74% and v6.7-v7.9's 49%.
+2. **Condition detection:** slowmotion 83% (10/12), running 71% (5/7);
+   standing 1/4 and air 2/5 are too few to judge. Stays on.
+3. **Aim policy:** every value read back fine (prefer body On / Off,
+   safe point On). "head" (only the head kills) 7 head hits, 0 misses;
+   "body" 14 body + 2 head hits, 0 misses. Trace calibration x1.00 over
+   17 body shots: gamesense's traces are already final.
+4. **Cheat revealer fires:** gamesense and neverlose detected; nl 77%,
+   gs 67% head rate.
+5. **Defensive frames:** 86% (18/21) with 0-8 in the second before the
+   shot, 55% (12/22) with 9+ (Fisher p 0.045, 4 of 5 players). Acted on
+   in v8.10 (FEATURE.SKIP_DEF_FRAMES); the next log's BY DEFENSIVE FRAMES
+   shows whether the 9+ row recovers.
+6. **Pitch at fire:** off-down (defensive) pitch didn't cost heads
+   (6 head, 1 miss); the frame count matters, not the pitch on the shot.
+7. **Seeded start 86% (12/14) vs cold start 60% (18/30):** the inflated
+   seed (Next 4) doesn't hurt; it stays.
 
 ## Next, in order
 
@@ -49,14 +56,16 @@ post-v6.2 features off, the script forces the same side and value as v6.2.
 3. **Vulnerability window credit fix** (v7.9): score windows on head hits
    and resolver misses only. It never triggered in the logs, so it's low
    value.
-4. **Saved hit rate** (found in v8.5.6). FlushDB saves
+4. **Saved hit rate** -- RESOLVED, stays (v8.8 log: seeded 86% vs cold
+   60%). FlushDB saves
    hit_count / (hit_count + resolver_misses), but resolver_misses is a
    streak (0 after every hit, 0 again after 3 misses), so the saved rate
    sits near 100% and every player with 3+ hits starts the next match at
    the 0.35 seed cap. v6.2 did the same while it measured 74%, so it stays
    until `BY PROFILE START` in log_report (seeded vs cold start) shows
    whether the seed helps or hurts.
-5. **Defensive AA frames** (found in v8.6, located in v8.7). Every AA
+5. **Defensive AA frames** -- DONE in v8.10 (FEATURE.SKIP_DEF_FRAMES),
+   on the v8.8 log's numbers above. Found in v8.6, located in v8.7. Every AA
    script uploaded (angelwings, abyss, EmberLash, vandal, viera, the
    unnamed one) has a defensive mode: pitch up / zero / random and yaw
    sideways / opposite / spin / n-way while it shifts tickbase; abyss

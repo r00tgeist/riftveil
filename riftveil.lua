@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.9"
+local RV_VERSION = "8.10"
 
 local ffi = require "ffi"
 
@@ -868,6 +868,14 @@ local FEATURE = {
     -- which state table a moving enemy reads; shot lines log st= so the
     -- next match shows whether it helps.
     STATE_PHYSICS = true,
+    -- v8.10: a frame whose simulation time is below the highest already
+    -- received is skipped. Lag compensation writes no record for it (the
+    -- frame defensive AA fills with a pitch / yaw flick), tickcount's
+    -- lagrecord library skips it the same way, and the first match log
+    -- with df= showed head rate 86% (18/21) with 0-8 such frames in the
+    -- second before the shot against 55% (12/22) with 9+ (Fisher p 0.045,
+    -- 4 of 5 players). v6.2 sampled them. One word to revert.
+    SKIP_DEF_FRAMES = true,
     -- These three are the v6.2 [EXP] switches as the logs show them
     -- running when the resolver hit 74% (suppress fired in every v6.2
     -- match; jitter prediction never did).
@@ -1699,10 +1707,18 @@ end
 -- to 0.30 on switch) fed straight into the applied correction angle. Real
 -- match log: one player flipped configs 22 times in 12 minutes, each flip
 -- changing the standing-state angle by up to 6-11 degrees.
+-- Which cheat can run the Lua a preset came from (see CHEAT PROFILES).
+-- luasense_beta is the Neverlose "luasense beta" built-in preset, all 7
+-- states exact (s0daa/CSGO-HVH-LUAS, Neverlose/lua/luasense beta.lua);
+-- the gamesense luasense builds ship no built-in presets at all.
+-- luasense_std is the same family ("luasensedev"). symmetric is not a
+-- Lua but a desync shape (35/35), so any cheat.
+local CFG_CHEAT = {luasense_beta = "nl", luasense_std = "nl"}
 local function TrustedCfg(rec)
-    -- Gamesense Lua presets only for gamesense users (see CHEAT PROFILES)
-    if DET.cheat and rec.cheat and rec.cheat ~= "gs" then return nil end
-    return (rec.config_conf >= CFG.CFG_THRESH) and rec.config_type or nil
+    local t = (rec.config_conf >= CFG.CFG_THRESH) and rec.config_type or nil
+    -- a detected player on another cheat can't be running that preset
+    if t and DET.cheat and rec.cheat and CFG_CHEAT[t] and CFG_CHEAT[t] ~= rec.cheat then return nil end
+    return t
 end
 
 -- Per-player, per-vuln-TYPE trust gate. vuln_profile (seen/hit per VTYPE)
@@ -2593,12 +2609,13 @@ end
 -- ══════════════════════════════════════════════════════════════════
 --  CHEAT PROFILES  — how the resolver changes once the cheat is known
 --
---  1. Gamesense AA Lua presets only for gamesense users. KNOWN_CFGS /
---     CFG_COUNTER are fingerprints of gamesense Luas (luasense beta/std
---     and the symmetric builders); a neverlose or nixware player can't
---     run them, so a fingerprint match on one is noise (a real log shows a
---     player switching luasense_beta <-> symmetric four times a match).
---     They get the default L/R table instead, as an unrecognized player.
+--  1. Lua presets only for the cheat that runs that Lua. luasense_beta /
+--     luasense_std are presets of the NEVERLOSE luasense (v8.0-v8.9 had
+--     this backwards and gave them to gamesense users only); a player
+--     detected on any other cheat can't be running them, so a fingerprint
+--     match is noise and they get the default L/R table. "symmetric" is a
+--     desync shape, not a Lua, and applies whatever the cheat. Unknown
+--     cheat: every preset, as v6.2.
 --
 --  2. Per-cheat method trust, learned. Every head hit and resolver miss is
 --     credited to (enemy cheat, method) across all players on that cheat
@@ -2986,11 +3003,17 @@ local function ProcessPlayer(player, ctx)
     -- frame arriving with a lower simtime is a defensive frame -- the one
     -- defensive AA fills with pitch up / zero and a yaw flick. v6.2 samples
     -- it like any other; the shot log's df= says how many there were.
-    if rec.st_max and st < rec.st_max and rec.st_max - st <= 64 then
+    local def_frame = rec.st_max and st < rec.st_max and rec.st_max - st <= 64
+    if def_frame then
         local r = rec.dfr
         if not r then r = {}; rec.dfr = r end
         r[#r + 1] = ctx.cur_tc
         if #r > 32 then table.remove(r, 1) end
+        -- Not sampled (FEATURE.SKIP_DEF_FRAMES): it would go into the pose
+        -- ring, the yaw cache and, on a tick never recorded (fakelag skips
+        -- many), the lag-comp table that the LAGCOMP method reads. rec.lt
+        -- stays on the last real record, as lagrecord's records[1] does.
+        if FEATURE.SKIP_DEF_FRAMES then return end
     end
     if not rec.st_max or st > rec.st_max or rec.st_max - st > 64 then rec.st_max = st end
     rec.lt = st

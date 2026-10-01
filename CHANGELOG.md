@@ -3,6 +3,34 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.10  – First match log on v8.x, and the luasense correction.
+          LOG (v8.8, 43 resolver-decided shots): head rate 70% (30/43,
+          95% 55-81%) -- back at v6.2's 74% from v6.7-v7.9's 49%. Aim
+          policy values all accepted; trace calibration x1.00; cheat
+          revealer detects gs and nl; seeded start 86% vs cold 60%.
+          FIXED -- luasense presets went to the wrong cheat. The
+          luasense_beta table is the built-in preset of the NEVERLOSE
+          luasense beta, all 7 states exact (s0daa/CSGO-HVH-LUAS,
+          Neverlose/lua/luasense beta.lua: standing 24/41 ... slowmotion
+          23/47); the gamesense luasense builds in the same repo ship no
+          built-in presets and contain neither number. v8.0 gave the
+          presets to gamesense users only. Now: luasense_beta/std for nl
+          and undetected players, never another detected cheat;
+          "symmetric" (a desync shape) for everyone. In the log, a gs
+          player was being read as luasense_beta/std and nl players were
+          denied their symmetric table. Harness: 8 cases, fail on 8.9.
+          CHANGED -- defensive frames skipped (FEATURE.SKIP_DEF_FRAMES,
+          on). A frame below the highest simulation time already received
+          is not sampled: lag compensation keeps no record of it, and
+          lagrecord skips it the same way. Before, it reached the pose
+          history, the yaw cache and, on unrecorded ticks, the lag-comp
+          table. The log: 86% (18/21) with 0-8 such frames in the second
+          before the shot, 55% (12/22) with 9+ (Fisher p 0.045, 4 of 5
+          players). Modest evidence on one match with three independent
+          sources for the mechanism; one word reverts it, and df= keeps
+          measuring. The v6.2 parity run turns it off (decisions with the
+          post-v6.2 features off are still exactly v6.2's: 342/342).
+          Harness: no out-of-order sample in the pose history (3 on 8.9).
   v8.9   – Movement from StarSync (a neverlose script), ported to gamesense.
           ADDED -- Fast ladder (checkbox, off by default). The logic is the
           one shipped identically in two gamesense scripts (angelwings,

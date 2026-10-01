@@ -50,6 +50,10 @@ The head is never taken away when it's the only way to kill.
 
 ## Built-in checks
 
+Measured in the first match log (v8.8): all three values are accepted
+(prefer body On and Off, safe point On), and the calibration factor is
+x1.00 over 17 body shots -- gamesense's trace damage is already final.
+
 - **Value verification.** The first time each value is written, it's read
   back. If it doesn't stick, it falls back: body On → Force → "-",
   body Off → "-", safe point On → "-". The log says which values work

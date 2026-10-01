@@ -472,7 +472,7 @@ if os.getenv("RV_PARITY") then
     end
     local F
     for _, cb in pairs(CALLBACKS) do F = F or find(cb, 0) end
-    if F then F.STATE_PHYSICS = false end
+    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false end
 end
 
 local cb_errors = {}
@@ -1138,10 +1138,21 @@ do
         else
             UNIT_FAIL[#UNIT_FAIL + 1] = "CP.Fit not reachable"
         end
-        if TC({cheat = "nl", config_conf = 1, config_type = "luasense_beta"}) ~= nil
-           or TC({cheat = "gs", config_conf = 1, config_type = "luasense_beta"}) ~= "luasense_beta"
-           or TC({config_conf = 1, config_type = "luasense_beta"}) ~= "luasense_beta" then
-            UNIT_FAIL[#UNIT_FAIL + 1] = "TrustedCfg: gamesense presets must apply to gs and unknown only"
+        -- luasense presets are the Neverlose luasense's: nl and unknown
+        -- players get them, other detected cheats don't; the symmetric
+        -- shape applies whatever the cheat
+        local tc_cases = {
+            {"nl", "luasense_beta", "luasense_beta"}, {"nl", "luasense_std", "luasense_std"},
+            {nil,  "luasense_beta", "luasense_beta"}, {"gs", "luasense_beta", nil},
+            {"gs", "luasense_std", nil},              {"pd", "luasense_beta", nil},
+            {"gs", "symmetric", "symmetric"},         {"nl", "symmetric", "symmetric"},
+        }
+        for _, c in ipairs(tc_cases) do
+            local got = TC({cheat = c[1], config_conf = 1, config_type = c[2]})
+            if got ~= c[3] then
+                UNIT_FAIL[#UNIT_FAIL + 1] = string.format("TrustedCfg(%s, %s) = %s, expected %s",
+                    tostring(c[1]), c[2], tostring(got), tostring(c[3]))
+            end
         end
     elseif not os.getenv("RV_MUST_RUN_V7") and not os.getenv("RV_TARGET") then
         UNIT_FAIL[#UNIT_FAIL + 1] = "CheatTrusts/CHEAT_STATS/TrustedCfg not reachable"
@@ -1209,6 +1220,27 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
             UNIT_FAIL[#UNIT_FAIL + 1] = "defensive frames: " .. tostring(d and d.df) .. " counted, expected >= 2"
         end
         SH[91001] = nil
+        -- FEATURE.SKIP_DEF_FRAMES: none of them reached the pose history,
+        -- and the last record stayed the highest one
+        local REC_T, EI = probe("REC"), probe("EIDX_S64")
+        local r = REC_T and EI and EI[102] and REC_T[EI[102]]
+        if r and r.hist then
+            -- ring buffer {b, h, n}: walk it oldest to newest
+            local maxt, back, hb = -1, 0, r.hist
+            for o = hb.n - 1, 0, -1 do
+                local sm = hb.b[((hb.h - o - 1) % hb.n) + 1]
+                if type(sm) == "table" and sm.t then
+                    if sm.t < maxt then back = back + 1 end
+                    if sm.t > maxt then maxt = sm.t end
+                end
+            end
+            if back > 0 or (r.st_max and r.lt ~= r.st_max) then
+                UNIT_FAIL[#UNIT_FAIL + 1] = string.format("defensive frames sampled: %d out of order in the pose history, last record %s vs highest %s",
+                    back, tostring(r.lt), tostring(r.st_max))
+            end
+        else
+            UNIT_FAIL[#UNIT_FAIL + 1] = "defensive frame test: player 102's record / history not reachable"
+        end
     else
         UNIT_FAIL[#UNIT_FAIL + 1] = "defensive frame test: SHOTS / player 102 not reachable"
     end
