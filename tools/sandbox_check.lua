@@ -489,7 +489,7 @@ if os.getenv("RV_PARITY") then
     end
     local F
     for _, cb in pairs(CALLBACKS) do F = F or find(cb, 0) end
-    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false end
+    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false end
 end
 
 local cb_errors = {}
@@ -1357,42 +1357,90 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     if #CONSOLE_BAD > 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "shot log: bad output call " .. CONSOLE_BAD[1] end
 end
 
--- LOCAL LAGCOMP BOX: our record is the origin of the last command sent;
--- drawn only when lag compensation is broken (records > 64 units apart),
--- is dropped after 1 s, and nothing happens with the option off
+-- LOCAL LAGCOMP BOX: a flash where breaking lag comp puts us -- on a
+-- tickbase shift (double tap / defensive) at our origin extrapolated by the
+-- shifted ticks, and on a fakelag break (sent records > 64u apart) at the
+-- new record; nothing without a break, on a teleport no move could make,
+-- after the flash, or with the option off.
 if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     local IND_T, LC = probe("IND"), probe("LOCALLC")
     if IND_T and LC then
-        local lc0, p0 = IND_T.lc, W.players[1]
+        local lc0, p0, tick0 = IND_T.lc, W.players[1], W.tick
         IND_T.lc = true
         W.players[1] = {vx = 0, jump = 0}
         local function cmd(choked, x) W.players[1].jump = x; fire("setup_command", {chokedcommands = choked}) end
         local function label()
             for i = #SCREEN, 1, -1 do SCREEN[i] = nil end
             CONSOLE_ON = true; fire("paint"); CONSOLE_ON = false
-            for _, t in ipairs(SCREEN) do if t:find("LAGCOMP", 1, true) or t:find("%du") then return t end end
+            for _, t in ipairs(SCREEN) do if t:find("^LC  ") then return t end end
             return nil
         end
-        cmd(0, 0)
-        cmd(1, 10); cmd(2, 30)
-        if label() ~= nil then UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: drawn while only trailing (lag comp intact)" end
-        cmd(0, 30)
-        if LC.S.broken or LC.S.x ~= 30 then UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: a 30u step counted as broken / record not taken" end
-        if label() ~= nil then UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: drawn while the record is on us" end
-        cmd(0, 130)                      -- 100u between two sent records
-        cmd(2, 150)
-        if not LC.S.broken then UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: a 100u jump between records not broken" end
-        if label() ~= "LAGCOMP  2t" then UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: broken label " .. tostring(label()) end
-        W.real = W.real + 2
-        if label() ~= nil then UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: a record older than 1 s still drawn" end
+        local function fail(m) UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: " .. m end
+        LC.S.t = -1
+        -- no fakelag: a record every command, 5u apart
+        for i = 0, 5 do cmd(0, i * 5) end
+        if label() ~= nil then fail("drawn with no break") end
+        -- respawn-like jump in one command: no move covers 1000u in a tick
+        cmd(0, 1000)
+        if label() ~= nil then fail("a one-command 1000u teleport flashed") end
+        -- fakelag: 3 commands choked, then sent 100u away
+        cmd(1, 1040); cmd(2, 1080); cmd(0, 1100)
+        if label() ~= "LC  3t" then fail("fakelag break label " .. tostring(label()) .. ", expected LC  3t") end
+        if LC.S.bx ~= 1100 then fail("fakelag box at " .. tostring(LC.S.bx) .. ", expected the new record 1100") end
+        W.real = W.real + 0.6
+        if label() ~= nil then fail("still drawn after the 0.5 s flash") end
+        -- double tap / defensive: tickbase 10 below its max = 9 ticks shifted
+        W.players[1] = {vx = 256, jump = 0}
+        W.tick = 5000; fire("run_command", {})
+        W.tick = 4990; fire("run_command", {})
+        local ox = W.tick * 256 / 64
+        if label() ~= "LC  9t" then fail("tickbase shift label " .. tostring(label()) .. ", expected LC  9t") end
+        if not (LC.S.bx and math.abs(LC.S.bx - (ox + 9 * 4)) < 0.01) then
+            fail(string.format("shift box at x=%s, expected %.1f (9 ticks at 256 u/s)", tostring(LC.S.bx), ox + 36))
+        end
+        -- still shifting next command: no second flash, the first one stands
+        local t1 = LC.S.t
+        W.real = W.real + 0.01; W.tick = 4991; fire("run_command", {})
+        if LC.S.t ~= t1 then fail("re-flashed while the same shift ran") end
         IND_T.lc = false
-        local x0 = LC.S.x
-        cmd(0, 400)
-        if LC.S.x ~= x0 or label() ~= nil then UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: ran with the option off" end
-        IND_T.lc, W.players[1] = lc0, p0
+        LC.S.t = -1
+        W.tick = 6000; fire("run_command", {}); W.tick = 5980; fire("run_command", {})
+        if LC.S.t ~= -1 or label() ~= nil then fail("ran with the option off") end
+        IND_T.lc, W.players[1], W.tick = lc0, p0, tick0
     else
         UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp test: IND / LOCALLC not reachable"
     end
+end
+
+-- SHIFT box (enemies): a bot that moves 1500u in one record (spawn at round
+-- start) doesn't light it; a fakelag break -- 14 ticks choked, the next
+-- record 100u on -- does
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local REC_T, EI = probe("REC"), probe("EIDX_S64")
+    local live0 = W.live
+    W.live = {101, 102, 105}
+    W.players[105] = {sim = W.tick * TI, vx = 0, vy = 0, pose01 = 0.5, eye = 0, duck = 0, torso = 0, gfy = 0}
+    local function step(sent)
+        W.tick = W.tick + 1; W.real = W.real + TI
+        if sent then W.players[105].sim = W.tick * TI end
+        for _, p in ipairs({101, 102}) do W.players[p].sim = W.tick * TI end
+        fire("net_update_end")
+    end
+    for _ = 1, 10 do step(true) end
+    local r = REC_T and EI and EI[105] and REC_T[EI[105]]
+    if r then
+        r._shift_flash = 0
+        W.players[105].jump = 1500; step(true)
+        if (r._shift_flash or 0) > 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "SHIFT box: a bot moved 1500u in one record lit it" end
+        for _ = 1, 10 do step(true) end
+        r._shift_flash = 0
+        for _ = 1, 14 do step(false) end
+        W.players[105].jump = 1600; step(true)
+        if not ((r._shift_flash or 0) > 0) then UNIT_FAIL[#UNIT_FAIL + 1] = "SHIFT box: a 100u fakelag break (15-tick gap) didn't light it" end
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "SHIFT box test: player 105 has no record"
+    end
+    W.live, W.players[105] = live0, nil
 end
 
 -- Defensive frames: a frame whose simulation time is below the highest

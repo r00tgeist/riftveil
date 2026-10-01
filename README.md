@@ -79,16 +79,17 @@ Turn off other aimbot-log scripts to avoid duplicate lines.
 
 ## Local lagcomp box
 
-Where the server, and every enemy's lag compensation, has **you**. While
-fakelag chokes or double tap shifts, the server only has the position of the
-last command you actually sent; the box is your hull there, with a line to
-where you stand now (third person).
+Flashes for half a second where breaking lag compensation puts **you**,
+the way the public `lagcomp-box-gs` script boxes an enemy (third person),
+labelled `LC` with the ticks:
 
-It only appears when lag compensation is actually broken: your last two
-sent records more than 64 units apart (the same check as the enemy SHIFT
-marker), so enemies can't backtrack you between them. Then it's green with
-`LAGCOMP` and the choked count. A record that merely trails you draws
-nothing; it also hides once it's on you or over 1 s old.
+- **Double tap / defensive:** your tickbase drops below its highest value
+  (more than 2 ticks shifted, the check the public defensive indicators use);
+  the box is your position carried forward by the shifted ticks.
+- **Fakelag:** your last two sent positions are more than 64 units apart;
+  the box is where the new one put you.
+
+Nothing is drawn without a break.
 
 ## Weapon aim
 

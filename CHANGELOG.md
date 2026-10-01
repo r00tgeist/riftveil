@@ -3,6 +3,23 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.20  – Lag-comp boxes fixed.
+          ENEMY SHIFT box (and the lagcomp distrust streak it sets) fired on
+          bots: the origin-jump check compared a new record with the last
+          one however old -- a bot moved to its spawn at round start, or
+          anyone back from dormancy, read as a > 64u lag-comp break. Now
+          (FEATURE.SHIFT_GAP, off in the parity run) only records 2-64
+          ticks apart count, as lagcomp-box-gs does, and the move must be
+          one sv_maxvelocity (3500) allows in that gap.
+          LOCAL box showed nothing on double tap: it only watched sent
+          fakelag records. Added the tickbase check the public defensive
+          indicators use (run_command, max m_nTickBase - tickbase - 1, over
+          2 = shifting): it flashes our origin extrapolated by the shifted
+          ticks for 0.5 s, "LC 9t". The fakelag trigger stays (now also
+          bounded by the reachable distance) and flashes the same way.
+          Harness: bot teleport vs 15-tick fakelag break (enemy); tickbase
+          shift, fakelag break, no break, one-command teleport, re-flash,
+          expiry, option off (local); mutation-checked.
   v8.19  – Local lagcomp box only when lag compensation is actually broken
           (two sent records > 64u apart). v8.18 also drew an amber box
           whenever the record trailed us, i.e. on any choke.

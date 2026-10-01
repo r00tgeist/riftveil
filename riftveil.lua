@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.19"
+local RV_VERSION = "8.20"
 
 local ffi = require "ffi"
 
@@ -888,6 +888,14 @@ local FEATURE = {
     -- anti-bruteforce reset in the public scripts is 600 ticks (9.4 s).
     -- Aim policy only: the forced body yaw is untouched.
     XWAY_UNSURE = true,
+    -- v8.20: the >64u origin-jump SHIFT check compares only two records at
+    -- most 64 ticks apart, at least 2 apart, with a move the player could
+    -- make in that time (sv_maxvelocity 3500) -- as lagcomp-box-gs does.
+    -- Before, the gap was unbounded: a surviving bot moved to its spawn at
+    -- round start (or anyone back from dormancy) read as a lag-comp break,
+    -- lit the SHIFT box and set the lagcomp distrust streak. Off in the
+    -- v6.2 parity run.
+    SHIFT_GAP = true,
     -- These three are the v6.2 [EXP] switches as the logs show them
     -- running when the resolver hit 74% (suppress fired in every v6.2
     -- match; jitter prediction never did).
@@ -3154,13 +3162,21 @@ local function ProcessPlayer(player, ctx)
         -- instead of accumulating gradually. _shift_flash/_shift_box drive
         -- a brief world-space "SHIFT" tag + box in DrawOverlay, adapted
         -- from that same ESP tool's extrapolation technique.
-        if choke == 0 and isnum(ox) and isnum(oy)
-           and rec.prev_origin_x and rec.prev_origin_y then
+        if isnum(ox) and isnum(oy) and rec.prev_origin_x and rec.prev_origin_y then
             local dx, dy = ox - rec.prev_origin_x, oy - rec.prev_origin_y
-            if (dx*dx + dy*dy) > 4096 then
+            local d2 = dx*dx + dy*dy
+            local gap = rec.prev_origin_tick and (st - rec.prev_origin_tick) or 0
+            local shifted
+            if FEATURE.SHIFT_GAP then
+                local reach = gap * 3500 * ctx.ti   -- sv_maxvelocity per tick
+                shifted = d2 > 4096 and gap >= 2 and gap <= 64 and d2 <= reach * reach
+            else
+                shifted = choke == 0 and d2 > 4096
+            end
+            if shifted then
                 rec._shift_streak = math.max(rec._shift_streak or 0, 3)
                 rec._shift_flash  = 1.0
-                local ticks = Clamp((rec.prev_origin_tick and (st - rec.prev_origin_tick)) or 1, 1, 32)
+                local ticks = Clamp(gap, 1, 32)
                 local ex, ey, ez = ExtrapolateOrigin(player, ox, oy, oz, ticks)
                 rec._shift_box = {ex, ey, ez}
             end
@@ -4123,66 +4139,96 @@ end)() -- shot log scope
 -- ══════════════════════════════════════════════════════════════════
 --  LOCAL LAGCOMP BOX  (Indicators > Local lagcomp)
 --
---  Where the server -- and every enemy's lag compensation -- has US. The
---  server simulates our commands only when a packet arrives, so while
---  fakelag chokes or double tap shifts, our record stays at the origin of
---  the last command we actually sent. In setup_command, chokedcommands == 0
---  means the previous command just went out: our origin at that moment is
---  the record. The box is our hull there, tethered to where we stand now.
+--  Flashes for half a second where breaking lag compensation puts US, the
+--  way lagcomp-box-gs boxes an enemy at its extrapolated origin. Two
+--  triggers:
 --
---  Two consecutive sent records more than 64 units apart (4096 squared,
---  horizontal -- the same check as the enemy SHIFT marker and the public
---  lagcomp scripts) mean lag compensation is broken: enemies can't
---  backtrack us between them. Only then is the box drawn (v8.19; v8.18
---  also drew a record that merely trailed us), green with LAGCOMP, until
---  a sent record lands back within 64 units. Nothing while the record is
---  on us (under 2 units) or older than 1 s.
---  Visible in third person; in first person the box sits around the
---  camera.
+--  LC (double tap / defensive): our m_nTickBase is read in run_command and
+--  its highest value kept; max - tickbase - 1 (0..14) is the ticks being
+--  shifted -- the check enthusiasm, universe and excellentsanty use for
+--  their own defensive / LC indicator. Over 2, the box is drawn at our
+--  origin extrapolated that many ticks (ExtrapolateOrigin: velocity,
+--  gravity, stops at walls). v8.18-8.19 had only the fakelag trigger and
+--  showed nothing on double tap.
+--
+--  Fakelag: in setup_command, chokedcommands == 0 means the previous
+--  command was sent, so our origin then is the server's record. Two
+--  records more than 64 units apart, the move one we could make in the
+--  commands between them, broke lag comp: the box goes on the new record.
+--
+--  Label: LC and the ticks. Visible in third person.
 -- ══════════════════════════════════════════════════════════════════
 local LOCALLC = (function()
-local C_BROKEN = {120, 220, 110}
+local C_LC = {120, 220, 110}
+local FLASH = 0.5
 local EDGES = {{1, 2}, {2, 3}, {3, 4}, {4, 1}, {5, 6}, {6, 7}, {7, 8}, {8, 5}, {1, 5}, {2, 6}, {3, 7}, {4, 8}}
-local S = {x = nil, y = nil, z = nil, t = 0, broken = false, ticks = 0}
+-- x,y,z,tb: last sent record and our tickbase then; n: commands since it;
+-- tb_max / shift: the LC check; bx,by,bz,t,ticks: the box being flashed
+local S = {n = 0, shift = 0, t = -1, ticks = 0}
 
--- setup_command: record our origin each time a packet has just been sent
+local function Flash(x, y, z, ticks)
+    S.bx, S.by, S.bz, S.t, S.ticks = x, y, z, globals.realtime(), ticks
+end
+
+local function Reset() S.x, S.tb_max, S.shift, S.n = nil, nil, 0, 0 end
+
 local function OnCommand(cmd)
     if not IND.lc then return end
     local me = entity.get_local_player()
-    if not (me and entity.is_alive(me)) then S.x = nil; return end
-    local choked = cmd and tonumber(cmd.chokedcommands)
-    if choked == nil then choked = tonumber(globals.chokedcommands()) or 0 end
-    if choked ~= 0 then S.ticks = choked; return end
+    if not (me and entity.is_alive(me)) then return Reset() end
+    S.n = S.n + 1
+    local choked = tonumber(cmd and cmd.chokedcommands) or tonumber(globals.chokedcommands()) or 0
+    if choked ~= 0 then return end
     local x, y, z = entity.get_origin(me)
     if not (isnum(x) and isnum(y) and isnum(z)) then return end
+    local tb = tonumber(entity.get_prop(me, "m_nTickBase"))
     if S.x then
+        -- commands between the records: counted here, or by tickbase when
+        -- a shift ran commands this callback never saw
+        local n = S.n
+        if tb and S.tb and tb - S.tb > n and tb - S.tb <= 64 then n = tb - S.tb end
         local dx, dy = x - S.x, y - S.y
-        S.broken = dx * dx + dy * dy > 4096
-    else
-        S.broken = false
+        local d2, reach = dx * dx + dy * dy, n * 3500 * globals.tickinterval()
+        if n >= 2 and d2 > 4096 and d2 <= reach * reach then Flash(x, y, z, n) end
     end
-    S.x, S.y, S.z, S.t, S.ticks = x, y, z, globals.realtime(), 0
+    S.x, S.y, S.z, S.tb, S.n = x, y, z, tb, 0
+end
+
+local function OnRun()
+    if not IND.lc then return end
+    local me = entity.get_local_player()
+    if not (me and entity.is_alive(me)) then return Reset() end
+    local tb = tonumber(entity.get_prop(me, "m_nTickBase"))
+    if not tb then return end
+    -- a new life / reconnect starts the tickbase over
+    if not S.tb_max or tb > S.tb_max or S.tb_max - tb > 64 then S.tb_max = tb end
+    local shift = math.min(14, math.max(0, S.tb_max - tb - 1))
+    if shift > 2 and S.shift <= 2 then
+        local x, y, z = entity.get_origin(me)
+        if isnum(x) and isnum(y) and isnum(z) then
+            local ex, ey, ez = ExtrapolateOrigin(me, x, y, z, shift)
+            Flash(ex, ey, ez, shift)
+        end
+    end
+    S.shift = shift
 end
 
 local function Draw()
-    if not (IND.lc and S.x and S.broken) then return end
-    if globals.realtime() - S.t > 1 then return end
+    if not (IND.lc and S.bx) then return end
+    local age = globals.realtime() - S.t
+    if age < 0 or age > FLASH then return end
     local me = entity.get_local_player()
     if not (me and entity.is_alive(me)) then return end
-    local cx, cy, cz = entity.get_origin(me)
-    if not (isnum(cx) and isnum(cy) and isnum(cz)) then return end
-    local dx, dy, dz = cx - S.x, cy - S.y, cz - S.z
-    local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-    if dist < 2 then return end
     local mnx, mny, mnz = entity.get_prop(me, "m_vecMins")
     local mxx, mxy, mxz = entity.get_prop(me, "m_vecMaxs")
     if not (isnum(mnx) and isnum(mxx) and isnum(mnz) and isnum(mxz)) then return end
-    local c = C_BROKEN
+    local al = 1 - age / FLASH
+    local c, x, y, z = C_LC, S.bx, S.by, S.bz
     local P = {
-        {S.x + mnx, S.y + mny, S.z + mnz}, {S.x + mxx, S.y + mny, S.z + mnz},
-        {S.x + mxx, S.y + mxy, S.z + mnz}, {S.x + mnx, S.y + mxy, S.z + mnz},
-        {S.x + mnx, S.y + mny, S.z + mxz}, {S.x + mxx, S.y + mny, S.z + mxz},
-        {S.x + mxx, S.y + mxy, S.z + mxz}, {S.x + mnx, S.y + mxy, S.z + mxz},
+        {x + mnx, y + mny, z + mnz}, {x + mxx, y + mny, z + mnz},
+        {x + mxx, y + mxy, z + mnz}, {x + mnx, y + mxy, z + mnz},
+        {x + mnx, y + mny, z + mxz}, {x + mxx, y + mny, z + mxz},
+        {x + mxx, y + mxy, z + mxz}, {x + mnx, y + mxy, z + mxz},
     }
     local scr = {}
     for i = 1, 8 do
@@ -4190,23 +4236,22 @@ local function Draw()
         if sx then scr[i] = {sx, sy} end
     end
     for i = 1, #EDGES do
-        local a, b = scr[EDGES[i][1]], scr[EDGES[i][2]]
-        if a and b then renderer.line(a[1], a[2], b[1], b[2], c[1], c[2], c[3], 220) end
+        local p1, p2 = scr[EDGES[i][1]], scr[EDGES[i][2]]
+        if p1 and p2 then renderer.line(p1[1], p1[2], p2[1], p2[2], c[1], c[2], c[3], math.floor(230 * al)) end
     end
-    -- tether: box centre to where we stand
+    -- tether from where we stand to the box
+    local cx, cy, cz = entity.get_origin(me)
     local mz = (mnz + mxz) / 2
-    local bx, by = renderer.world_to_screen(S.x, S.y, S.z + mz)
-    local ox, oy = renderer.world_to_screen(cx, cy, cz + mz)
-    if bx and ox then renderer.line(bx, by, ox, oy, c[1], c[2], c[3], 140) end
-    local tx, ty = renderer.world_to_screen(S.x, S.y, S.z + mxz + 6)
-    if tx then
-        local label = "LAGCOMP"
-        if S.ticks > 0 then label = label .. string.format("  %dt", S.ticks) end
-        renderer.text(tx, ty, c[1], c[2], c[3], 255, "-c", 0, label)
+    local bx, by = renderer.world_to_screen(x, y, z + mz)
+    if isnum(cx) then
+        local ox, oy = renderer.world_to_screen(cx, cy, cz + mz)
+        if bx and ox then renderer.line(bx, by, ox, oy, c[1], c[2], c[3], math.floor(140 * al)) end
     end
+    local tx, ty = renderer.world_to_screen(x, y, z + mxz + 6)
+    if tx then renderer.text(tx, ty, c[1], c[2], c[3], math.floor(255 * al), "-c", 0, string.format("LC  %dt", S.ticks)) end
 end
 
-return {OnCommand = OnCommand, Draw = Draw, S = S}
+return {OnCommand = OnCommand, OnRun = OnRun, Draw = Draw, S = S}
 end)() -- local lagcomp scope
 
 
@@ -5395,6 +5440,7 @@ client.set_event_callback("aim_hit",     Instrument("aim_hit", on_aim_hit))
 client.set_event_callback("bullet_impact", Instrument("bullet_impact", SHOTLOG.Impact))
 client.set_event_callback("player_hurt",   Instrument("player_hurt", SHOTLOG.Hurt))
 client.set_event_callback("setup_command", Instrument("setup_command", LOCALLC.OnCommand))
+client.set_event_callback("run_command",   Instrument("run_command", LOCALLC.OnRun))
 -- The log also reaches disk every round, so a match with the debug log
 -- off still leaves its shots on disk.
 client.set_event_callback("round_start", Instrument("round_start", function()
