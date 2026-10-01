@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.23"
+local RV_VERSION = "8.24"
 
 local ffi = require "ffi"
 
@@ -4158,8 +4158,9 @@ end)() -- shot log scope
 --  max - tickbase - 1 (0..14) is the ticks being shifted, the check
 --  enthusiasm, universe and excellentsanty use for their own defensive / LC
 --  indicator; a jump of more than one tick between commands is the
---  forward shift (the teleport). Over 2 either way, the box goes on our
---  origin extrapolated by the back shift, or where the teleport put us.
+--  forward shift (the teleport). Over 2 either way, the box is drawn ahead
+--  of us for 0.5 s: each frame, our current origin extrapolated by the
+--  shifted ticks, so it leads where the shift takes us.
 --  Only double tap shifts the tickbase, so no menu read is needed (v8.21-
 --  8.22 also required the DT menu reference, which current builds keep
 --  under RAGE > Aimbot, not Other -- it never fired). Extrapolation is
@@ -4188,22 +4189,12 @@ local function OnRun()
     local fwd = (S.tb_prev and tb - S.tb_prev - 1 <= 64) and math.min(14, math.max(0, tb - S.tb_prev - 1)) or 0
     S.tb_prev = tb
     local shift = math.max(back, fwd)
-    if shift > 2 and S.shift <= 2 then
-        local x, y, z = entity.get_origin(me)
-        if isnum(x) and isnum(y) and isnum(z) then
-            if back >= fwd then
-                S.bx, S.by, S.bz = ExtrapolateOrigin(me, x, y, z, shift)
-            else
-                S.bx, S.by, S.bz = x, y, z   -- already teleported: the record is here
-            end
-            S.t, S.ticks = globals.realtime(), shift
-        end
-    end
+    if shift > 2 and S.shift <= 2 then S.t, S.ticks = globals.realtime(), shift end
     S.shift = shift
 end
 
 local function Draw()
-    if not (IND.lc and S.bx) then return end
+    if not (IND.lc and S.t >= 0) then return end
     local age = globals.realtime() - S.t
     if age < 0 or age > FLASH then return end
     local me = entity.get_local_player()
@@ -4211,6 +4202,12 @@ local function Draw()
     local mnx, mny, mnz = entity.get_prop(me, "m_vecMins")
     local mxx, mxy, mxz = entity.get_prop(me, "m_vecMaxs")
     if not (isnum(mnx) and isnum(mxx) and isnum(mnz) and isnum(mxz)) then return end
+    -- ahead of us, every frame: where we stand now carried forward by the
+    -- shifted ticks (v8.20-8.23 fixed it at the moment of the shift, so we
+    -- walked past it and it trailed behind)
+    local cx, cy, cz = entity.get_origin(me)
+    if not (isnum(cx) and isnum(cy) and isnum(cz)) then return end
+    S.bx, S.by, S.bz = ExtrapolateOrigin(me, cx, cy, cz, S.ticks)
     local al = 1 - age / FLASH
     local c, x, y, z = C_LAG, S.bx, S.by, S.bz
     local P = {
@@ -4229,13 +4226,10 @@ local function Draw()
         if p1 and p2 then renderer.line(p1[1], p1[2], p2[1], p2[2], c[1], c[2], c[3], math.floor(230 * al)) end
     end
     -- tether from where we stand to the box
-    local cx, cy, cz = entity.get_origin(me)
     local mz = (mnz + mxz) / 2
     local bx, by = renderer.world_to_screen(x, y, z + mz)
-    if isnum(cx) then
-        local ox, oy = renderer.world_to_screen(cx, cy, cz + mz)
-        if bx and ox then renderer.line(bx, by, ox, oy, c[1], c[2], c[3], math.floor(140 * al)) end
-    end
+    local ox, oy = renderer.world_to_screen(cx, cy, cz + mz)
+    if bx and ox then renderer.line(bx, by, ox, oy, c[1], c[2], c[3], math.floor(140 * al)) end
     local tx, ty = renderer.world_to_screen(x, y, z + mxz + 6)
     if tx then renderer.text(tx, ty, c[1], c[2], c[3], math.floor(255 * al), "-c", 0, string.format("LC  %dt", S.ticks)) end
 end

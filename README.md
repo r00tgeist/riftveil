@@ -81,8 +81,8 @@ Turn off other aimbot-log scripts to avoid duplicate lines.
 
 When double tap shifts your tickbase by more than 2 ticks -- back
 (defensive) or forward (the teleport) -- a red box flashes for half a
-second where the shift puts **you**, labelled `LC` with the shifted ticks,
-the way the public `lagcomp-box-gs` script boxes an enemy. Third person.
+second **ahead of you** -- where the shift is taking you, following as you
+move -- labelled `LC` with the shifted ticks, the way the public `lagcomp-box-gs` script boxes an enemy. Third person.
 Fakelag alone draws nothing. The enemy SHIFT box is red too.
 
 ## Weapon aim

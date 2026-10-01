@@ -1371,8 +1371,8 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
 end
 
 -- LOCAL LAGCOMP BOX: a red flash on a double-tap tickbase shift, whatever
--- the DT menu reads: back (defensive) at our origin extrapolated by the
--- shifted ticks, forward (teleport) where we now are; normal one-tick steps
+-- the DT menu reads, drawn ahead of us (our origin each frame extrapolated
+-- by the shifted ticks) for back and forward shifts; normal one-tick steps
 -- and fakelag draw nothing; no re-flash in the same shift; 0.5 s; option off.
 if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     local IND_T, LC, AX = probe("IND"), probe("LOCALLC"), probe("AIMX")
@@ -1393,10 +1393,10 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         for t = 5000, 5010 do run(t) end            -- one tick per command
         fire("setup_command", {chokedcommands = 0})
         if label() ~= nil or LC.S.t ~= -1 then fail("drawn without a shift") end
-        -- back shift: 10 below the max = 9 ticks
+        -- back shift: 10 below the max = 9 ticks; the box leads us by them
         run(5000)
-        local ox = W.tick * 256 / 64
         local txt, rgb = label()
+        local ox = W.tick * 256 / 64
         if txt ~= "LC  9t" then fail("back shift label " .. tostring(txt) .. ", expected LC  9t") end
         if rgb ~= "240,64,64" then fail("label colour " .. tostring(rgb) .. ", expected red 240,64,64") end
         if not (LC.S.bx and math.abs(LC.S.bx - (ox + 36)) < 0.01) then
@@ -1407,11 +1407,17 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         if LC.S.t ~= t1 then fail("re-flashed while the same shift ran") end
         W.real = W.real + 0.6
         if label() ~= nil then fail("still drawn after the 0.5 s flash") end
+        -- still ahead after we move on (it follows us, never trails)
+        W.real = W.real - 0.55
+        run(5001); W.tick = 5040
+        label()
+        if not (LC.S.bx and LC.S.bx > W.tick * 4) then fail("box fell behind us: " .. tostring(LC.S.bx)) end
+        W.real = W.real + 0.55
         -- forward: caught up, then a 13-tick jump between two commands
         for t = 5002, 5012 do run(t) end
         run(5026)
         if label() ~= "LC  13t" then fail("teleport label " .. tostring(label()) .. ", expected LC  13t") end
-        if not (LC.S.bx and math.abs(LC.S.bx - 5026 * 4) < 0.01) then fail("teleport box not where we landed: " .. tostring(LC.S.bx)) end
+        if not (LC.S.bx and math.abs(LC.S.bx - (5026 + 13) * 4) < 0.01) then fail("teleport box not 13 ticks ahead: " .. tostring(LC.S.bx)) end
         W.real = W.real + 0.6
         IND_T.lc = false
         LC.S.t = -1

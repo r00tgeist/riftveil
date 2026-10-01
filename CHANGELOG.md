@@ -3,6 +3,11 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.24  – Local LC box leads instead of trailing: it was fixed in the world
+          at the moment the shift was seen, so we walked past it and it sat
+          behind us for its half second. Now every frame it's drawn at our
+          current origin carried forward by the shifted ticks, back or
+          forward shift alike.
   v8.23  – FIXED -- Double tap was looked up only under RAGE > Other; current
           gamesense keeps it under RAGE > Aimbot (~660 public scripts vs
           ~280), so DtReady was always false: the local LC box (v8.21+)
