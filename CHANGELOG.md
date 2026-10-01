@@ -3,6 +3,16 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.23  – FIXED -- Double tap was looked up only under RAGE > Other; current
+          gamesense keeps it under RAGE > Aimbot (~660 public scripts vs
+          ~280), so DtReady was always false: the local LC box (v8.21+)
+          never fired, and the weapon aim policy's double-tap case never
+          applied. Now Aimbot, then Other, logged at load.
+          Local LC box no longer reads the DT menu at all: only double tap
+          shifts the tickbase. Catches both directions -- tickbase back
+          below its max (defensive / recharge, box extrapolated by the
+          ticks) and a forward jump of more than one tick between commands
+          (the teleport, box where we landed).
   v8.22  – Local LC box: with double tap on a toggle key the shift lands at
           the switch, when the key already reads off, and v8.21's "double
           tap on" gate dropped it. It now flashes while double tap is on or

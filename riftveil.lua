@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.22"
+local RV_VERSION = "8.23"
 
 local ffi = require "ffi"
 
@@ -3743,11 +3743,16 @@ local PEEK_TICKS = 4                            -- eye extrapolation while movin
 local EYES = {{0, 0, 0}, {0, 0, 0}}
 local CAL = {head = {}, body = {}, fh = 1, fb = 1}
 
+-- Current gamesense has Double tap under RAGE > Aimbot (~660 public
+-- scripts reference it there); older builds under RAGE > Other (~280).
+-- Up to v8.22 only Other was tried, so on current builds DtReady was
+-- always false.
 local DT_REF, DT_KEY
-do
-    local ok, a, b = pcall(ui.reference, "RAGE", "Other", "Double tap")
-    if ok then DT_REF, DT_KEY = a, b end
+for _, tab in ipairs({"Aimbot", "Other"}) do
+    local ok, a, b = pcall(ui.reference, "RAGE", tab, "Double tap")
+    if ok and a then DT_REF, DT_KEY = a, b; info("aim", "double tap found in RAGE > %s", tab); break end
 end
+if not DT_REF then warn("aim", "double tap not found in RAGE > Aimbot or Other") end
 local function DtReady()
     if not DT_REF then return false end
     local ok1, on = pcall(ui.get, DT_REF)
@@ -4152,11 +4157,13 @@ end)() -- shot log scope
 --  Our m_nTickBase is read in run_command and its highest value kept;
 --  max - tickbase - 1 (0..14) is the ticks being shifted, the check
 --  enthusiasm, universe and excellentsanty use for their own defensive / LC
---  indicator. Over 2, with double tap on (AIMX.DtReady) or on within the
---  last second -- on a toggle key the shift lands right at the switch, when
---  the key already reads off (v8.21 missed those) -- the box goes on our
---  origin extrapolated that many ticks
---  (ExtrapolateOrigin: velocity, gravity, stops at walls). Fakelag alone
+--  indicator; a jump of more than one tick between commands is the
+--  forward shift (the teleport). Over 2 either way, the box goes on our
+--  origin extrapolated by the back shift, or where the teleport put us.
+--  Only double tap shifts the tickbase, so no menu read is needed (v8.21-
+--  8.22 also required the DT menu reference, which current builds keep
+--  under RAGE > Aimbot, not Other -- it never fired). Extrapolation is
+--  ExtrapolateOrigin: velocity, gravity, stops at walls. Fakelag alone
 --  draws nothing (v8.18-8.20 also flashed on fakelag breaks, which made up
 --  most of what it showed).
 -- ══════════════════════════════════════════════════════════════════
@@ -4165,25 +4172,31 @@ local C_LAG = {240, 64, 64}
 local FLASH = 0.5
 local EDGES = {{1, 2}, {2, 3}, {3, 4}, {4, 1}, {5, 6}, {6, 7}, {7, 8}, {8, 5}, {1, 5}, {2, 6}, {3, 7}, {4, 8}}
 -- tb_max / shift: the LC check; bx,by,bz,t,ticks: the box being flashed
-local S = {shift = 0, t = -1, ticks = 0, dt_t = -10}
-local DT_GRACE = 1   -- seconds after double tap was last on
+local S = {shift = 0, t = -1, ticks = 0}
 
 local function OnRun()
     if not IND.lc then return end
     local me = entity.get_local_player()
-    if not (me and entity.is_alive(me)) then S.tb_max, S.shift = nil, 0; return end
+    if not (me and entity.is_alive(me)) then S.tb_max, S.tb_prev, S.shift = nil, nil, 0; return end
     local tb = tonumber(entity.get_prop(me, "m_nTickBase"))
     if not tb then return end
     -- a new life / reconnect starts the tickbase over
     if not S.tb_max or tb > S.tb_max or S.tb_max - tb > 64 then S.tb_max = tb end
-    local shift = math.min(14, math.max(0, S.tb_max - tb - 1))
-    local now = globals.realtime()
-    if AIMX.DtReady() then S.dt_t = now end
-    if shift > 2 and S.shift <= 2 and now - S.dt_t <= DT_GRACE then
+    -- back: tickbase below its highest (defensive / recharge);
+    -- forward: more than one tick since the last command (the teleport)
+    local back = math.min(14, math.max(0, S.tb_max - tb - 1))
+    local fwd = (S.tb_prev and tb - S.tb_prev - 1 <= 64) and math.min(14, math.max(0, tb - S.tb_prev - 1)) or 0
+    S.tb_prev = tb
+    local shift = math.max(back, fwd)
+    if shift > 2 and S.shift <= 2 then
         local x, y, z = entity.get_origin(me)
         if isnum(x) and isnum(y) and isnum(z) then
-            S.bx, S.by, S.bz = ExtrapolateOrigin(me, x, y, z, shift)
-            S.t, S.ticks = now, shift
+            if back >= fwd then
+                S.bx, S.by, S.bz = ExtrapolateOrigin(me, x, y, z, shift)
+            else
+                S.bx, S.by, S.bz = x, y, z   -- already teleported: the record is here
+            end
+            S.t, S.ticks = globals.realtime(), shift
         end
     end
     S.shift = shift

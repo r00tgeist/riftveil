@@ -1370,15 +1370,16 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     if #CONSOLE_BAD > 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "shot log: bad output call " .. CONSOLE_BAD[1] end
 end
 
--- LOCAL LAGCOMP BOX: a red flash where a double-tap shift puts us -- our
--- origin extrapolated by the shifted ticks -- only with double tap on; not
--- again while the same shift runs; gone after 0.5 s; nothing with the
--- option off. Fakelag alone draws nothing (no setup_command trigger).
+-- LOCAL LAGCOMP BOX: a red flash on a double-tap tickbase shift, whatever
+-- the DT menu reads: back (defensive) at our origin extrapolated by the
+-- shifted ticks, forward (teleport) where we now are; normal one-tick steps
+-- and fakelag draw nothing; no re-flash in the same shift; 0.5 s; option off.
 if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     local IND_T, LC, AX = probe("IND"), probe("LOCALLC"), probe("AIMX")
     if IND_T and LC and AX and AX.DtReady then
         local lc0, p0, tick0, dt0 = IND_T.lc, W.players[1], W.tick, AX.DtReady
         IND_T.lc = true
+        AX.DtReady = function() return false end   -- the menu read must not matter
         local function label()
             for i = #SCREEN, 1, -1 do SCREEN[i] = nil; SCREEN_RGB[i] = nil end
             CONSOLE_ON = true; fire("paint"); CONSOLE_ON = false
@@ -1386,43 +1387,35 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
             return nil
         end
         local function fail(m) UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: " .. m end
-        local function shift(from, to) W.tick = from; fire("run_command", {}); W.tick = to; fire("run_command", {}) end
+        local function run(t) W.tick = t; fire("run_command", {}) end
         W.players[1] = {vx = 256, jump = 0}
         LC.S.t = -1
-        -- double tap off (and not on for over a second): a shift draws nothing
-        AX.DtReady = function() return false end
-        LC.S.dt_t = W.real - 5
-        shift(5000, 4990)
-        if label() ~= nil or LC.S.t ~= -1 then fail("flashed with double tap off") end
-        -- toggled off just now: the shift at the switch still flashes
-        AX.DtReady = function() return true end
-        fire("run_command", {})
-        AX.DtReady = function() return false end
-        W.real = W.real + 0.3
-        shift(5500, 5490)
-        if label() ~= "LC  9t" then fail("shift right after toggling double tap off: " .. tostring(label())) end
-        W.real = W.real + 0.6
-        -- double tap on: 10 below the max = 9 ticks shifted
-        AX.DtReady = function() return true end
-        shift(7000, 6990)
+        for t = 5000, 5010 do run(t) end            -- one tick per command
+        fire("setup_command", {chokedcommands = 0})
+        if label() ~= nil or LC.S.t ~= -1 then fail("drawn without a shift") end
+        -- back shift: 10 below the max = 9 ticks
+        run(5000)
         local ox = W.tick * 256 / 64
         local txt, rgb = label()
-        if txt ~= "LC  9t" then fail("double-tap shift label " .. tostring(txt) .. ", expected LC  9t") end
+        if txt ~= "LC  9t" then fail("back shift label " .. tostring(txt) .. ", expected LC  9t") end
         if rgb ~= "240,64,64" then fail("label colour " .. tostring(rgb) .. ", expected red 240,64,64") end
         if not (LC.S.bx and math.abs(LC.S.bx - (ox + 36)) < 0.01) then
-            fail(string.format("box at x=%s, expected %.1f (9 ticks at 256 u/s)", tostring(LC.S.bx), ox + 36))
+            fail(string.format("back-shift box at x=%s, expected %.1f", tostring(LC.S.bx), ox + 36))
         end
         local t1 = LC.S.t
-        W.real = W.real + 0.01; W.tick = 6991; fire("run_command", {})
+        W.real = W.real + 0.01; run(5001)
         if LC.S.t ~= t1 then fail("re-flashed while the same shift ran") end
         W.real = W.real + 0.6
         if label() ~= nil then fail("still drawn after the 0.5 s flash") end
-        -- fakelag: nothing listens to setup_command any more
-        fire("setup_command", {chokedcommands = 0})
-        if label() ~= nil then fail("drawn on a sent command") end
+        -- forward: caught up, then a 13-tick jump between two commands
+        for t = 5002, 5012 do run(t) end
+        run(5026)
+        if label() ~= "LC  13t" then fail("teleport label " .. tostring(label()) .. ", expected LC  13t") end
+        if not (LC.S.bx and math.abs(LC.S.bx - 5026 * 4) < 0.01) then fail("teleport box not where we landed: " .. tostring(LC.S.bx)) end
+        W.real = W.real + 0.6
         IND_T.lc = false
         LC.S.t = -1
-        shift(9000, 8980)
+        run(9000); run(8980)
         if LC.S.t ~= -1 or label() ~= nil then fail("ran with the option off") end
         IND_T.lc, W.players[1], W.tick, AX.DtReady = lc0, p0, tick0, dt0
     else
