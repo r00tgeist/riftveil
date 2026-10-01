@@ -3,6 +3,62 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.28  – Resolver-logic bug hunt. Three v6.2 defects, each behind a FEATURE
+          flag (off in the parity run) with a harness test that also runs
+          the flag-off v6.2 path to prove it still reaches the defect.
+          FIXED (STALE_WINDOW) -- a released enemy's shots carried the last
+          forced method. ClearEnt (STATIC AA, confidence below 0.20, a stale
+          record) released the player list but kept last_meth / last_val,
+          and the vuln window only counts down on processed records, so it
+          stayed "open" while released, dead or dormant. In the new log all
+          8 shots at aa=static enemies were labelled hit_mem (5) or
+          vuln_lby in-window (3) with nothing forced; across all logs 27 of
+          ~630 in-window shots repeat a window's exact value more than 10 s
+          later (one 65 s, across a round). Those shots fed vuln / cheat
+          trust and skipped the flip as if our angle had missed, instead of
+          counting toward the builtin-miss takeover. Now: a release labels
+          the player builtin, a shot is in a window only if the window is
+          what we force (vuln trials counted on the same test), a record
+          more than 64 ticks after the last closes the window, and the aim
+          policy's "in doubt" (two resolver misses -> safe point) no longer
+          waits on a frozen window.
+          Same defect at the start: a new record was labelled "ring", so a
+          shot before our first decision (8 in the logs, all val=0 -- ring is
+          never forced) counted as ours. It starts as builtin now.
+          FIXED (DCK_GAP) -- a duck-crossing window could open without a
+          crossing. Records not sampled (stale > 2 ticks, no animstate)
+          saved duck 0, and first sight read nil as 0, so an enemy already
+          crouched "crossed" 0.5 on the next sampled record and got the
+          torso yaw forced for 11 records. Skipped now, and logged (verbose)
+          so the next logs can count it.
+          FIXED (CFG_CADENCE) -- config recognition ran when simtime % 32
+          == 0, which an enemy sending records on a fixed even cadence can
+          never land on (every 2 ticks on odd ticks: never); it stayed on
+          the fallback L/R table. Now every 32 sim ticks since the last run.
+          log_report: "LBY WINDOWS BY AA TYPE" -- on 3/5-way the centre pass
+          reads as an LBY snap (LBY fires on 18-20% of corrections there vs
+          6% on hold); head rate 59% vs 56% other vuln, so no change yet.
+          Checked, no change (the numbers say so):
+          - hit memory taught by a vuln head hit: 26% vs 60% head looked
+            bad (p 0.007) but was aim mix -- on head-aimed shots 4/8, like
+            suppress 5/9 and unk 21/36. Teaching hits on opposite sides:
+            22/24 hit. Suppress-taught: 2/6, too few.
+          - vuln windows by age: 72-79% from 0.1 s to 1.6 s+, although
+            they last 11 records (2.6 s on a fakelagger), not 200 ms.
+          - skitter never sticks (a phase-locked pattern match, ~750 flips
+            to/from 3/5-way); after a resolver miss it hit 11/11 head, so it
+            stays out of the x-way safe point.
+          - velocity spikes zero the VelCap correction for a tick (1 in ~400
+            cap reads); no v8 shot fired on one.
+          - vuln abs-angle values (the v7.2 delta fix, reverted with v6.2):
+            raw <=7.1 65% (277), delta 7.2-7.9 59% (29), raw 8.x 71% (75).
+            The new log's vuln_unk is 38% (6/16, 21 of 25 beyond 60 deg) --
+            the one to watch.
+          - a double tap whose first bullet hits can turn the second miss
+            into "server hit": 2 cases in all logs.
+          - META_HOLD brute-forces per tick, not per miss: never logged.
+          - every vuln window is 11 records (lc_ttl), so base_ttl and the
+            +1 boosts are dead at 64/128 tick.
   v8.27  – Bug hunt, continued.
           COVERAGE GAP closed -- the hostile fuzz world never fired
           bullet_impact, player_hurt, run_command or predict_command, so the

@@ -55,6 +55,7 @@ local by_lby = {}         -- v8.14+: eye-LBY delta sign vs forced side
 -- [corr] aa= (debug logs of any version). by_xway: 3-way / 5-way after a
 -- resolver miss on them less than 10 s before (FEATURE.XWAY_UNSURE).
 local by_aa, by_xway = {}, {}
+local by_lbyx = {}        -- LBY vuln windows on 3/5-way: a centre pass reads as an LBY snap
 local corr_aa, last_shot = {}, {}   -- per player: last [corr] aa=, last {kind, t}
 local by_seed, seed_of = {}, {}   -- v8.5.6+: DB-seeded start vs cold start, per player
 local calib = {}          -- decile -> {n, heads, psum}
@@ -164,6 +165,8 @@ for _, path in ipairs(files) do
                 targets[#targets + 1] = bucket(by_aa, aa)
                 local xw = (aa == "3way" or aa == "5way") and "3/5-way" or "other AA"
                 targets[#targets + 1] = bucket(by_xway, xw .. (after_miss and ", rmiss < 10 s ago" or ", rest"))
+                local mk = meth == "vuln_lby" and "vuln_lby" or ((meth or ""):match("^vuln") and "other vuln" or "no vuln")
+                targets[#targets + 1] = bucket(by_lbyx, (xw == "3/5-way" and "3/5-way, " or (aa == "hold" and "hold, " or "other AA, ")) .. mk)
             end
             -- lbyd= (v8.14+): does sign(eye - LBY target) agree with our side?
             local lbyd = tonumber(field(line, "lbyd") or "")
@@ -285,6 +288,7 @@ report("BY TIME SINCE OUR LAST SHOT AT THEM (v8.11+: anti-bruteforce switches on
 report("BY PREVIOUS SHOT AT THEM (v8.11+)", by_prv)
 report("BY AA TYPE (aa= v8.15+, else the last [corr] line of a debug log)", by_aa)
 report("3/5-WAY AFTER A RESOLVER MISS ON THEM (v8.15: safe point on the head in the 3/5-way rmiss row; pre-v8 logs 43% there)", by_xway)
+report("LBY WINDOWS BY AA TYPE (v8.28 check: on 3/5-way a centre pass reads as an LBY snap; pre-v8.28 logs head rate 59%, other vuln 56%: no harm seen)", by_lbyx)
 report("BY EYE - LBY DELTA vs OUR FORCED SIDE (v8.14+: 262 public uses read its sign as the side)", by_lby)
 report("BY FORCED VALUE PER METHOD (|val| clamped at 60, as the player list takes it)", by_mag)
 report("BY PROFILE START (v8.5.6+: confidence seeded from the saved DB vs cold start)", by_seed)

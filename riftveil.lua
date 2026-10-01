@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.27"
+local RV_VERSION = "8.28"
 
 local ffi = require "ffi"
 
@@ -909,6 +909,29 @@ local FEATURE = {
     -- value and LCTicks kept adding up to 13 phantom ticks to the lag-comp
     -- lookup until we died or hit someone. Off in the v6.2 parity run.
     DEF_RESET = true,
+    -- v8.28: a DCK (duck crossing) window needs a real duck sample on the
+    -- record before. v6.2 saved duck 0 for records it didn't sample (one
+    -- that arrived > 2 ticks stale -- ChokedPkts is curtime - simtime -
+    -- latency -- or had no animstate), and prev_duck starts nil on first
+    -- sight and read as 0, so an enemy already crouched "crossed" 0.5 on
+    -- the next sampled record and got a phantom DCK window (body yaw forced
+    -- to the torso yaw for 11 ticks). Skips are logged (verbose) so a match
+    -- log can count them. Off in the v6.2 parity run.
+    DCK_GAP = true,
+    -- v8.28: config recognition (RecognizeCfg -> CfgAngle's per-config L/R)
+    -- runs every 32 sim ticks counted from its last run. v6.2 ran it when
+    -- simtime % 32 == 0, so an enemy whose records land on a fixed even
+    -- cadence out of phase with 32 was never recognised and stayed on the
+    -- fallback table. Off in the v6.2 parity run.
+    CFG_CADENCE = true,
+    -- v8.28: a vuln window counts only while it is what we force. v6.2
+    -- counted it down on processed records only, so it stayed open while
+    -- the enemy was released (STATIC AA, low confidence, a stale record),
+    -- dead or dormant, and the shot carried the last forced method: 27 of
+    -- ~630 in-window shots in the logs repeat a window's exact value more
+    -- than 10 s later (one 65 s, across a round). Those shots fed the
+    -- vuln / cheat stats and skipped the flip. Off in the v6.2 parity run.
+    STALE_WINDOW = true,
     -- These three are the v6.2 [EXP] switches as the logs show them
     -- running when the resolver hit 74% (suppress fired in every v6.2
     -- match; jitter prediction never did).
@@ -2409,6 +2432,13 @@ local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
     local cross  = 0.5
     if (rec._dck_cooldown or 0) > 0 then -- luacheck: ignore 542
         -- cooldown ticking — decrement only, no DCK this tick
+    elseif FEATURE.DCK_GAP and rec.prev_duck == nil then
+        -- nothing to cross from: first sight, or the record before wasn't
+        -- sampled (arrived stale / no animstate). v6.2 read that as duck 0,
+        -- so an enemy already crouched "crossed" 0.5 here.
+        if DET.verbose and dn >= cross then
+            dbg("vuln", "type=dck skipped: no duck sample before this record (stale record / first sight)")
+        end
     elseif (dp < cross and dn >= cross) or (dp >= cross and dn < cross) then
         local torso = as.torso_yaw or safe_eye
         if torso and math.abs(torso) >= 1.0 then
@@ -2888,7 +2918,8 @@ local function NewRec(player, s64)
         prev_pose=nil, prev_spd=nil, prev_duck=nil, prev_onground=nil,
         cur_choke=0, was_choked=false, unk_miss_streak=0,
         kills=0, eidx=player,
-        active=false, resolved=false, last_val=0, last_meth=METH.RING,
+        -- nothing forced yet: builtin (STALE_WINDOW; v6.2 said ring, val 0)
+        active=false, resolved=false, last_val=0, last_meth=FEATURE.STALE_WINDOW and "builtin" or METH.RING,
         -- Meta-aggressive override (built-in failing the current AA meta)
         builtin_miss_streak = 0,   -- consecutive misses while built-in was in control
         meta_aggressive     = false, -- true once built-in fails twice on same player
@@ -2955,7 +2986,18 @@ local function ClearEnt(player)
     local s64 = EIDX_S64[player]
     if s64 and REC[s64] then
         REC[s64].active = false; REC[s64].resolved = false
+        -- FEATURE.STALE_WINDOW: nothing is forced now, so a shot fired before
+        -- the next decision is gamesense's -- label it so, as the release
+        -- path in ProcessPlayer does (v6.2 kept the last forced method)
+        if FEATURE.STALE_WINDOW then REC[s64].last_meth = "builtin"; REC[s64].last_val = 0 end
     end
+end
+
+-- A vuln window is open AND is what we force (FEATURE.STALE_WINDOW). The
+-- count alone freezes while the enemy is released, dead or dormant.
+local function WindowForced(rec)
+    if rec.vuln_ttl <= 0 then return false end
+    return not FEATURE.STALE_WINDOW or tostring(rec.last_meth):sub(1, 5) == "vuln_"
 end
 
 -- ══════════════════════════════════════════════════════════════════
@@ -3083,6 +3125,10 @@ local function ProcessPlayer(player, ctx)
         if FEATURE.SKIP_DEF_FRAMES then return end
     end
     if not rec.st_max or st > rec.st_max or rec.st_max - st > 64 then rec.st_max = st end
+    -- FEATURE.STALE_WINDOW: a record more than 64 ticks after the last one
+    -- (death, dormancy, a new round) closes the vuln window. It only counts
+    -- down on records, so v6.2 carried it -- and its torso yaw -- over.
+    if FEATURE.STALE_WINDOW and rec.lt and st - rec.lt > 64 then rec.vuln_ttl = 0 end
     rec.lt = st
 
     -- pose/spd/duck/on_ground are nil until sampled.
@@ -3275,7 +3321,18 @@ local function ProcessPlayer(player, ctx)
         end
 
         -- Config recognition (throttled)
-        if rec.config_conf < 0.8 and (st % CFG.CFG_TICKS) == 0 then
+        -- FEATURE.CFG_CADENCE: due once CFG_TICKS sim ticks have passed since
+        -- the last run (or simtime went backwards: new map). v6.2 ran it on
+        -- st % 32 == 0, which an enemy sending records on a fixed even
+        -- cadence can skip forever (every 2 ticks on odd ticks: never).
+        local cfg_due
+        if FEATURE.CFG_CADENCE then
+            cfg_due = not rec._cfg_st or st - rec._cfg_st >= CFG.CFG_TICKS or st < rec._cfg_st
+        else
+            cfg_due = (st % CFG.CFG_TICKS) == 0
+        end
+        if rec.config_conf < 0.8 and cfg_due then
+            if FEATURE.CFG_CADENCE then rec._cfg_st = st end
             local rcfg = RecognizeCfg(rec, rec.config_type)
             if rcfg then
                 if rcfg == rec.config_type then
@@ -3680,7 +3737,9 @@ local function ProcessPlayer(player, ctx)
     rec.prev_pose     = pose
     rec.prev_spd2     = rec.prev_spd  -- shift: spd2 = last tick's spd before this update
     rec.prev_spd      = spd
-    rec.prev_duck     = duck or 0
+    -- FEATURE.DCK_GAP: nil when this record wasn't sampled (stale, no
+    -- animstate), so DetectVuln doesn't compare the next duck_amount to 0
+    if FEATURE.DCK_GAP then rec.prev_duck = duck else rec.prev_duck = duck or 0 end
     rec.prev_onground = on_ground
     -- Decrement DCK cooldown each tick (set to 10 when DCK fires, counts down to 0)
     if (rec._dck_cooldown or 0) > 0 then
@@ -3841,7 +3900,9 @@ end
 -- outside a vulnerability window, or the x-way case above. Shared with
 -- the shot log's "next=sp" so the two can't disagree.
 local function InDoubt(rec, now)
-    return ((rec.aim_miss_streak or 0) >= 2 and rec.vuln_ttl == 0) or XwayAfterMiss(rec, now)
+    -- STALE_WINDOW: a window we aren't forcing (released enemy) is no window
+    local no_win = not WindowForced(rec)
+    return ((rec.aim_miss_streak or 0) >= 2 and no_win) or XwayAfterMiss(rec, now)
 end
 
 -- The decision itself, on numbers only (unit-tested in the harness).
@@ -4281,7 +4342,7 @@ local function UpdateEspState()
         local rec = s64 and REC[s64]
         if rec then
             -- VLN: vulnerability window open (deterministic correction)
-            ESP_VLN[ent] = rec.vuln_ttl > 0
+            ESP_VLN[ent] = WindowForced(rec)
             -- RES: confident correction overriding the built-in (not suppress, not vuln)
             ESP_RES[ent] = rec.resolved and rec.conf >= CFG.CONF_ESP
                 and rec.vuln_ttl == 0 and rec.last_meth ~= METH.SUPPRESS
@@ -4425,7 +4486,7 @@ local function on_aim_fire(e)
     SHOTS[e.id] = {
         s64     = s64,
         fy      = praw and (praw * CFG.POSE_SCALE - 60) or 0,
-        meth    = r and r.last_meth or METH.RING,
+        meth    = r and r.last_meth or (FEATURE.STALE_WINDOW and "builtin" or METH.RING),
         val     = r and r.last_val  or 0,
         side    = r and r.side      or 0,
         flip    = r and r.flip      or false,   -- store flip state at fire time
@@ -4448,7 +4509,9 @@ local function on_aim_fire(e)
         -- used everywhere else (bt_hist/preferred_bt/log output).
         bt      = BtTicks(e.backtrack),
         hc      = e.hit_chance or 0,
-        in_vuln = r and r.vuln_ttl > 0 or false,
+        -- in a vuln window only if the window is what we forced (STALE_WINDOW):
+        -- a released or untrusted window is a builtin shot
+        in_vuln = r and WindowForced(r) or false,
         vuln_t  = r and r.vuln_type or nil,
         cfg     = r and r.config_type or nil,
         six_side = r and r.six_side or 0,  -- for 6lex agree/disagree calibration on hit
@@ -4497,7 +4560,10 @@ local function on_aim_fire(e)
     -- Credit a vuln_profile "seen" (trial) here, once per actual shot fired
     -- during an open vuln window -- not once per detection (see the
     -- comment at the DetectVuln call site in ProcessPlayer for why).
-    if r and r.vuln_ttl > 0 and r.vuln_type and r.vuln_profile[r.vuln_type] then
+    -- (STALE_WINDOW: the same test as the shot's in_vuln, so trials and
+    -- hits are counted on the same shots)
+    local in_win = (FEATURE.STALE_WINDOW and SHOTS[e.id].in_vuln) or (not FEATURE.STALE_WINDOW and r and r.vuln_ttl > 0)
+    if r and in_win and r.vuln_type and r.vuln_profile[r.vuln_type] then
         r.vuln_profile[r.vuln_type].seen = r.vuln_profile[r.vuln_type].seen + 1
     end
     -- Weapon aim calibration: the ragebot's predicted damage vs our trace
@@ -5050,7 +5116,7 @@ local function BuildOverlay(OV, threat)
         local has_val = isnum(rec.last_val) and math.abs(rec.last_val) > 0.5
         local ang     = has_val and string.format("%+d", math.floor(rec.last_val + 0.5)) or ""
         n = n + 1
-        if rec.vuln_ttl > 0 then
+        if WindowForced(rec) then
             PanelRow(OV, n, "STATE", "VULN " .. string.upper(rec.vuln_type or "?"), "-", C_VULN,
                 string.format("%dT  %s", rec.vuln_ttl, ang), C_DIM)
         elseif rec.resolved and cf >= CFG.CONF_ESP then

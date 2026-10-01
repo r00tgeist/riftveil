@@ -503,7 +503,7 @@ if os.getenv("RV_PARITY") then
     end
     local F
     for _, cb in pairs(CALLBACKS) do F = F or find(cb, 0) end
-    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false end
+    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false end
 end
 
 local cb_errors = {}
@@ -1318,13 +1318,16 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         local log0, eyebad0 = IND_T.log, W.eye_bad
         W.eye_bad = nil   -- the fuzz phase can leave the eye NaN / inf
         local keep = {}
-        for _, f in ipairs({"aa_type", "last_outcome", "last_fire_t", "aim_miss_streak"}) do keep[f] = rec[f] end
+        for _, f in ipairs({"aa_type", "last_outcome", "last_fire_t", "aim_miss_streak", "last_meth", "last_val", "vuln_ttl"}) do keep[f] = rec[f] end
         local PF = {"Force body yaw", "Force body yaw value", "Correction active"}
         local pl0 = {}
         for _, f in ipairs(PF) do pl0[f] = PLIST_STATE["101\t" .. f] end
+        -- the record's label matches what the list says is forced, as the
+        -- script keeps it (a released player's shots are builtin)
         local function plset(forced, val, cor)
             PLIST_STATE["101\tForce body yaw"], PLIST_STATE["101\tForce body yaw value"] = forced, val
             PLIST_STATE["101\tCorrection active"] = cor
+            rec.last_meth, rec.last_val, rec.vuln_ttl = forced and "suppress" or "builtin", forced and val or 0, 0
         end
         local function lines(f)
             for i = #CONSOLE, 1, -1 do CONSOLE[i] = nil end
@@ -1380,6 +1383,7 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
                 fire("aim_hit", {id = 92005, target = 101, hitgroup = 1, damage = 98}) end),
             "[92005] [244/", "Hit bot101's head for 98(98) (100 remaining) aimed=head(76%)", " · GAMESENSE resolver")
         plset(false, 0, false)
+        CRAFTED_COR0 = (CRAFTED_COR0 or 0) + 1   -- a state the script never makes: see the cor=0 check
         want("no resolver", lines(function() shoot(92006); miss(92006, "?") end), "due to resolver", " · NO RESOLVER")
 
         plset(true, 31, false)
@@ -1567,6 +1571,182 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         UNIT_FAIL[#UNIT_FAIL + 1] = "SHIFT box test: player 105 has no record"
     end
     W.live, W.players[105] = live0, nil
+end
+
+-- DCK after a gap (FEATURE.DCK_GAP): an enemy crouched the whole time
+-- whose record arrives 8 ticks stale (choke 6 here: not sampled), the next
+-- one 4 ticks stale (choke 2: sampled, not an unchoke), didn't cross 0.5 -- no
+-- DCK window. With the flag off (v6.2) the same sequence
+-- opens one, which proves the sequence reaches the DCK check.
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local REC_T, EI, F = probe("REC"), probe("EIDX_S64"), probe("FEATURE")
+    local live0 = W.live
+    local function run(flag, id)
+        F.DCK_GAP = flag
+        W.live = {101, 102, id}
+        W.players[id] = {sim = W.tick * TI, vx = 0, vy = 0, pose01 = 0.5, eye = 0, duck = 1, torso = 30, gfy = 30}
+        local function step(stale)    -- stale: ticks behind now, nil = no new record
+            W.tick = W.tick + 1; W.real = W.real + TI
+            if stale then W.players[id].sim = (W.tick - stale) * TI end
+            W.players[id].pose01 = (W.tick % 2 == 0) and 0.15 or 0.85   -- 2-way jitter, not STATIC
+            for _, p in ipairs({101, 102}) do W.players[p].sim = W.tick * TI end
+            fire("net_update_end")
+        end
+        for _ = 1, 15 do step(0) end
+        local r = REC_T and EI and EI[id] and REC_T[EI[id]]
+        if not r then return nil end
+        r.vuln_type, r.vuln_ttl = nil, 0
+        for _ = 1, 10 do step(nil) end
+        step(8)                       -- choke 6 (2 ticks of latency): not sampled
+        step(4)                       -- choke 2: sampled, still crouched
+        local t = r.vuln_type
+        W.players[id] = nil
+        return t or "none"
+    end
+    if REC_T and EI and F then
+        local on, off = run(true, 106), run(false, 107)
+        F.DCK_GAP = true
+        if on == nil or off == nil then
+            UNIT_FAIL[#UNIT_FAIL + 1] = "DCK gap test: players 106/107 have no record"
+        else
+            if on == "dck" then UNIT_FAIL[#UNIT_FAIL + 1] = "DCK gap: a crouched enemy got a DCK window on the record after a stale (unsampled) one" end
+            if off ~= "dck" then UNIT_FAIL[#UNIT_FAIL + 1] = "DCK gap test: with the flag off the sequence gave " .. tostring(off) .. ", not the v6.2 phantom DCK -- the test no longer reaches the check" end
+        end
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "DCK gap test: REC / EIDX_S64 / FEATURE not reachable"
+    end
+    W.live = live0
+end
+
+-- Config recognition cadence (FEATURE.CFG_CADENCE): an enemy sending a
+-- record every 2 ticks, always on an odd tick, gets recognised. v6.2 ran
+-- recognition on simtime % 32 == 0, which that cadence never lands on --
+-- the flag-off half proves the sequence still shows that.
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local REC_T, EI, F = probe("REC"), probe("EIDX_S64"), probe("FEATURE")
+    local live0 = W.live
+    local function run(flag, id)
+        F.CFG_CADENCE = flag
+        W.live = {101, 102, id}
+        W.players[id] = {sim = 0, vx = 0, vy = 0, pose01 = 0.5, eye = 0, duck = 0, torso = 0, gfy = 0}
+        local sent, last_cc, last_t, min_gap = 0, nil, nil, math.huge
+        for _ = 1, 400 do
+            W.tick = W.tick + 1; W.real = W.real + TI
+            if W.tick % 2 == 1 then
+                sent = sent + 1
+                W.players[id].sim = W.tick * TI
+                W.players[id].pose01 = (sent % 2 == 0) and 0.15 or 0.85
+            end
+            for _, p in ipairs({101, 102}) do W.players[p].sim = W.tick * TI end
+            fire("net_update_end")
+            -- each recognition moves config_conf: those moves are >= 32 ticks apart
+            local r = REC_T and EI and EI[id] and REC_T[EI[id]]
+            if r and r.config_conf ~= last_cc then
+                if last_cc and last_t then min_gap = math.min(min_gap, W.tick - last_t) end
+                last_cc, last_t = r.config_conf, W.tick
+            end
+        end
+        local r = REC_T and EI and EI[id] and REC_T[EI[id]]
+        W.players[id] = nil
+        if not r then return nil end
+        return r.config_type or "none", r.lt, min_gap
+    end
+    if REC_T and EI and F then
+        local on, _, gap = run(true, 108)
+        local off, lt = run(false, 109)
+        F.CFG_CADENCE = true
+        if on == nil or off == nil then
+            UNIT_FAIL[#UNIT_FAIL + 1] = "config cadence test: players 108/109 have no record"
+        else
+            if on == "none" then UNIT_FAIL[#UNIT_FAIL + 1] = "config cadence: a 2-way jitter enemy on a 2-tick odd cadence was never recognised" end
+            if gap < 32 then UNIT_FAIL[#UNIT_FAIL + 1] = "config cadence: recognition ran " .. gap .. " ticks after the last run, expected >= 32" end
+            if off ~= "none" then UNIT_FAIL[#UNIT_FAIL + 1] = string.format("config cadence test: with the flag off it recognised %s (last simtime tick %s) -- the cadence no longer avoids st %% 32 == 0", tostring(off), tostring(lt)) end
+        end
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "config cadence test: REC / EIDX_S64 / FEATURE not reachable"
+    end
+    W.live = live0
+end
+
+-- Stale vuln windows (FEATURE.STALE_WINDOW): (a) an enemy released on
+-- STATIC AA with a window still counting is shot as builtin, not in the
+-- window; (b) a record 100 ticks after the last (death / dormancy) closes
+-- the window. The flag-off half shows v6.2's behaviour on both.
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local REC_T, EI, F, SH = probe("REC"), probe("EIDX_S64"), probe("FEATURE"), probe("SHOTS")
+    local live0 = W.live
+    local function run(flag, id)
+        F.STALE_WINDOW = flag
+        W.live = {101, 102, id}
+        W.players[id] = {sim = W.tick * TI, vx = 0, vy = 0, pose01 = 0.5, eye = 0, duck = 0, torso = 0, gfy = 0}
+        local function step(gap, jitter)
+            W.tick = W.tick + (gap or 1); W.real = W.real + (gap or 1) * TI
+            W.players[id].sim = W.tick * TI
+            W.players[id].pose01 = jitter and ((W.tick % 2 == 0) and 0.15 or 0.85) or 0.5
+            for _, p in ipairs({101, 102}) do W.players[p].sim = W.tick * TI end
+            fire("net_update_end")
+        end
+        -- before any decision: a new record's label, and a shot at an enemy
+        -- with no record yet
+        local NR = probe("NewRec")
+        local okn, r0 = pcall(NR or error, id, "stale_test_" .. id)
+        local first = okn and type(r0) == "table" and r0.last_meth or nil
+        fire("aim_fire", {id = 94000 + id, target = 199, backtrack = 0, hit_chance = 80, hitgroup = 1, damage = 30})
+        local d0 = SH[94000 + id]
+        if not (d0 and d0.meth == first) then
+            UNIT_FAIL[#UNIT_FAIL + 1] = string.format("stale window (flag %s): a shot at an enemy with no record is %s, a new record %s", tostring(flag), tostring(d0 and d0.meth), tostring(first))
+        end
+        SH[94000 + id] = nil
+        for _ = 1, 12 do step(1, false) end            -- constant pose: STATIC, released
+        local r = REC_T and EI and EI[id] and REC_T[EI[id]]
+        if not (r and SH) then W.players[id] = nil; return nil end
+        r.vuln_ttl, r.vuln_type, r.vuln_val, r.last_meth, r.last_val = 6, "dck", -93, "vuln_dck", -93
+        r.vuln_profile.dck = {seen = 0, hit = 0}
+        step(1, false)                                  -- still STATIC: ClearEnt
+        local sid = 93000 + id
+        fire("aim_fire", {id = sid, target = id, backtrack = 0, hit_chance = 80, hitgroup = 1, damage = 30})
+        local d = SH[sid]
+        local meth, inv = d and d.meth, d and d.in_vuln
+        -- two resolver misses on a released enemy: in doubt (safe point),
+        -- the frozen window doesn't count
+        local AX = probe("AIMX")
+        r.aim_miss_streak = 2
+        local doubt = AX and AX.InDoubt(r, W.real)
+        r.aim_miss_streak = 0
+        if flag and not doubt then UNIT_FAIL[#UNIT_FAIL + 1] = "stale window: two misses on a released enemy with a frozen window not in doubt" end
+        if not flag and doubt then UNIT_FAIL[#UNIT_FAIL + 1] = "stale window test: flag off, the frozen window still read as no window" end
+        -- a trial is counted exactly when the shot is in the window
+        if (r.vuln_profile.dck.seen > 0) ~= (inv == true) then
+            UNIT_FAIL[#UNIT_FAIL + 1] = string.format("stale window (flag %s): vuln trials %d for a shot in window %s", tostring(flag), r.vuln_profile.dck.seen, tostring(inv))
+        end
+        SH[sid] = nil
+        -- (b) window open, then nothing for 100 ticks
+        for _ = 1, 12 do step(1, true) end
+        r.vuln_ttl, r.vuln_type, r.vuln_val = 6, "dck", -93
+        step(100, true)
+        local ttl = r.vuln_ttl
+        W.players[id] = nil
+        return meth, inv, ttl, first
+    end
+    if REC_T and EI and F and SH then
+        local m1, v1, t1, f1 = run(true, 110)
+        local m0, v0, t0, f0 = run(false, 111)
+        if f1 ~= "builtin" then UNIT_FAIL[#UNIT_FAIL + 1] = "stale window: a new enemy starts labelled " .. tostring(f1) .. ", not builtin" end
+        if f0 ~= "ring" then UNIT_FAIL[#UNIT_FAIL + 1] = "stale window test: flag off, a new enemy starts as " .. tostring(f0) .. ", not v6.2's ring" end
+        F.STALE_WINDOW = true
+        if m1 == nil or m0 == nil then
+            UNIT_FAIL[#UNIT_FAIL + 1] = "stale window test: players 110/111 have no record / shot"
+        else
+            if m1 ~= "builtin" or v1 then UNIT_FAIL[#UNIT_FAIL + 1] = string.format("stale window: a STATIC-released enemy was shot as %s, in window %s", tostring(m1), tostring(v1)) end
+            if t1 ~= 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "stale window: a record 100 ticks on left the window at " .. tostring(t1) end
+            if m0 ~= "vuln_dck" or not v0 or not (t0 and t0 > 0) then
+                UNIT_FAIL[#UNIT_FAIL + 1] = string.format("stale window test: flag off gave %s / %s / ttl %s, not v6.2's stale window -- the test no longer reaches it", tostring(m0), tostring(v0), tostring(t0))
+            end
+        end
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "stale window test: REC / EIDX_S64 / FEATURE / SHOTS not reachable"
+    end
+    W.live = live0
 end
 
 -- Defensive frames: a frame whose simulation time is below the highest
@@ -1788,6 +1968,7 @@ do
     for line in (LOG_CAPTURE[1] or ""):gmatch("[^\n]+") do
         if line:find("meth=builtin", 1, true) and line:find(" cor=0", 1, true) then bad = bad + 1 end
     end
+    bad = bad - (CRAFTED_COR0 or 0)   -- the shot log test's own "no resolver" shot
     if bad > 0 then UNIT_FAIL[#UNIT_FAIL + 1] = bad .. " builtin shot(s) fired with gamesense's resolver off (cor=0)" end
 end
 if #UNIT_FAIL > 0 then
