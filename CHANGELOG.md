@@ -3,6 +3,11 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.31  – Local lagcomp box: the shot + teleport alone, no speed condition.
+          v8.30's 64-unit rule hid it on a normal ground double tap; the
+          exploit is the shot followed by the tickbase teleport, so that is
+          the whole trigger now (DT on, our shot, shift > 2 ticks within
+          0.25 s). Harness: a DT shot while standing still draws it.
   v8.30  – Local lagcomp box: only a double-tap shot that breaks lag comp.
           It flashed on any tickbase shift over 2 ticks, so toggling DT and
           defensive lit it too. Now it needs all of: double tap on and our

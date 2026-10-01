@@ -1440,7 +1440,7 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         local function run(t) W.tick = t; fire("run_command", {}) end
         local function shoot() fire("weapon_fire", {userid = 1, weapon = "weapon_scar20"}) end
         local function settle(a, b) W.real = W.real + 0.6; for t = a, b do run(t) end end
-        -- 640 u/s (air strafe): 9 shifted ticks = 90 u, past the 64 u break
+        -- 640 u/s: the box sits 9 ticks (90 u) ahead
         W.players[1] = {vx = 640, jump = 0}
         LC.S.t, LC.S.shot = -1, -1
         for t = 5000, 5010 do run(t) end            -- one tick per command
@@ -1469,11 +1469,11 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         run(5001); W.tick = 5040
         label()
         if not (LC.S.bx and LC.S.bx > W.tick * 10) then fail("box fell behind us: " .. tostring(LC.S.bx)) end
-        -- a DT shot on the ground at 256 u/s: 9 ticks = 36 u, not broken
-        W.players[1].vx = 256
+        -- speed doesn't matter: a DT shot standing still still teleports
+        W.players[1].vx = 0
         settle(5003, 5012)
         shoot(); run(5002)
-        if label() ~= nil then fail("drawn when the shift moved us 36 u (lag comp not broken)") end
+        if label() ~= "LC  9t" then fail("no box for a DT shot + teleport while standing: " .. tostring(label())) end
         W.players[1].vx = 640
         -- the shot too long before the shift (> 0.25 s): nothing
         settle(5003, 5012)
@@ -1536,7 +1536,7 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         local lc0, p0, tick0, dt0 = IND_T.lc, W.players[1], W.tick, AX.DtReady
         IND_T.lc = true
         AX.DtReady = function() return true end
-        -- a DT shot whose 9-tick shift breaks lag comp (640 u/s: 90 u)
+        -- a DT shot, then a 9-tick shift
         W.players[1] = {vx = 640, jump = 0}
         W.tick = 30000; fire("run_command", {})
         fire("weapon_fire", {userid = 1, weapon = "weapon_scar20"})

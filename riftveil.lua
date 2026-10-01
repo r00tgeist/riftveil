@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.30"
+local RV_VERSION = "8.31"
 
 local ffi = require "ffi"
 
@@ -4278,9 +4278,6 @@ local S = {shift = 0, t = -1, ticks = 0, shot = -1}
 -- a double-tap shift lands within one batch of commands after the shot:
 -- at most sv_maxusrcmdprocessticks (16) ticks, 0.25 s at 64 tick
 local SHOT_WIN = 0.25
--- lag compensation is broken when the record moves more than 64 units
--- (4096 squared) -- the rule the enemy SHIFT box uses (lagcomp-box-gs)
-local LC_BREAK_SQ = 4096
 
 -- weapon_fire: our own shot, fired with double tap on
 local function OnShot(e)
@@ -4304,18 +4301,13 @@ local function OnRun()
     local fwd = (S.tb_prev and tb - S.tb_prev - 1 <= 64) and math.min(14, math.max(0, tb - S.tb_prev - 1)) or 0
     S.tb_prev = tb
     local shift = math.max(back, fwd)
-    -- v8.30: only the shift of a double-tap shot that really breaks lag
-    -- comp: DT on, our shot within SHOT_WIN, and the shifted ticks carry us
-    -- past 64 units (on the ground at 250 u/s 14 ticks is ~55 u: not broken)
+    -- only the double-tap exploit itself: our shot with DT on, then the
+    -- tickbase teleport (shift > 2) within SHOT_WIN. No speed condition
+    -- (v8.30 had a 64 u one; the shot + teleport is the break).
     if shift > 2 and S.shift <= 2 then
         local now = globals.realtime()
         if S.shot >= 0 and now - S.shot >= 0 and now - S.shot <= SHOT_WIN and AIMX.DtReady() then
-            local x, y, z = entity.get_origin(me)
-            if isnum(x) and isnum(y) and isnum(z) then
-                local bx, by, bz = ExtrapolateOrigin(me, x, y, z, shift)
-                local dx, dy, dz = bx - x, by - y, bz - z
-                if dx * dx + dy * dy + dz * dz > LC_BREAK_SQ then S.t, S.ticks = now, shift end
-            end
+            S.t, S.ticks = now, shift
         end
     end
     S.shift = shift
