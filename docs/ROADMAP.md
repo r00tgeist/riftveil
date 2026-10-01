@@ -98,7 +98,11 @@ teach hit memory the forced value's sign instead of the tracked side.
   the next logs: the delta era measured 59%. If it comes back under the
   raw era's 55% overall, switch the flag off. First v8.29 match: 78%
   (7 head / 2 resolver misses, every value inside +-58; raw since v8.15
-  11/31, p 0.05). The one world-yaw window shot (vuln_lnd 145) missed. STP / PKA / LND / DCK / CTR
+  11/31, p 0.05). The one world-yaw window shot (vuln_lnd 145) missed.
+  Same session, 60 shots: vuln_unk 7 head / 3 resolver misses (70%), our
+  methods together 14 / 6 (70%). Builtin dipped to 2 / 5 there, but is 65%
+  (58 / 89) across all logs, so the suppress pause that hands records to it
+  stays as v6.2 had it. STP / PKA / LND / DCK / CTR
   still force world yaws (few shots: DCK 67%, the rest n < 10).
 - **LBY on 3/5-way** is mostly the jitter's centre pass. `LBY WINDOWS BY AA
   TYPE` in log_report: 59% vs 56% other vuln so far.
