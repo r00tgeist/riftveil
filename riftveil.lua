@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.16"
+local RV_VERSION = "8.17"
 
 local ffi = require "ffi"
 
@@ -3892,8 +3892,8 @@ end)() -- aim policy scope
 -- ══════════════════════════════════════════════════════════════════
 --  SHOT LOG  (Indicators > Shot log)
 --
---  One console line per ragebot shot, in the format of the public
---  "[MISC] aimbot log" (s0daa/CSGO-HVH-LUAS), with what RIFTVEIL did:
+--  One line per ragebot shot, in the format of the public "[MISC] aimbot
+--  log" (s0daa/CSGO-HVH-LUAS), with what RIFTVEIL did:
 --
 --   [217] [244/251] Missed moral's head(98)(76%) due to resolver:0.03° · RIFTVEIL vuln_lby -24° [aa=5way | cf=62% | cht=nl | streak=1 | lc=0 | tc=1]
 --   [218] [260/266] Hit moral's head for 98(98) (0 remaining) aimed=head(81%) · RIFTVEIL hit_mem +31° [aa=hold | cf=70% | pol=head | lc=1 | tc=2]
@@ -3906,22 +3906,23 @@ end)() -- aim policy scope
 --  near 0 on a resolver miss (the bullet went where it was sent), wide on
 --  spread. Then who resolved the target for that shot, read from the
 --  player list as the shot left: RIFTVEIL with its method and the body yaw
---  it forced, or GAMESENSE's own resolver -- red when it's the one that
---  missed. In brackets: AA type, confidence, enemy cheat, aim policy, safe
+--  it forced, or GAMESENSE's own resolver. In brackets: AA type, confidence, enemy cheat, aim policy, safe
 --  point (on / off from the player list, key = Force safe point held),
 --  aim_fire flags (T teleported, I interpolated, E extrapolated, B accuracy
 --  boost, H high priority; D our defensive read on them), on a resolver
 --  miss the run of them and next=sp when the aim policy goes to safe point
 --  for the next shot, and our / their choked commands (lc / tc).
 --
+--  Printed with print(), as the original does: gamesense puts it in the
+--  console and the top-left corner, where its own logs go (v8.16 used
+--  client.color_log instead).
+--
 --  The original matched the impact by tick, which misses whenever the
 --  impact and the result land on different ticks; here each shot claims
---  its own impacts (ClaimAngle). Console only: the debug file's [hit] /
---  [miss] lines, which log_report reads, are unchanged.
+--  its own impacts (ClaimAngle). The debug file's [hit] / [miss] lines,
+--  which log_report reads, are unchanged.
 -- ══════════════════════════════════════════════════════════════════
 local SHOTLOG = (function()
-local C_DIM, C_TXT = {125, 125, 125}, {215, 215, 215}
-local C_HIT, C_MISS, C_GS = {150, 220, 110}, {255, 95, 95}, {200, 200, 200}
 local FLAG_OUT = {t = "T", i = "I", x = "E", b = "B", p = "H", d = "D"}
 local VERB = {hegrenade = "Naded", inferno = "Burned", knife = "Knifed"}
 local FORCE_SP
@@ -3940,19 +3941,12 @@ local function PGet(ent, field)
     if ok then return v end
 end
 
--- segs: color, text, color, text, ...; gamesense keeps a color_log line
--- open while the text ends in "\0"
+-- segs: the line's pieces, joined and printed once
 local function Add(segs, ...)
     local n = #segs
     for i = 1, select("#", ...) do segs[n + i] = (select(i, ...)) end
 end
-local function Print(segs)
-    local n = #segs
-    for i = 1, n, 2 do
-        local c = segs[i]
-        client.color_log(c[1], c[2], c[3], (i + 1 < n) and (segs[i + 1] .. "\0") or segs[i + 1])
-    end
-end
+local function Print(segs) print(table.concat(segs)) end
 
 local function Dir(ox, oy, oz, x, y, z)
     if not (isnum(ox) and isnum(oy) and isnum(oz) and isnum(x) and isnum(y) and isnum(z)) then return nil end
@@ -4028,11 +4022,10 @@ local function Impact(e)
 end
 
 local function Head(segs, id, lg)
-    Add(segs, C_DIM, "[", ACCENT, tostring(id), C_DIM,
-        string.format("] [%d/%d] ", lg.rt % 1000, globals.tickcount() % 1000))
+    Add(segs, string.format("[%s] [%d/%d] ", tostring(id), lg.rt % 1000, globals.tickcount() % 1000))
 end
 
-local function Tail(segs, d, rec, blame, missed)
+local function Tail(segs, d, rec, blame)
     local lg = d.lg
     local who, what
     if lg.forced then
@@ -4043,20 +4036,20 @@ local function Tail(segs, d, rec, blame, missed)
     else
         who, what = "GAMESENSE", " resolver"
     end
-    Add(segs, C_DIM, " · ", blame and C_MISS or (lg.forced and ACCENT or C_GS), who, C_TXT, what)
+    Add(segs, " · ", who, what)
     local p = {"aa=" .. (AA_SHORT[d.aa] or "?"), string.format("cf=%d%%", Int((d.conf or 0) * 100))}
     if d.cheat then p[#p + 1] = "cht=" .. d.cheat end
     if d.pol and d.pol ~= "-" then p[#p + 1] = "pol=" .. d.pol end
     if lg.sp then p[#p + 1] = "sp=" .. lg.sp end
     local fl = (d.fl or ""):gsub("%a", FLAG_OUT)
     if fl ~= "" then p[#p + 1] = "fl=" .. fl end
-    if missed and blame and rec then
+    if blame and rec then
         p[#p + 1] = "streak=" .. (rec.aim_miss_streak or 0)
         if DET.aim and AIMX.InDoubt(rec, globals.realtime()) then p[#p + 1] = "next=sp" end
     end
     p[#p + 1] = "lc=" .. lg.lc
     p[#p + 1] = "tc=" .. lg.tc
-    Add(segs, C_DIM, " [" .. table.concat(p, " | ") .. "]")
+    Add(segs, " [", table.concat(p, " | "), "]")
 end
 
 -- aim_hit, after on_aim_hit's own bookkeeping
@@ -4065,11 +4058,11 @@ local function Hit(e, d)
     ClaimAngle(d.lg)   -- its impacts are this shot's: keep them from the next one
     local segs = {}
     Head(segs, e.id, d.lg)
-    Add(segs, C_HIT, "Hit ", ACCENT, Name(e.target), C_TXT, "'s ", ACCENT, HGName(e.hitgroup),
-        C_TXT, " for ", ACCENT, tostring(Int(e.damage)), C_DIM, "(" .. (d.aim_dmg or 0) .. ")",
-        C_TXT, " (", ACCENT, tostring(math.max(0, Int(entity.get_prop(e.target, "m_iHealth")))),
-        C_TXT, " remaining) aimed=", ACCENT, HGName(d.aim_hg), C_DIM, string.format("(%d%%)", Int(d.hc)))
-    Tail(segs, d, d.s64 and REC[d.s64], false, false)
+    Add(segs, "Hit ", Name(e.target), "'s ", HGName(e.hitgroup),
+        string.format(" for %d(%d) (%d remaining) aimed=", Int(e.damage), d.aim_dmg or 0,
+            math.max(0, Int(entity.get_prop(e.target, "m_iHealth")))),
+        HGName(d.aim_hg), string.format("(%d%%)", Int(d.hc)))
+    Tail(segs, d, d.s64 and REC[d.s64], false)
     Print(segs)
 end
 
@@ -4082,18 +4075,18 @@ local function Miss(e, d)
     local segs = {}
     Head(segs, e.id, d.lg)
     if d.lg_out == "server" then
-        Add(segs, C_HIT, "Hit ", ACCENT, Name(e.target), C_TXT, " on the server", C_DIM, " (the client reported a miss)")
-        Tail(segs, d, d.s64 and REC[d.s64], false, false)
+        Add(segs, "Hit ", Name(e.target), " on the server (the client reported a miss)")
+        Tail(segs, d, d.s64 and REC[d.s64], false)
         return Print(segs)
     end
     local reason = e.reason or "?"
     local blame = d.lg_res == true
-    Add(segs, C_MISS, "Missed ", ACCENT, Name(e.target), C_TXT, "'s ", ACCENT, HGName(e.hitgroup or d.aim_hg),
-        C_DIM, string.format("(%d)(%d%%)", d.aim_dmg or 0, Int(d.hc)),
-        C_TXT, " due to ", blame and C_MISS or C_TXT, (reason == "?" or reason == "") and "resolver" or reason)
-    if ang then Add(segs, C_DIM, string.format(":%.2f°", ang)) end
-    if d.lg_out == "late" then Add(segs, C_DIM, " (late, not counted)") end
-    Tail(segs, d, d.s64 and REC[d.s64], blame, true)
+    Add(segs, "Missed ", Name(e.target), "'s ", HGName(e.hitgroup or d.aim_hg),
+        string.format("(%d)(%d%%) due to ", d.aim_dmg or 0, Int(d.hc)),
+        (reason == "?" or reason == "") and "resolver" or reason)
+    if ang then Add(segs, string.format(":%.2f°", ang)) end
+    if d.lg_out == "late" then Add(segs, " (late, not counted)") end
+    Tail(segs, d, d.s64 and REC[d.s64], blame)
     Print(segs)
 end
 
@@ -4108,8 +4101,7 @@ local function Hurt(e)
     local victim = client.userid_to_entindex(e.userid)
     if not victim or victim == me then return end
     local segs = {}
-    Add(segs, C_HIT, verb .. " ", ACCENT, Name(victim), C_TXT, " for ", ACCENT, tostring(Int(e.dmg_health)),
-        C_TXT, " damage (", ACCENT, tostring(Int(e.health)), C_TXT, " remaining)")
+    Add(segs, verb, " ", Name(victim), string.format(" for %d damage (%d remaining)", Int(e.dmg_health), Int(e.health)))
     Print(segs)
 end
 

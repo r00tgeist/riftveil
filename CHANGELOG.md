@@ -3,6 +3,13 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.17  – Shot log printed with print(), as the original "[MISC] aimbot
+          log" does, so gamesense shows it in the console AND the top-left
+          corner like its own logs; v8.16 used client.color_log. Plain
+          text, the original's look; the content is unchanged. Harness:
+          output captured from print, one string per line, color_log
+          flagged. A top-right on-screen box was built and dropped: the
+          top-left is where gamesense logs go.
   v8.16  – Console shot log (Indicators > Shot log, on once by default),
           in the format of the public "[MISC] aimbot log":
             [217] [244/251] Missed x's head(98)(76%) due to resolver:0.03°

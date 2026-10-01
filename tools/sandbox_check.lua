@@ -138,8 +138,8 @@ proxy = setmetatable({}, {
 
 local CALLBACKS, ESP_FLAGS, UI_CALLBACKS = {}, {}, {}
 local LOG_CAPTURE, LOG_SCANNED, ERR_LINES = {}, {}, {}
--- client.color_log: every call is checked (numbers, string); the text is
--- kept only while a test sets CONSOLE_ON, so the soak stays flat
+-- print / client.color_log: every call is checked; the text is kept only
+-- while a test sets CONSOLE_ON, so the soak stays flat
 local CONSOLE, CONSOLE_ON, CONSOLE_BAD = {}, false, {}
 
 -- UI elements carry their kind so ui.get returns the right shape.
@@ -183,14 +183,10 @@ local mock = {
         if k == "register_esp_flag"  then return function(_, _, _, _, cb) ESP_FLAGS[#ESP_FLAGS + 1] = cb end end
         if k == "set_event_callback" then return function(name, cb) CALLBACKS[name] = cb end end
         if k == "log"                then return function() end end
-        if k == "color_log"          then return function(r, g, b, msg)
-            if not (type(r) == "number" and type(g) == "number" and type(b) == "number" and type(msg) == "string") then
-                if #CONSOLE_BAD < 4 then
-                    CONSOLE_BAD[#CONSOLE_BAD + 1] = string.format("color_log(%s, %s, %s, %s)", tostring(r), tostring(g), tostring(b), tostring(msg))
-                end
-            elseif CONSOLE_ON then
-                CONSOLE[#CONSOLE + 1] = msg
-            end
+        -- the shot log prints with print(), as the original aimbot log
+        -- does (console + top-left); color_log output stays in the console
+        if k == "color_log"          then return function()
+            if #CONSOLE_BAD < 4 then CONSOLE_BAD[#CONSOLE_BAD + 1] = "client.color_log (the shot log must use print)" end
         end end
         if k == "update_player_list" then return function() end end
         if k == "userid_to_entindex" then return function(u) return u end end
@@ -379,7 +375,15 @@ local mock = {
         LOG_CAPTURE[1] = content
     end,
     readfile  = function() return "" end,
-    print = print,
+    -- the shot log's output: one string per line, kept while CONSOLE_ON
+    print = function(...)
+        local n, msg = select("#", ...), (...)
+        if n ~= 1 or type(msg) ~= "string" then
+            if #CONSOLE_BAD < 4 then CONSOLE_BAD[#CONSOLE_BAD + 1] = "print() with " .. n .. " args, first " .. type(msg) end
+        elseif CONSOLE_ON then
+            CONSOLE[#CONSOLE + 1] = msg
+        end
+    end,
     string = string, table = table, math = math, pairs = pairs, ipairs = ipairs,
     tostring = tostring, tonumber = tonumber, type = type, select = select,
     pcall = pcall, setmetatable = setmetatable, error = error, next = next,
@@ -1251,7 +1255,7 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     end
 end
 
--- SHOT LOG (Indicators > Shot log): one console line per shot in the
+-- SHOT LOG (Indicators > Shot log): one print() line per shot in the
 -- "[id] [fire/now] Missed x's head(98)(76%) due to spread:2.00°" format,
 -- who resolved the target (from the player list), each shot's own impacts
 -- for the angle (double tap included), grenade damage, and nothing at all
@@ -1346,7 +1350,7 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     else
         UNIT_FAIL[#UNIT_FAIL + 1] = "shot log test: IND / REC[101] not reachable"
     end
-    if #CONSOLE_BAD > 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "shot log: bad color_log call " .. CONSOLE_BAD[1] end
+    if #CONSOLE_BAD > 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "shot log: bad output call " .. CONSOLE_BAD[1] end
 end
 
 -- Defensive frames: a frame whose simulation time is below the highest
