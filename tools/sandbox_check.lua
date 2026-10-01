@@ -141,6 +141,7 @@ local LOG_CAPTURE, LOG_SCANNED, ERR_LINES = {}, {}, {}
 -- print / client.color_log: every call is checked; the text is kept only
 -- while a test sets CONSOLE_ON, so the soak stays flat
 local CONSOLE, CONSOLE_ON, CONSOLE_BAD = {}, false, {}
+local SCREEN = {}   -- renderer.text strings while CONSOLE_ON
 
 -- UI elements carry their kind so ui.get returns the right shape.
 local UI_ELEMS = {}
@@ -361,6 +362,9 @@ local mock = {
     renderer = setmetatable({}, {__index = function(_, k)
         if k == "measure_text"   then return function(_, text) return #tostring(text or "") * 6, 12 end end
         if k == "world_to_screen" then return function() return 500, 500 end end
+        if k == "text" then return function(...)
+            if CONSOLE_ON then SCREEN[#SCREEN + 1] = tostring(select(9, ...)) end
+        end end
         return function() end
     end}),
     writefile = function(name, content)
@@ -1351,6 +1355,44 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         UNIT_FAIL[#UNIT_FAIL + 1] = "shot log test: IND / REC[101] not reachable"
     end
     if #CONSOLE_BAD > 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "shot log: bad output call " .. CONSOLE_BAD[1] end
+end
+
+-- LOCAL LAGCOMP BOX: our record is the origin of the last command sent;
+-- it trails us while we choke, breaks lag compensation past 64 units,
+-- is dropped after 1 s, and nothing happens with the option off
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local IND_T, LC = probe("IND"), probe("LOCALLC")
+    if IND_T and LC then
+        local lc0, p0 = IND_T.lc, W.players[1]
+        IND_T.lc = true
+        W.players[1] = {vx = 0, jump = 0}
+        local function cmd(choked, x) W.players[1].jump = x; fire("setup_command", {chokedcommands = choked}) end
+        local function label()
+            for i = #SCREEN, 1, -1 do SCREEN[i] = nil end
+            CONSOLE_ON = true; fire("paint"); CONSOLE_ON = false
+            for _, t in ipairs(SCREEN) do if t:find("LAGCOMP", 1, true) or t:find("%du") then return t end end
+            return nil
+        end
+        cmd(0, 0)
+        cmd(1, 10); cmd(2, 30)
+        if label() ~= "30u  2t" then UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: trailing label " .. tostring(label()) .. ", expected 30u  2t" end
+        cmd(0, 30)
+        if LC.S.broken or LC.S.x ~= 30 then UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: a 30u step counted as broken / record not taken" end
+        if label() ~= nil then UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: drawn while the record is on us" end
+        cmd(0, 130)                      -- 100u between two sent records
+        cmd(2, 150)
+        if not LC.S.broken then UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: a 100u jump between records not broken" end
+        if label() ~= "LAGCOMP  2t" then UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: broken label " .. tostring(label()) end
+        W.real = W.real + 2
+        if label() ~= nil then UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: a record older than 1 s still drawn" end
+        IND_T.lc = false
+        local x0 = LC.S.x
+        cmd(0, 400)
+        if LC.S.x ~= x0 or label() ~= nil then UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp: ran with the option off" end
+        IND_T.lc, W.players[1] = lc0, p0
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "local lagcomp test: IND / LOCALLC not reachable"
+    end
 end
 
 -- Defensive frames: a frame whose simulation time is below the highest

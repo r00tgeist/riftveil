@@ -28,7 +28,7 @@ same side with the same value as v6.2 (`tools/check_all.sh`, step 7).
 | **Resolver** | Master switch. Off releases every player back to the built-in resolver. |
 | **Detection** | Vulnerability windows, Hit memory, Desync angle (6lex), Cheat profiles, Weapon aim. |
 | **Tight interpolation** | Low-latency interp cvars while the resolver is on; originals restored when off. |
-| **Indicators** | Info panel, ESP flags (`VLN`, `RES`, aim policy `BODY` / `HEAD` / `HEAD SP` / `SAFE PT`, enemy cheat), SHIFT marker, Shot log (below). |
+| **Indicators** | Info panel, ESP flags (`VLN`, `RES`, aim policy `BODY` / `HEAD` / `HEAD SP` / `SAFE PT`, enemy cheat), SHIFT marker, Shot log (below), Local lagcomp (below). |
 | **Debug log** | Verbose `riftveil_debug.txt` (the log is always written; this adds per-tick detail). |
 
 The accent follows gamesense's own *Menu color*; drag the panel by its
@@ -76,6 +76,19 @@ bullets don't mix. A result that comes back after 0.5 s says `(late, not
 counted)`; a miss the server's hit counter disproves says `Hit x on the
 server`. The debug file keeps its own lines for `tools/log_report.lua`.
 Turn off other aimbot-log scripts to avoid duplicate lines.
+
+## Local lagcomp box
+
+Where the server, and every enemy's lag compensation, has **you**. While
+fakelag chokes or double tap shifts, the server only has the position of the
+last command you actually sent; the box is your hull there, with a line to
+where you stand now (third person).
+
+- **Amber, `30u  2t`:** the record trails you by 30 units, 2 commands choked.
+- **Green, `LAGCOMP`:** your last two sent records are more than 64 units
+  apart (the same check as the enemy SHIFT marker): lag compensation is
+  broken and enemies can't backtrack you between them.
+- Nothing is drawn while the record is on you, or once it's over 1 s old.
 
 ## Weapon aim
 

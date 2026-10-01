@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.17"
+local RV_VERSION = "8.18"
 
 local ffi = require "ffi"
 
@@ -932,13 +932,13 @@ end
 
 local DET_KEYS  = {["Vulnerability"] = "vuln", ["Hit memory"] = "hitmem", ["Desync angle"] = "six",
                    ["Cheat profiles"] = "cheat", ["Weapon aim"] = "aim"}
-local IND_KEYS  = {["Info panel"] = "panel", ["ESP flags"] = "esp", ["Shift marker"] = "shift", ["Shot log"] = "log"}
+local IND_KEYS  = {["Info panel"] = "panel", ["ESP flags"] = "esp", ["Shift marker"] = "shift", ["Shot log"] = "log", ["Local lagcomp"] = "lc"}
 
 local ui_title  = ui.new_label      ("LUA", "B", TitleText())
 local ui_on     = ui.new_checkbox   ("LUA", "B", "Resolver\nriftveil")
 local ui_detect = ui.new_multiselect("LUA", "B", "Detection\nriftveil", {"Vulnerability", "Hit memory", "Desync angle", "Cheat profiles", "Weapon aim"})
 local ui_tight  = ui.new_checkbox   ("LUA", "B", "Tight interpolation\nriftveil")
-local ui_ind    = ui.new_multiselect("LUA", "B", "Indicators\nriftveil", {"Info panel", "ESP flags", "Shift marker", "Shot log"})
+local ui_ind    = ui.new_multiselect("LUA", "B", "Indicators\nriftveil", {"Info panel", "ESP flags", "Shift marker", "Shot log", "Local lagcomp"})
 local ui_verb   = ui.new_checkbox   ("LUA", "B", "Debug log\nriftveil")
 
 -- First run of the v7.1 layout only. The renamed elements start empty, and
@@ -990,11 +990,22 @@ if not database.read("riftveil_ui_defaults_v816") then
     database.write("riftveil_ui_defaults_v816", true)
 end
 
+-- v8.18: "Local lagcomp" (LOCAL LAGCOMP BOX) added once.
+if not database.read("riftveil_ui_defaults_v818") then
+    local sel = ui.get(ui_ind)
+    sel = type(sel) == "table" and sel or {}
+    local copy, has = {}, false
+    for i = 1, #sel do copy[i] = sel[i]; if sel[i] == "Local lagcomp" then has = true end end
+    if not has then copy[#copy + 1] = "Local lagcomp" end
+    ui.set(ui_ind, copy)
+    database.write("riftveil_ui_defaults_v818", true)
+end
+
 -- Multiselect values cached as booleans: ui.get on a multiselect builds a
 -- fresh table, and ProcessPlayer/paint would otherwise pay for that on
 -- every read. Refreshed by the callbacks below and once per net update.
 local DET = {vuln = false, hitmem = false, six = false, cheat = false, aim = false, verbose = false}
-local IND = {panel = false, esp = false, shift = false, log = false}
+local IND = {panel = false, esp = false, shift = false, log = false, lc = false}
 local function ReadMulti(ref, keys, out)
     for _, k in pairs(keys) do out[k] = false end
     local sel = ui.get(ref)
@@ -4109,6 +4120,95 @@ return {Fire = Fire, Impact = Impact, Hit = Hit, Miss = Miss, Hurt = Hurt, Claim
 end)() -- shot log scope
 
 
+-- ══════════════════════════════════════════════════════════════════
+--  LOCAL LAGCOMP BOX  (Indicators > Local lagcomp)
+--
+--  Where the server -- and every enemy's lag compensation -- has US. The
+--  server simulates our commands only when a packet arrives, so while
+--  fakelag chokes or double tap shifts, our record stays at the origin of
+--  the last command we actually sent. In setup_command, chokedcommands == 0
+--  means the previous command just went out: our origin at that moment is
+--  the record. The box is our hull there, tethered to where we stand now.
+--
+--  Two consecutive sent records more than 64 units apart (4096 squared,
+--  horizontal -- the same check as the enemy SHIFT marker and the public
+--  lagcomp scripts) mean lag compensation is broken: enemies can't
+--  backtrack us between them. The box turns green and says LAGCOMP; a
+--  record that only trails us is amber with the distance. Nothing is
+--  drawn while the record is on us (under 2 units) or older than 1 s.
+--  Visible in third person; in first person the box sits around the
+--  camera.
+-- ══════════════════════════════════════════════════════════════════
+local LOCALLC = (function()
+local C_BROKEN, C_TRAIL = {120, 220, 110}, {220, 168, 72}
+local EDGES = {{1, 2}, {2, 3}, {3, 4}, {4, 1}, {5, 6}, {6, 7}, {7, 8}, {8, 5}, {1, 5}, {2, 6}, {3, 7}, {4, 8}}
+local S = {x = nil, y = nil, z = nil, t = 0, broken = false, ticks = 0}
+
+-- setup_command: record our origin each time a packet has just been sent
+local function OnCommand(cmd)
+    if not IND.lc then return end
+    local me = entity.get_local_player()
+    if not (me and entity.is_alive(me)) then S.x = nil; return end
+    local choked = cmd and tonumber(cmd.chokedcommands)
+    if choked == nil then choked = tonumber(globals.chokedcommands()) or 0 end
+    if choked ~= 0 then S.ticks = choked; return end
+    local x, y, z = entity.get_origin(me)
+    if not (isnum(x) and isnum(y) and isnum(z)) then return end
+    if S.x then
+        local dx, dy = x - S.x, y - S.y
+        S.broken = dx * dx + dy * dy > 4096
+    else
+        S.broken = false
+    end
+    S.x, S.y, S.z, S.t, S.ticks = x, y, z, globals.realtime(), 0
+end
+
+local function Draw()
+    if not (IND.lc and S.x) then return end
+    if globals.realtime() - S.t > 1 then return end
+    local me = entity.get_local_player()
+    if not (me and entity.is_alive(me)) then return end
+    local cx, cy, cz = entity.get_origin(me)
+    if not (isnum(cx) and isnum(cy) and isnum(cz)) then return end
+    local dx, dy, dz = cx - S.x, cy - S.y, cz - S.z
+    local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if dist < 2 then return end
+    local mnx, mny, mnz = entity.get_prop(me, "m_vecMins")
+    local mxx, mxy, mxz = entity.get_prop(me, "m_vecMaxs")
+    if not (isnum(mnx) and isnum(mxx) and isnum(mnz) and isnum(mxz)) then return end
+    local c = S.broken and C_BROKEN or C_TRAIL
+    local P = {
+        {S.x + mnx, S.y + mny, S.z + mnz}, {S.x + mxx, S.y + mny, S.z + mnz},
+        {S.x + mxx, S.y + mxy, S.z + mnz}, {S.x + mnx, S.y + mxy, S.z + mnz},
+        {S.x + mnx, S.y + mny, S.z + mxz}, {S.x + mxx, S.y + mny, S.z + mxz},
+        {S.x + mxx, S.y + mxy, S.z + mxz}, {S.x + mnx, S.y + mxy, S.z + mxz},
+    }
+    local scr = {}
+    for i = 1, 8 do
+        local sx, sy = renderer.world_to_screen(P[i][1], P[i][2], P[i][3])
+        if sx then scr[i] = {sx, sy} end
+    end
+    for i = 1, #EDGES do
+        local a, b = scr[EDGES[i][1]], scr[EDGES[i][2]]
+        if a and b then renderer.line(a[1], a[2], b[1], b[2], c[1], c[2], c[3], 220) end
+    end
+    -- tether: box centre to where we stand
+    local mz = (mnz + mxz) / 2
+    local bx, by = renderer.world_to_screen(S.x, S.y, S.z + mz)
+    local ox, oy = renderer.world_to_screen(cx, cy, cz + mz)
+    if bx and ox then renderer.line(bx, by, ox, oy, c[1], c[2], c[3], 140) end
+    local tx, ty = renderer.world_to_screen(S.x, S.y, S.z + mxz + 6)
+    if tx then
+        local label = S.broken and "LAGCOMP" or string.format("%du", math.floor(dist + 0.5))
+        if S.ticks > 0 then label = label .. string.format("  %dt", S.ticks) end
+        renderer.text(tx, ty, c[1], c[2], c[3], 255, "-c", 0, label)
+    end
+end
+
+return {OnCommand = OnCommand, Draw = Draw, S = S}
+end)() -- local lagcomp scope
+
+
 -- Read by the info panel and ESP flags (paint runs every frame; these only
 -- change once per net update or on a shot event).
 local ESP_VLN, ESP_RES, ESP_AIM = {}, {}, {}   -- ESP_AIM: aim policy tag
@@ -5149,6 +5249,8 @@ return function()
         ACCENT_VER = ACCENT_VER + 1
         ui.set(ui_title, TitleText())
     end
+    -- before the master switch: it's about us, not the resolver
+    LOCALLC.Draw()
     if not ui.get(ui_on) then return end
     -- Threat as read once per tick in Update, not queried every frame.
     if IND.panel then DrawPanel(CTX.threat) end
@@ -5291,6 +5393,7 @@ client.set_event_callback("aim_hit",     Instrument("aim_hit", on_aim_hit))
 -- grenade / fire / knife damage
 client.set_event_callback("bullet_impact", Instrument("bullet_impact", SHOTLOG.Impact))
 client.set_event_callback("player_hurt",   Instrument("player_hurt", SHOTLOG.Hurt))
+client.set_event_callback("setup_command", Instrument("setup_command", LOCALLC.OnCommand))
 -- The log also reaches disk every round, so a match with the debug log
 -- off still leaves its shots on disk.
 client.set_event_callback("round_start", Instrument("round_start", function()

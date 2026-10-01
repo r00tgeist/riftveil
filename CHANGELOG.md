@@ -3,6 +3,16 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.18  – Local lagcomp box (Indicators > Local lagcomp, on once). The
+          repo's lagcomp box scripts (lagcomp-box-gs and copies) box
+          enemies only; this is ours. setup_command with chokedcommands 0
+          = the previous command was sent: our origin then is the server
+          record. Drawn as our hull there with a tether to where we stand;
+          amber with distance and choked count while it trails, green
+          LAGCOMP when two sent records are > 64u apart (4096 squared,
+          the enemy marker's check). Hidden on us (< 2u) or after 1 s.
+          Harness: trailing, 30u step, 100u break, expiry, option off;
+          mutation-checked.
   v8.17  – Shot log printed with print(), as the original "[MISC] aimbot
           log" does, so gamesense shows it in the console AND the top-left
           corner like its own logs; v8.16 used client.color_log. Plain
