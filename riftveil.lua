@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.15"
+local RV_VERSION = "8.16"
 
 local ffi = require "ffi"
 
@@ -932,13 +932,13 @@ end
 
 local DET_KEYS  = {["Vulnerability"] = "vuln", ["Hit memory"] = "hitmem", ["Desync angle"] = "six",
                    ["Cheat profiles"] = "cheat", ["Weapon aim"] = "aim"}
-local IND_KEYS  = {["Info panel"] = "panel", ["ESP flags"] = "esp", ["Shift marker"] = "shift"}
+local IND_KEYS  = {["Info panel"] = "panel", ["ESP flags"] = "esp", ["Shift marker"] = "shift", ["Shot log"] = "log"}
 
 local ui_title  = ui.new_label      ("LUA", "B", TitleText())
 local ui_on     = ui.new_checkbox   ("LUA", "B", "Resolver\nriftveil")
 local ui_detect = ui.new_multiselect("LUA", "B", "Detection\nriftveil", {"Vulnerability", "Hit memory", "Desync angle", "Cheat profiles", "Weapon aim"})
 local ui_tight  = ui.new_checkbox   ("LUA", "B", "Tight interpolation\nriftveil")
-local ui_ind    = ui.new_multiselect("LUA", "B", "Indicators\nriftveil", {"Info panel", "ESP flags", "Shift marker"})
+local ui_ind    = ui.new_multiselect("LUA", "B", "Indicators\nriftveil", {"Info panel", "ESP flags", "Shift marker", "Shot log"})
 local ui_verb   = ui.new_checkbox   ("LUA", "B", "Debug log\nriftveil")
 
 -- First run of the v7.1 layout only. The renamed elements start empty, and
@@ -979,11 +979,22 @@ if not database.read("riftveil_ui_defaults_v83") then
     database.write("riftveil_ui_defaults_v83", true)
 end
 
+-- v8.16: "Shot log" (SHOT LOG, the console line per shot) added once.
+if not database.read("riftveil_ui_defaults_v816") then
+    local sel = ui.get(ui_ind)
+    sel = type(sel) == "table" and sel or {}
+    local copy, has = {}, false
+    for i = 1, #sel do copy[i] = sel[i]; if sel[i] == "Shot log" then has = true end end
+    if not has then copy[#copy + 1] = "Shot log" end
+    ui.set(ui_ind, copy)
+    database.write("riftveil_ui_defaults_v816", true)
+end
+
 -- Multiselect values cached as booleans: ui.get on a multiselect builds a
 -- fresh table, and ProcessPlayer/paint would otherwise pay for that on
 -- every read. Refreshed by the callbacks below and once per net update.
 local DET = {vuln = false, hitmem = false, six = false, cheat = false, aim = false, verbose = false}
-local IND = {panel = false, esp = false, shift = false}
+local IND = {panel = false, esp = false, shift = false, log = false}
 local function ReadMulti(ref, keys, out)
     for _, k in pairs(keys) do out[k] = false end
     local sel = ui.get(ref)
@@ -3763,6 +3774,13 @@ local function XwayAfterMiss(rec, now)
     return dt >= 0 and dt < XWAY_WINDOW
 end
 
+-- Our side is in doubt for this enemy: two resolver misses in a row
+-- outside a vulnerability window, or the x-way case above. Shared with
+-- the shot log's "next=sp" so the two can't disagree.
+local function InDoubt(rec, now)
+    return ((rec.aim_miss_streak or 0) >= 2 and rec.vuln_ttl == 0) or XwayAfterMiss(rec, now)
+end
+
 -- The decision itself, on numbers only (unit-tested in the harness).
 --   hp: enemy health; head, body: traced damage after calibration;
 --   dt2: a charged double tap fires two shots; unsure: our side is in
@@ -3850,8 +3868,7 @@ local function Tick(tc, threat, ti)
             local hp = tonumber(entity.get_prop(ent, "m_iHealth"))
             -- vuln windows don't exempt the x-way case: vuln shots there
             -- went 10 of 25 (40%)
-            local unsure = ((rec.aim_miss_streak or 0) >= 2 and rec.vuln_ttl == 0)
-                or XwayAfterMiss(rec, now)
+            local unsure = InDoubt(rec, now)
             local air = rec.state == STATE.AIR or rec.state == STATE.AIR_CROUCH
             pol = Decide(hp, (rec.aim_th or 0) * CAL.fh, (rec.aim_tb or 0) * CAL.fb, dt2, unsure, air)
         end
@@ -3868,8 +3885,236 @@ local function Reset(ent)
 end
 
 return {Tick = Tick, Decide = Decide, OnFire = OnFire, Reset = Reset, Write = Write, CAL = CAL, VAL_OK = VAL_OK,
-        XwayAfterMiss = XwayAfterMiss}
+        XwayAfterMiss = XwayAfterMiss, InDoubt = InDoubt}
 end)() -- aim policy scope
+
+
+-- ══════════════════════════════════════════════════════════════════
+--  SHOT LOG  (Indicators > Shot log)
+--
+--  One console line per ragebot shot, in the format of the public
+--  "[MISC] aimbot log" (s0daa/CSGO-HVH-LUAS), with what RIFTVEIL did:
+--
+--   [217] [244/251] Missed moral's head(98)(76%) due to resolver:0.03° · RIFTVEIL vuln_lby -24° [aa=5way | cf=62% | cht=nl | streak=1 | lc=0 | tc=1]
+--   [218] [260/266] Hit moral's head for 98(98) (0 remaining) aimed=head(81%) · RIFTVEIL hit_mem +31° [aa=hold | cf=70% | pol=head | lc=1 | tc=2]
+--   [219] [301/307] Missed moral's chest(34)(70%) due to spread:1.84° · GAMESENSE resolver [aa=2way | cf=40% | lc=0 | tc=0]
+--
+--  [217] the ragebot's shot id. [244/251] the tick of the record it fired
+--  at / the tick the result arrived, both mod 1000: the gap is backtrack
+--  plus ping. head(98)(76%) aimed hitgroup, predicted damage, hit chance.
+--  :0.03° the angle between where it aimed and where the bullet went --
+--  near 0 on a resolver miss (the bullet went where it was sent), wide on
+--  spread. Then who resolved the target for that shot, read from the
+--  player list as the shot left: RIFTVEIL with its method and the body yaw
+--  it forced, or GAMESENSE's own resolver -- red when it's the one that
+--  missed. In brackets: AA type, confidence, enemy cheat, aim policy, safe
+--  point (on / off from the player list, key = Force safe point held),
+--  aim_fire flags (T teleported, I interpolated, E extrapolated, B accuracy
+--  boost, H high priority; D our defensive read on them), on a resolver
+--  miss the run of them and next=sp when the aim policy goes to safe point
+--  for the next shot, and our / their choked commands (lc / tc).
+--
+--  The original matched the impact by tick, which misses whenever the
+--  impact and the result land on different ticks; here each shot claims
+--  its own impacts (ClaimAngle). Console only: the debug file's [hit] /
+--  [miss] lines, which log_report reads, are unchanged.
+-- ══════════════════════════════════════════════════════════════════
+local SHOTLOG = (function()
+local C_DIM, C_TXT = {125, 125, 125}, {215, 215, 215}
+local C_HIT, C_MISS, C_GS = {150, 220, 110}, {255, 95, 95}, {200, 200, 200}
+local FLAG_OUT = {t = "T", i = "I", x = "E", b = "B", p = "H", d = "D"}
+local VERB = {hegrenade = "Naded", inferno = "Burned", knife = "Knifed"}
+local FORCE_SP
+do
+    local ok, ref = pcall(ui.reference, "RAGE", "Aimbot", "Force safe point")
+    if ok then FORCE_SP = ref end
+end
+
+local IMP = {}   -- our bullet impacts, oldest first: {t, x, y, z, claimed}
+
+local function Int(x) return isnum(x) and math.floor(x + 0.5) or 0 end
+local function Name(ent) return entity.get_player_name(ent) or "?" end
+local function HGName(hg) return HG[(tonumber(hg) or -1) + 1] or "?" end
+local function PGet(ent, field)
+    local ok, v = pcall(plist.get, ent, field)
+    if ok then return v end
+end
+
+-- segs: color, text, color, text, ...; gamesense keeps a color_log line
+-- open while the text ends in "\0"
+local function Add(segs, ...)
+    local n = #segs
+    for i = 1, select("#", ...) do segs[n + i] = (select(i, ...)) end
+end
+local function Print(segs)
+    local n = #segs
+    for i = 1, n, 2 do
+        local c = segs[i]
+        client.color_log(c[1], c[2], c[3], (i + 1 < n) and (segs[i + 1] .. "\0") or segs[i + 1])
+    end
+end
+
+local function Dir(ox, oy, oz, x, y, z)
+    if not (isnum(ox) and isnum(oy) and isnum(oz) and isnum(x) and isnum(y) and isnum(z)) then return nil end
+    local dx, dy, dz = x - ox, y - oy, z - oz
+    local l = math.sqrt(dx * dx + dy * dy + dz * dz)
+    if l < 1e-3 then return nil end
+    return dx / l, dy / l, dz / l
+end
+local function Angle(ax, ay, az, bx, by, bz)
+    return math.deg(math.acos(Clamp(ax * bx + ay * by + az * bz, -1, 1)))
+end
+
+-- This shot's deviation: the first impact we received after it left that
+-- no earlier shot has claimed, plus every other unclaimed impact on that
+-- same ray (the same bullet through a wall), so a double tap's second
+-- bullet can't take the first one's. Results arrive in shot order.
+local function ClaimAngle(lg)
+    local ax, ay, az = Dir(lg.ex, lg.ey, lg.ez, lg.ax, lg.ay, lg.az)
+    if not ax then return nil end
+    local fx, fy, fz
+    for i = 1, #IMP do
+        local m = IMP[i]
+        if not m.claimed and m.t >= lg.t then
+            local bx, by, bz = Dir(lg.ex, lg.ey, lg.ez, m.x, m.y, m.z)
+            if bx then
+                if not fx then
+                    fx, fy, fz = bx, by, bz; m.claimed = true
+                elseif Angle(fx, fy, fz, bx, by, bz) < 1 then
+                    m.claimed = true
+                end
+            end
+        end
+    end
+    return fx and Angle(ax, ay, az, fx, fy, fz) or nil
+end
+
+-- aim_fire, after SHOTS[e.id] is built: what the line needs that the
+-- debug log doesn't keep
+local function Fire(e, d, r)
+    if not IND.log then return end
+    local ex, ey, ez = client.eye_position()
+    local sp = PGet(e.target, "Override safe point")
+    sp = (sp == "On" and "on") or (sp == "Off" and "off") or nil
+    if not sp and FORCE_SP then
+        local ok, on = pcall(ui.get, FORCE_SP)
+        if ok and on == true then sp = "key" end
+    end
+    d.lg = {
+        t = globals.realtime(), rt = tonumber(e.tick) or globals.tickcount(),
+        ex = ex, ey = ey, ez = ez, ax = e.x, ay = e.y, az = e.z,
+        lc = tonumber(globals.chokedcommands()) or 0, tc = r and r.cur_choke or -1,
+        sp = sp,
+        -- who resolved this player for this shot: the player list itself,
+        -- not rec.last_meth (stale while the master switch is off)
+        forced = PGet(e.target, "Force body yaw") == true,
+        fval = PGet(e.target, "Force body yaw value"),
+    }
+end
+
+-- bullet_impact: ours only, unclaimed ones kept 2 s
+local function Impact(e)
+    if not IND.log then return end
+    local me = entity.get_local_player()
+    if not me or client.userid_to_entindex(e.userid) ~= me then return end
+    if not (isnum(e.x) and isnum(e.y) and isnum(e.z)) then return end
+    local now, n = globals.realtime(), 0
+    for i = 1, #IMP do
+        local m = IMP[i]
+        if not m.claimed and now - m.t < 2 then n = n + 1; IMP[n] = m end
+    end
+    for i = #IMP, n + 1, -1 do IMP[i] = nil end
+    if n < 64 then IMP[n + 1] = {t = now, x = e.x, y = e.y, z = e.z} end
+end
+
+local function Head(segs, id, lg)
+    Add(segs, C_DIM, "[", ACCENT, tostring(id), C_DIM,
+        string.format("] [%d/%d] ", lg.rt % 1000, globals.tickcount() % 1000))
+end
+
+local function Tail(segs, d, rec, blame, missed)
+    local lg = d.lg
+    local who, what
+    if lg.forced then
+        who = "RIFTVEIL"
+        what = string.format(" %s %+d°", d.meth or "?", Int(isnum(lg.fval) and lg.fval or d.val))
+    elseif d.cor == "0" then
+        who, what = "NO RESOLVER", " (correction off)"
+    else
+        who, what = "GAMESENSE", " resolver"
+    end
+    Add(segs, C_DIM, " · ", blame and C_MISS or (lg.forced and ACCENT or C_GS), who, C_TXT, what)
+    local p = {"aa=" .. (AA_SHORT[d.aa] or "?"), string.format("cf=%d%%", Int((d.conf or 0) * 100))}
+    if d.cheat then p[#p + 1] = "cht=" .. d.cheat end
+    if d.pol and d.pol ~= "-" then p[#p + 1] = "pol=" .. d.pol end
+    if lg.sp then p[#p + 1] = "sp=" .. lg.sp end
+    local fl = (d.fl or ""):gsub("%a", FLAG_OUT)
+    if fl ~= "" then p[#p + 1] = "fl=" .. fl end
+    if missed and blame and rec then
+        p[#p + 1] = "streak=" .. (rec.aim_miss_streak or 0)
+        if DET.aim and AIMX.InDoubt(rec, globals.realtime()) then p[#p + 1] = "next=sp" end
+    end
+    p[#p + 1] = "lc=" .. lg.lc
+    p[#p + 1] = "tc=" .. lg.tc
+    Add(segs, C_DIM, " [" .. table.concat(p, " | ") .. "]")
+end
+
+-- aim_hit, after on_aim_hit's own bookkeeping
+local function Hit(e, d)
+    if not (IND.log and d.lg) then return end
+    ClaimAngle(d.lg)   -- its impacts are this shot's: keep them from the next one
+    local segs = {}
+    Head(segs, e.id, d.lg)
+    Add(segs, C_HIT, "Hit ", ACCENT, Name(e.target), C_TXT, "'s ", ACCENT, HGName(e.hitgroup),
+        C_TXT, " for ", ACCENT, tostring(Int(e.damage)), C_DIM, "(" .. (d.aim_dmg or 0) .. ")",
+        C_TXT, " (", ACCENT, tostring(math.max(0, Int(entity.get_prop(e.target, "m_iHealth")))),
+        C_TXT, " remaining) aimed=", ACCENT, HGName(d.aim_hg), C_DIM, string.format("(%d%%)", Int(d.hc)))
+    Tail(segs, d, d.s64 and REC[d.s64], false, false)
+    Print(segs)
+end
+
+-- aim_miss, at each of on_aim_miss's exits. d.lg_out: "late" (result
+-- after 0.5 s, not counted) or "server" (the server's hit counter moved:
+-- it landed); d.lg_res: on_aim_miss counted it as a resolver miss.
+local function Miss(e, d)
+    if not (IND.log and d.lg) then return end
+    local ang = ClaimAngle(d.lg)
+    local segs = {}
+    Head(segs, e.id, d.lg)
+    if d.lg_out == "server" then
+        Add(segs, C_HIT, "Hit ", ACCENT, Name(e.target), C_TXT, " on the server", C_DIM, " (the client reported a miss)")
+        Tail(segs, d, d.s64 and REC[d.s64], false, false)
+        return Print(segs)
+    end
+    local reason = e.reason or "?"
+    local blame = d.lg_res == true
+    Add(segs, C_MISS, "Missed ", ACCENT, Name(e.target), C_TXT, "'s ", ACCENT, HGName(e.hitgroup or d.aim_hg),
+        C_DIM, string.format("(%d)(%d%%)", d.aim_dmg or 0, Int(d.hc)),
+        C_TXT, " due to ", blame and C_MISS or C_TXT, (reason == "?" or reason == "") and "resolver" or reason)
+    if ang then Add(segs, C_DIM, string.format(":%.2f°", ang)) end
+    if d.lg_out == "late" then Add(segs, C_DIM, " (late, not counted)") end
+    Tail(segs, d, d.s64 and REC[d.s64], blame, true)
+    Print(segs)
+end
+
+-- player_hurt: grenade, fire and knife damage, which the ragebot's events
+-- don't cover (the original's "Naded x for 34 damage (66 remaining)")
+local function Hurt(e)
+    if not IND.log then return end
+    local verb = VERB[e.weapon]
+    if not verb or (tonumber(e.hitgroup) or 0) ~= 0 then return end
+    local me = entity.get_local_player()
+    if not me or client.userid_to_entindex(e.attacker) ~= me then return end
+    local victim = client.userid_to_entindex(e.userid)
+    if not victim or victim == me then return end
+    local segs = {}
+    Add(segs, C_HIT, verb .. " ", ACCENT, Name(victim), C_TXT, " for ", ACCENT, tostring(Int(e.dmg_health)),
+        C_TXT, " damage (", ACCENT, tostring(Int(e.health)), C_TXT, " remaining)")
+    Print(segs)
+end
+
+return {Fire = Fire, Impact = Impact, Hit = Hit, Miss = Miss, Hurt = Hurt, ClaimAngle = ClaimAngle, IMP = IMP}
+end)() -- shot log scope
 
 
 -- Read by the info panel and ESP flags (paint runs every frame; these only
@@ -4102,6 +4347,7 @@ local function on_aim_fire(e)
         prv     = r and r.last_outcome or "-",
     }
     if r then r.last_fire_t = globals.realtime(); r.last_outcome = "-" end
+    SHOTLOG.Fire(e, SHOTS[e.id], r)
     -- Credit a vuln_profile "seen" (trial) here, once per actual shot fired
     -- during an open vuln window -- not once per detection (see the
     -- comment at the DetectVuln call site in ProcessPlayer for why).
@@ -4223,6 +4469,7 @@ local function on_aim_hit(e)
         AA_SHORT[d.aa] or "?",
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
+    SHOTLOG.Hit(e, d)
     SHOTS[e.id] = nil
 end
 
@@ -4273,6 +4520,8 @@ local function on_aim_miss(e)
                 is_timeout and "timeout" or "dmg_rejected", d.meth, d.val,
                 is_dmg_rejected and "credited as total_hits" or "not counted")
         end
+        d.lg_out = is_timeout and "late" or "server"
+        SHOTLOG.Miss(e, d)
         SHOTS[e.id] = nil
         return
     end
@@ -4283,6 +4532,7 @@ local function on_aim_miss(e)
     end
 
     local is_resolver = reason == "?" or reason == "" or reason == "prediction error"
+    d.lg_res = is_resolver
     do
         local ro = d.s64 and REC[d.s64]
         if ro then ro.last_outcome = is_resolver and "m" or "o" end
@@ -4320,6 +4570,7 @@ local function on_aim_miss(e)
                         entity.get_player_name(e.target) or "?", rec.builtin_miss_streak)
                 end
                 -- Built-in missed: don't corrupt our flip/hit_mem/conf data
+                SHOTLOG.Miss(e, d)
                 SHOTS[e.id] = nil
                 return
             end
@@ -4396,6 +4647,7 @@ local function on_aim_miss(e)
             end
         end
     end
+    SHOTLOG.Miss(e, d)
     SHOTS[e.id] = nil
 end
 
@@ -5043,6 +5295,10 @@ client.set_event_callback("paint",       Instrument("paint", DrawOverlay))
 client.set_event_callback("aim_fire",    Instrument("aim_fire", on_aim_fire))
 client.set_event_callback("aim_miss",    Instrument("aim_miss", on_aim_miss))
 client.set_event_callback("aim_hit",     Instrument("aim_hit", on_aim_hit))
+-- Shot log (console): our bullet impacts for the spread angle, and
+-- grenade / fire / knife damage
+client.set_event_callback("bullet_impact", Instrument("bullet_impact", SHOTLOG.Impact))
+client.set_event_callback("player_hurt",   Instrument("player_hurt", SHOTLOG.Hurt))
 -- The log also reaches disk every round, so a match with the debug log
 -- off still leaves its shots on disk.
 client.set_event_callback("round_start", Instrument("round_start", function()

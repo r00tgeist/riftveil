@@ -138,6 +138,9 @@ proxy = setmetatable({}, {
 
 local CALLBACKS, ESP_FLAGS, UI_CALLBACKS = {}, {}, {}
 local LOG_CAPTURE, LOG_SCANNED, ERR_LINES = {}, {}, {}
+-- client.color_log: every call is checked (numbers, string); the text is
+-- kept only while a test sets CONSOLE_ON, so the soak stays flat
+local CONSOLE, CONSOLE_ON, CONSOLE_BAD = {}, false, {}
 
 -- UI elements carry their kind so ui.get returns the right shape.
 local UI_ELEMS = {}
@@ -180,6 +183,15 @@ local mock = {
         if k == "register_esp_flag"  then return function(_, _, _, _, cb) ESP_FLAGS[#ESP_FLAGS + 1] = cb end end
         if k == "set_event_callback" then return function(name, cb) CALLBACKS[name] = cb end end
         if k == "log"                then return function() end end
+        if k == "color_log"          then return function(r, g, b, msg)
+            if not (type(r) == "number" and type(g) == "number" and type(b) == "number" and type(msg) == "string") then
+                if #CONSOLE_BAD < 4 then
+                    CONSOLE_BAD[#CONSOLE_BAD + 1] = string.format("color_log(%s, %s, %s, %s)", tostring(r), tostring(g), tostring(b), tostring(msg))
+                end
+            elseif CONSOLE_ON then
+                CONSOLE[#CONSOLE + 1] = msg
+            end
+        end end
         if k == "update_player_list" then return function() end end
         if k == "userid_to_entindex" then return function(u) return u end end
         return function() return nil end
@@ -1237,6 +1249,104 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     else
         UNIT_FAIL[#UNIT_FAIL + 1] = "x-way test: AIMX.XwayAfterMiss / FEATURE / REC[101] not reachable"
     end
+end
+
+-- SHOT LOG (Indicators > Shot log): one console line per shot in the
+-- "[id] [fire/now] Missed x's head(98)(76%) due to spread:2.00°" format,
+-- who resolved the target (from the player list), each shot's own impacts
+-- for the angle (double tap included), grenade damage, and nothing at all
+-- with the option off.
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local IND_T, REC_T, EI = probe("IND"), probe("REC"), probe("EIDX_S64")
+    local rec = REC_T and EI and EI[101] and REC_T[EI[101]]
+    if IND_T and rec then
+        local log0 = IND_T.log
+        local keep = {}
+        for _, f in ipairs({"aa_type", "last_outcome", "last_fire_t", "aim_miss_streak"}) do keep[f] = rec[f] end
+        local PF = {"Force body yaw", "Force body yaw value", "Correction active"}
+        local pl0 = {}
+        for _, f in ipairs(PF) do pl0[f] = PLIST_STATE["101\t" .. f] end
+        local function plset(forced, val, cor)
+            PLIST_STATE["101\tForce body yaw"], PLIST_STATE["101\tForce body yaw value"] = forced, val
+            PLIST_STATE["101\tCorrection active"] = cor
+        end
+        local function lines(f)
+            for i = #CONSOLE, 1, -1 do CONSOLE[i] = nil end
+            CONSOLE_ON = true; f(); CONSOLE_ON = false
+            local out, cur = {}, {}
+            for _, m in ipairs(CONSOLE) do
+                if m:sub(-1) == "\0" then cur[#cur + 1] = m:sub(1, -2)
+                else cur[#cur + 1] = m; out[#out + 1] = table.concat(cur); cur = {} end
+            end
+            if #cur > 0 then out[#out + 1] = table.concat(cur) .. " <UNTERMINATED>" end
+            return out
+        end
+        local function want(tag, got, ...)
+            local line = got[1] or ""
+            if #got ~= 1 then UNIT_FAIL[#UNIT_FAIL + 1] = string.format("shot log %s: %d lines, expected 1", tag, #got) end
+            for _, s in ipairs({...}) do
+                if not line:find(s, 1, true) then
+                    UNIT_FAIL[#UNIT_FAIL + 1] = string.format("shot log %s: no %q in: %s", tag, s, line)
+                end
+            end
+        end
+        -- eye (0, 0, 64) in the mock; the ragebot aims at (1000, 0, 64)
+        local function shoot(id) fire("aim_fire", {id = id, target = 101, backtrack = 0, hit_chance = 76, hitgroup = 1,
+                                                    damage = 98, tick = 1244, x = 1000, y = 0, z = 64}) end
+        local function impact(x, y) W.real = W.real + 0.005; fire("bullet_impact", {userid = 1, x = x, y = y, z = 64}) end
+        local function miss(id, reason) fire("aim_miss", {id = id, target = 101, hitgroup = 1, reason = reason}) end
+        local t2 = 1000 * math.tan(math.rad(2))
+        IND_T.log = true
+        rec.aa_type = "5way"
+
+        plset(true, -24, false)
+        want("spread", lines(function() shoot(92001); impact(1000, t2); miss(92001, "spread") end),
+            "[92001] [244/", "Missed bot101's head(98)(76%) due to spread:2.00°", " · RIFTVEIL ", " -24°", "aa=5way", "lc=")
+
+        -- a resolver miss through a wall: two impacts on the aimed ray
+        rec.aa_type = "3way"
+        want("resolver", lines(function() shoot(92002); impact(500, 0); impact(1000, 0); miss(92002, "?") end),
+            "due to resolver:0.00°", " · RIFTVEIL ", "streak=", "next=sp")
+
+        -- double tap: the first bullet 3° off, the second on the ray --
+        -- each result takes its own impact
+        local dt = lines(function()
+            shoot(92003); shoot(92004)
+            impact(1000, 1000 * math.tan(math.rad(3))); impact(800, 0)
+            miss(92003, "spread"); miss(92004, "?")
+        end)
+        if not ((dt[1] or ""):find("spread:3.00°", 1, true) and (dt[2] or ""):find("resolver:0.00°", 1, true)) then
+            UNIT_FAIL[#UNIT_FAIL + 1] = "shot log double tap: " .. tostring(dt[1]) .. " / " .. tostring(dt[2])
+        end
+
+        plset(false, 0, true)
+        want("hit", lines(function() shoot(92005); impact(1000, 0)
+                fire("aim_hit", {id = 92005, target = 101, hitgroup = 1, damage = 98}) end),
+            "[92005] [244/", "Hit bot101's head for 98(98) (100 remaining) aimed=head(76%)", " · GAMESENSE resolver")
+        plset(false, 0, false)
+        want("no resolver", lines(function() shoot(92006); miss(92006, "?") end), "due to resolver", " · NO RESOLVER")
+
+        plset(true, 31, false)
+        want("late", lines(function() shoot(92007); W.real = W.real + 0.6; miss(92007, "spread") end), "(late, not counted)")
+        local srv0 = W.srv_hits
+        W.srv_hits = 0
+        want("server hit", lines(function() shoot(92008); W.srv_hits = 1; miss(92008, "?") end), "Hit bot101 on the server", " +31°")
+        W.srv_hits = srv0
+        want("grenade", lines(function()
+            fire("player_hurt", {attacker = 1, userid = 101, weapon = "hegrenade", hitgroup = 0, dmg_health = 34, health = 66})
+        end), "Naded bot101 for 34 damage (66 remaining)")
+
+        IND_T.log = false
+        local off = lines(function() shoot(92009); impact(1000, 0); miss(92009, "spread") end)
+        if #off > 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "shot log: printed with the option off: " .. off[1] end
+
+        IND_T.log = log0
+        for f, v in pairs(keep) do rec[f] = v end
+        for _, f in ipairs(PF) do PLIST_STATE["101\t" .. f] = pl0[f] end
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "shot log test: IND / REC[101] not reachable"
+    end
+    if #CONSOLE_BAD > 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "shot log: bad color_log call " .. CONSOLE_BAD[1] end
 end
 
 -- Defensive frames: a frame whose simulation time is below the highest

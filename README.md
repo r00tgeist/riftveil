@@ -28,7 +28,7 @@ same side with the same value as v6.2 (`tools/check_all.sh`, step 7).
 | **Resolver** | Master switch. Off releases every player back to the built-in resolver. |
 | **Detection** | Vulnerability windows, Hit memory, Desync angle (6lex), Cheat profiles, Weapon aim. |
 | **Tight interpolation** | Low-latency interp cvars while the resolver is on; originals restored when off. |
-| **Indicators** | Info panel, ESP flags (`VLN`, `RES`, aim policy `BODY` / `HEAD` / `HEAD SP` / `SAFE PT`, enemy cheat), SHIFT marker. |
+| **Indicators** | Info panel, ESP flags (`VLN`, `RES`, aim policy `BODY` / `HEAD` / `HEAD SP` / `SAFE PT`, enemy cheat), SHIFT marker, Shot log (console, below). |
 | **Debug log** | Verbose `riftveil_debug.txt` (the log is always written; this adds per-tick detail). |
 
 The accent follows gamesense's own *Menu color*; drag the panel by its
@@ -43,6 +43,37 @@ cheat profiles included).
 Status of every feature, what's waiting on a match log, and what comes
 next: `docs/ROADMAP.md`. What 5,220 public HvH scripts say about resolving
 and the anti-aim RIFTVEIL faces: `docs/REPO_SURVEY.md`. Earlier versions are kept in `versions/`.
+
+## Shot log (console)
+
+One coloured console line per ragebot shot, in the format of the public
+`[MISC] aimbot log` script, plus what the resolver did:
+
+```text
+[217] [244/251] Missed moral's head(98)(76%) due to resolver:0.03° · RIFTVEIL vuln_lby -24° [aa=5way | cf=62% | cht=nl | streak=1 | next=sp | lc=0 | tc=1]
+[218] [260/266] Hit moral's head for 98(98) (0 remaining) aimed=head(81%) · RIFTVEIL hit_mem +31° [aa=hold | cf=70% | pol=head | lc=1 | tc=2]
+[219] [301/307] Missed moral's chest(34)(70%) due to spread:1.84° · GAMESENSE resolver [aa=2way | cf=40% | fl=I | lc=0 | tc=0]
+Naded moral for 34 damage (66 remaining)
+```
+
+| Part | Meaning |
+|---|---|
+| `[217]` | the ragebot's shot id |
+| `[244/251]` | tick of the record it fired at / tick the result came back (mod 1000; the gap is backtrack + ping) |
+| `head(98)(76%)` | aimed hitgroup, predicted damage, hit chance |
+| `:0.03°` | angle between where it aimed and where the bullet went: near 0 on a resolver miss, wide on spread |
+| `RIFTVEIL vuln_lby -24°` | who resolved that player for that shot, read from the player list as the shot left: RIFTVEIL with its method and forced body yaw, or `GAMESENSE resolver` (released to the built-in); red when it's the one that missed |
+| `aa= cf= cht=` | AA type, confidence, enemy cheat |
+| `pol= sp=` | aim policy, safe point (`on` / `off` from the player list, `key` = Force safe point held) |
+| `fl=` | T teleported, I interpolated, E extrapolated, B accuracy boost, H high priority, D defensive |
+| `streak= next=sp` | resolver misses in a row on them; the aim policy goes to safe point for the next shot |
+| `lc= tc=` | our / their choked commands |
+
+Each shot takes its own bullet impacts for the angle, so a double tap's two
+bullets don't mix. A result that comes back after 0.5 s says `(late, not
+counted)`; a miss the server's hit counter disproves says `Hit x on the
+server`. The debug file keeps its own lines for `tools/log_report.lua`.
+Turn off other aimbot-log scripts to avoid duplicate lines.
 
 ## Weapon aim
 

@@ -3,6 +3,31 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.16  – Console shot log (Indicators > Shot log, on once by default),
+          in the format of the public "[MISC] aimbot log":
+            [217] [244/251] Missed x's head(98)(76%) due to resolver:0.03°
+            · RIFTVEIL vuln_lby -24° [aa=5way | cf=62% | cht=nl | streak=1
+            | next=sp | lc=0 | tc=1]
+          plus Hit lines and "Naded / Burned / Knifed x for 34 damage".
+          Extended with what RIFTVEIL did: who resolved the target, read
+          from the player list at fire time (RIFTVEIL + method + forced
+          yaw, GAMESENSE resolver, or NO RESOLVER when correction is off;
+          red on the one that missed), AA type, confidence, cheat, aim
+          policy, safe point, the run of resolver misses and next=sp when
+          the aim policy goes to safe point. AIMX.InDoubt is now the single
+          definition of "side in doubt" for the policy and the log.
+          FIXED vs the original -- the spread angle matched the impact by
+          tick (missing whenever impact and result land on different
+          ticks); each shot now claims its own impacts, wall penetrations
+          included, so double-tap bullets don't mix.
+          Console only: the debug file and log_report are unchanged.
+          Verified: with the logger on through a 20,000-tick fuzz world,
+          the player-list writes are byte-identical to v8.15 (the fuzz
+          counts in check_all moved only because the new menu item and
+          reference shift its random stream). Harness: spread, resolver
+          through a wall, double tap, hit, gamesense / no resolver, late,
+          server hit, grenade, option off, every color_log call checked;
+          mutation-checked.
   v8.15  – AA-script patterns, applied: 3-way / 5-way after a resolver
           miss. x-way (57% of neverlose AA scripts, 24% of gamesense) and
           anti-bruteforce (59% / 36%) ship together; joining every pre-v8
