@@ -169,7 +169,50 @@ pitch and spin yaw).
 - **No neverlose script switches AA by the enemy's cheat.** Arc uses the
   voice listener for scoreboard icons; luasense loads it and discards it.
 
-## 6. Candidates, ranked, and what decides each
+## 6. Deeper pass: obfuscated, Primordial, configs, defences, defaults
+
+**Obfuscated resolvers (27).** Most use VM obfuscators (Luraph, MoonSec,
+IronBrew; e.g. TECNO V1, demon, sauron, the three byte-identical 157 KB
+"resolver15eur / sanchez95 / resolver_upd") and can't be read without
+devirtualising them. Only Hyper ReSolver (Hercules-obfuscated) is legible:
+side from the pose sign, flip on miss, desync = max x a per-mode factor
+(0.8-0.95) -- generic. Its "Respect Gamesense Resolver" option skips any
+player whose "Correction active" is on: one more source that reads that
+field as gamesense's own resolver.
+
+**Primordial resolvers (7).** soulresolve (2,984 lines) adds random numbers
+to angles and writes a random goal-feet yaw; the rest are 2-90-line stubs
+or animlayer readers. The only usable fact: animstate at player + 0x9960,
+the offset RIFTVEIL uses (third source after antiaim_funcs and the logs).
+
+**Native gamesense configs (379).** Binary: header 60 0D C0 DE, then
+entries keyed by 4-byte hashes of the setting names. Not decoded --
+reading them means reversing gamesense's name hashing, not guessed here.
+
+**Defences against RIFTVEIL's vulnerability windows** (596 gamesense / 108
+neverlose AA scripts):
+
+| Window | Scripts that address it | RIFTVEIL's data |
+|---|---|---|
+| Duck transition (vuln_dck) | 3% / 1% | 71% head (v5.2 era), 5/5 (v8.8) -- strongest |
+| LBY update (vuln_lby) | 26% / 23% | 70% (v5.2 era) |
+| Landing (vuln_lnd) | 46% / 56% mention landing anims | 83% (v5.2 era, n=6) |
+| Lean / leg breakers | 56% / 83%, 45% / 71% | own-model visuals in most scripts |
+
+The duck-transition window is almost undefended, which fits it being the
+best method in the data.
+
+**Defaults are the preset for untuned players.** gamesense AA scripts ship
+no presets, so their slider defaults are what a player who never tunes
+runs: fake limit 60 (most common), yaw left / right 0 (279 / 308 and
+273 / 303), delay 0, 5 or 1. Untuned means full desync, no yaw offset.
+
+**Not pursued on purpose: simulating each AA mode against RIFTVEIL.** The
+result would measure RIFTVEIL against a model of the enemy's animation,
+not against the game -- the route that led v7.x from 74% to 49%.
+Decisions stay on match logs.
+
+## 7. Candidates, ranked, and what decides each
 
 1. **Force pitch on a pitch breaker** (GILVzQi: pitch jump > 37 deg -> force
    the down value for that tick + safe point). Defensive pitch is in 43-55% of
