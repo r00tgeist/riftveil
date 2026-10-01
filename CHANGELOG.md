@@ -3,6 +3,10 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.22  – Local LC box: with double tap on a toggle key the shift lands at
+          the switch, when the key already reads off, and v8.21's "double
+          tap on" gate dropped it. It now flashes while double tap is on or
+          was on within the last second.
   v8.21  – Lag-comp boxes, simpler, and a bug hunt.
           LOCAL box: double tap only. It flashes when double tap is on (key
           held, AIMX.DtReady) and the tickbase is shifted > 2 ticks; the

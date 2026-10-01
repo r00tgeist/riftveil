@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.21"
+local RV_VERSION = "8.22"
 
 local ffi = require "ffi"
 
@@ -4152,8 +4152,10 @@ end)() -- shot log scope
 --  Our m_nTickBase is read in run_command and its highest value kept;
 --  max - tickbase - 1 (0..14) is the ticks being shifted, the check
 --  enthusiasm, universe and excellentsanty use for their own defensive / LC
---  indicator. Over 2, with double tap on and its key held (AIMX.DtReady),
---  the box goes on our origin extrapolated that many ticks
+--  indicator. Over 2, with double tap on (AIMX.DtReady) or on within the
+--  last second -- on a toggle key the shift lands right at the switch, when
+--  the key already reads off (v8.21 missed those) -- the box goes on our
+--  origin extrapolated that many ticks
 --  (ExtrapolateOrigin: velocity, gravity, stops at walls). Fakelag alone
 --  draws nothing (v8.18-8.20 also flashed on fakelag breaks, which made up
 --  most of what it showed).
@@ -4163,7 +4165,8 @@ local C_LAG = {240, 64, 64}
 local FLASH = 0.5
 local EDGES = {{1, 2}, {2, 3}, {3, 4}, {4, 1}, {5, 6}, {6, 7}, {7, 8}, {8, 5}, {1, 5}, {2, 6}, {3, 7}, {4, 8}}
 -- tb_max / shift: the LC check; bx,by,bz,t,ticks: the box being flashed
-local S = {shift = 0, t = -1, ticks = 0}
+local S = {shift = 0, t = -1, ticks = 0, dt_t = -10}
+local DT_GRACE = 1   -- seconds after double tap was last on
 
 local function OnRun()
     if not IND.lc then return end
@@ -4174,11 +4177,13 @@ local function OnRun()
     -- a new life / reconnect starts the tickbase over
     if not S.tb_max or tb > S.tb_max or S.tb_max - tb > 64 then S.tb_max = tb end
     local shift = math.min(14, math.max(0, S.tb_max - tb - 1))
-    if shift > 2 and S.shift <= 2 and AIMX.DtReady() then
+    local now = globals.realtime()
+    if AIMX.DtReady() then S.dt_t = now end
+    if shift > 2 and S.shift <= 2 and now - S.dt_t <= DT_GRACE then
         local x, y, z = entity.get_origin(me)
         if isnum(x) and isnum(y) and isnum(z) then
             S.bx, S.by, S.bz = ExtrapolateOrigin(me, x, y, z, shift)
-            S.t, S.ticks = globals.realtime(), shift
+            S.t, S.ticks = now, shift
         end
     end
     S.shift = shift

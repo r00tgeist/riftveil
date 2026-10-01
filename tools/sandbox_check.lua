@@ -1389,10 +1389,19 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         local function shift(from, to) W.tick = from; fire("run_command", {}); W.tick = to; fire("run_command", {}) end
         W.players[1] = {vx = 256, jump = 0}
         LC.S.t = -1
-        -- double tap off: a shift draws nothing
+        -- double tap off (and not on for over a second): a shift draws nothing
         AX.DtReady = function() return false end
+        LC.S.dt_t = W.real - 5
         shift(5000, 4990)
         if label() ~= nil or LC.S.t ~= -1 then fail("flashed with double tap off") end
+        -- toggled off just now: the shift at the switch still flashes
+        AX.DtReady = function() return true end
+        fire("run_command", {})
+        AX.DtReady = function() return false end
+        W.real = W.real + 0.3
+        shift(5500, 5490)
+        if label() ~= "LC  9t" then fail("shift right after toggling double tap off: " .. tostring(label())) end
+        W.real = W.real + 0.6
         -- double tap on: 10 below the max = 9 ticks shifted
         AX.DtReady = function() return true end
         shift(7000, 6990)
