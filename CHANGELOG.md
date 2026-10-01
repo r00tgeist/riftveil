@@ -3,6 +3,20 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.29  – vuln_unk forces torso - eye, not the torso world yaw.
+          The v8.28 match (29 shots, 8 decided by the resolver: 3 head, 5
+          resolver misses) is too small to blame on v8.28 by itself, and its
+          other changes rarely touch a forced value. What every session since
+          v8.15 shares is vuln_unk: 36% head vs resolver miss (10/28), every
+          other method ~68% (p 0.01), 45 of 59 values beyond 60 deg. Those
+          values are the torso's world yaw -- the player list clamps them to
+          +-60, so the side and size came from which way the enemy faced on
+          the map. v7.2-7.9 forced torso - eye (59%, 17/29); v8.0 reverted it
+          with the rest of v6.2. The v8.28 roadmap made "under ~50% in the
+          next logs" the trigger to retry it; it's ported line for line from
+          v7.9 as FEATURE.UNK_DELTA (no window when the eye is unreadable),
+          off in the parity run. Harness: torso 150 / eye 100 forces +50
+          (v6.2: 150), mutation-checked.
   v8.28  – Resolver-logic bug hunt. Three v6.2 defects, each behind a FEATURE
           flag (off in the parity run) with a harness test that also runs
           the flag-off v6.2 path to prove it still reaches the defect.

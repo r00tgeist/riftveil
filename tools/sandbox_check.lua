@@ -503,7 +503,7 @@ if os.getenv("RV_PARITY") then
     end
     local F
     for _, cb in pairs(CALLBACKS) do F = F or find(cb, 0) end
-    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false end
+    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false end
 end
 
 local cb_errors = {}
@@ -1745,6 +1745,41 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         end
     else
         UNIT_FAIL[#UNIT_FAIL + 1] = "stale window test: REC / EIDX_S64 / FEATURE / SHOTS not reachable"
+    end
+    W.live = live0
+end
+
+-- UNK value (FEATURE.UNK_DELTA): an enemy looking at world yaw 100 whose
+-- torso unchokes at 150 gets +50 (torso - eye, within the cap), not the
+-- world yaw 150 that v6.2 forced (the flag-off half).
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local REC_T, EI, F = probe("REC"), probe("EIDX_S64"), probe("FEATURE")
+    local live0 = W.live
+    local function run(flag, id)
+        F.UNK_DELTA = flag
+        W.live = {101, 102, id}
+        W.players[id] = {sim = W.tick * TI, vx = 0, vy = 0, pose01 = 0.5, eye = 100, duck = 0, torso = 150, gfy = 146}
+        local best
+        for step = 1, 60 do
+            W.tick = W.tick + 1; W.real = W.real + TI
+            local c = W.players[id]
+            if (step % 5) >= 3 then c.sim = W.tick * TI end   -- choke 3 of 5, then unchoke
+            c.pose01 = (step % 2 == 0) and 0.78 or 0.24
+            for _, p in ipairs({101, 102}) do W.players[p].sim = W.tick * TI end
+            fire("net_update_end")
+            local r = REC_T and EI and EI[id] and REC_T[EI[id]]
+            if r and r.vuln_type == "unk" and r.vuln_ttl > 0 then best = r.vuln_val end
+        end
+        W.players[id] = nil
+        return best
+    end
+    if REC_T and EI and F then
+        local on, off = run(true, 113), run(false, 114)
+        F.UNK_DELTA = true
+        if not (on and math.abs(on - 50) < 0.5) then UNIT_FAIL[#UNIT_FAIL + 1] = "UNK delta: torso 150 / eye 100 forced " .. tostring(on) .. ", expected +50" end
+        if not (off and math.abs(off - 150) < 0.5) then UNIT_FAIL[#UNIT_FAIL + 1] = "UNK delta test: flag off gave " .. tostring(off) .. ", not v6.2's world yaw 150 -- no UNK window reached" end
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "UNK delta test: REC / EIDX_S64 / FEATURE not reachable"
     end
     W.live = live0
 end

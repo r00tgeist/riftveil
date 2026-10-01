@@ -5,7 +5,7 @@ and what comes next. Older versions are kept in `versions/` so none of the
 work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 (the decision engine), `riftveil_v8.1.lua`.
 
-## In the script (v8.28)
+## In the script (v8.29)
 
 | Area | Feature | Changes shots? |
 |---|---|---|
@@ -22,6 +22,7 @@ work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 | Tools | `rv_perf` profiler, `rv_stats`, `rv_db`, `rv_save` | no |
 | Weapons | Aim policy on traced damage: prefer body only when a body shot kills from here, body preference off when only the head kills, safe point when in doubt or airborne; values verified, traces self-calibrated | yes, Detection › Weapon aim |
 | Weapons | "In doubt" includes a 3-way / 5-way enemy missed on the resolver in the last 10 s (43% head there in the pre-v8 logs vs 59-77% elsewhere) | yes, `FEATURE.XWAY_UNSURE` |
+| Core | UNK windows force torso - eye within the cap, not the torso world yaw (v7.2 fix, retried on the v8.28 trigger: raw 36% since v8.15) | yes, `FEATURE.UNK_DELTA` |
 | Core | v6.2 defect fixes: a released enemy's shots count as builtin and stale vuln windows close (`STALE_WINDOW`); no DCK window without a real duck crossing (`DCK_GAP`); config recognition every 32 sim ticks whatever the record cadence (`CFG_CADENCE`) | yes, each its own flag, off in the parity run |
 
 Every release proves with `tools/check_all.sh` step 7 that, with the
@@ -92,11 +93,11 @@ teach hit memory the forced value's sign instead of the tracked side.
 
 ## Watch list from the v8.28 bug hunt (not changed)
 
-- **vuln_unk values are absolute yaws** (torso_yaw / goal_feet_yaw / eye,
-  clamped to +-60): the v7.2 delta fix was reverted with v6.2. Era data:
-  raw <=7.1 65% (277), delta 7.2-7.9 59% (29), raw 8.x 71% (75) -- but the
-  v8.17-8.27 log has vuln_unk at 38% head (6/16), 21 of 25 values beyond
-  60. If the next logs keep it under ~50%, retry the delta behind a flag.
+- **vuln_unk values** -- triggered and done in v8.29 (`UNK_DELTA`: raw
+  36% since v8.15, p 0.01). Judge it on `BY METHOD` vuln_unk head rate in
+  the next logs: the delta era measured 59%. If it comes back under the
+  raw era's 55% overall, switch the flag off. STP / PKA / LND / DCK / CTR
+  still force world yaws (few shots: DCK 67%, the rest n < 10).
 - **LBY on 3/5-way** is mostly the jitter's centre pass. `LBY WINDOWS BY AA
   TYPE` in log_report: 59% vs 56% other vuln so far.
 - **Phantom DCK windows** (now skipped): the verbose log line

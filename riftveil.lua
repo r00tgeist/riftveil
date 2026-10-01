@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.28"
+local RV_VERSION = "8.29"
 
 local ffi = require "ffi"
 
@@ -932,6 +932,13 @@ local FEATURE = {
     -- than 10 s later (one 65 s, across a round). Those shots fed the
     -- vuln / cheat stats and skipped the flip. Off in the v6.2 parity run.
     STALE_WINDOW = true,
+    -- v8.29: UNK (unchoke) windows force torso - eye, clamped to the cap,
+    -- not the raw torso world yaw (v7.2's fix, reverted with v6.2). Raw
+    -- vuln_unk since v8.15: 36% head vs resolver miss (10/28), every other
+    -- method ~68% (p 0.01), 45 of 59 values beyond 60; the delta era
+    -- (v7.2-7.9) measured 59% (17/29). The v8.28 roadmap set "under ~50%
+    -- in the next logs" as the trigger. Off in the v6.2 parity run.
+    UNK_DELTA = true,
     -- These three are the v6.2 [EXP] switches as the logs show them
     -- running when the resolver hit 74% (suppress fired in every v6.2
     -- match; jitter prediction never did).
@@ -2355,6 +2362,14 @@ local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
         local cluster_val = TorsoCluster(rec, torso)
         local correction  = cluster_val or torso
         local conf        = cluster_val and 0.93 or 0.90  -- higher conf when clustered
+        -- FEATURE.UNK_DELTA: torso_yaw is a world yaw; the body yaw value is
+        -- relative to the eye. v7.2-7.9 forced the difference (as here, the
+        -- v7.9 line); v6.2 forced the world yaw itself, which the player
+        -- list clamps to +-60 -- a value set by where on the map they face.
+        if FEATURE.UNK_DELTA then
+            if not safe_eye then return nil, 0, 0 end
+            correction = Clamp(NA(correction - safe_eye), -corr_cap, corr_cap)
+        end
 
         -- LIVE CAP BOOST: when animstate min/max_yaw are populated and the correction
         -- falls within the actual engine-reported desync bounds, it's a validated read.
