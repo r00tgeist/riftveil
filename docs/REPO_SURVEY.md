@@ -1,4 +1,4 @@
-# Survey: s0daa/CSGO-HVH-LUAS (v8.11)
+# Survey: s0daa/CSGO-HVH-LUAS (v8.11, Neverlose section v8.12)
 
 What 5,220 files of public HvH scripts say about resolving, about the anti-aim
 RIFTVEIL faces, and what is worth adding. Every number below was counted by
@@ -112,7 +112,64 @@ re-engagements. v8.11 logs `ls=` (seconds since our last shot at them) and
   These are yaw-add offsets, not the correction angle RIFTVEIL writes, so the
   default table is not retuned from them (v6.2 measured 74% with it).
 
-## 5. Candidates, ranked, and what decides each
+## 5. Neverlose in depth (v8.12)
+
+Half the opponents in the v8.8 log ran Neverlose. 117 unique Neverlose
+scripts, 108 of them anti-aim; 215 unique settings / cfg files.
+
+**Built-in presets.** 18 scripts ship presets (JSON or base64). Per state,
+the body yaw LIMITS (the desync itself) and the yaw offsets:
+
+| Preset | Limits (L/R) | Yaw offsets, avg L / R | In an existing fingerprint band |
+|---|---|---|---|
+| luasense beta #0 | 60 / 60 every state | 24.6 / 42.0 | luasense_beta (exact, all 7 states) |
+| luasense beta #2-#4 | 56-60 | 26.6-29.3 / 38.1-42.0 | luasense_beta / luasense_std |
+| Cb4N6YD | 59-60 | 26.1 / 35.9 | luasense_beta / std |
+| exscord #1, idealyaw #1 | 60 (29 air) | 23.6-27.4 / 33.2-33.4 | luasense_std (loosely) |
+| chimera, idealyaw #0 | 30 stand / 36 run / 45 slow / 58-60 | 9.4-9.8 / 19.8-20.2 | none |
+| exscord #0, luasense beta #1 | 60 | 9.8-12.2 / 16.8-23.8 | none |
+| aesthetic, jago, ye4, huyanza | 58-60 | 0 / 0 (jitter-only) | none |
+
+- **The desync limit is at maximum almost everywhere** (58-60 in every
+  state of 15 of 18 presets). Real players agree: in the decodable
+  settings exports the median limit is 60 in every state, with 58-90% of
+  them at 55+ on both sides.
+- **Yaw offsets are asymmetric, right larger than left**, in presets and in
+  players' settings alike (running 25/40, slow walk 31/47, air-crouch
+  28/48 medians) -- the shape the asymmetric L/R table already assumes.
+- **No new fingerprint added.** The presets either fall inside the
+  luasense bands (and since v8.10 those apply to neverlose and undetected
+  players, which is right for them) or form a low-offset family (~10/20)
+  that would force small correction values. Across every log, forced values
+  under 20 are the weakest band: 51% (33/65), against 77% for 40-50 and 63%
+  for 50-60. That isn't monotonic (30-40: 49%), so the magnitude question
+  stays open rather than being "go to 60".
+
+**Settings exports.** 152 of 215 decode. 45 are angelwings-style
+(`name_` + base64 of MessagePack: angelwings 31, testarossa 6, xoyaw 2 ...);
+their bytes are mangled partway in most files, so only fragments survive
+(limits seen 47-60, delays 1-5, defensive on in some states with a static
+pitch and spin yaw).
+
+**How Neverlose AA is built** (108 scripts):
+
+- Defensive = Neverlose's hidden angles: `rage.antiaim:override_hidden_
+  yaw_offset` (309 calls) and `override_hidden_pitch` (287). They show only
+  on defensive ticks, i.e. the backward-simtime frames v8.10 skips. Hidden
+  yaw options: random, spin, sideways, 3/5-way, opposite. Hidden pitch:
+  down, custom, random, up, zero, fake up / down, progressive.
+- Side flips are scripted through `rage.antiaim:inverter` (272 calls);
+  yaw modifiers offset / center / random / spin / 3-way / 5-way; way-count
+  sliders 1-5.
+- Delay sliders mostly max at 5-20 ticks; defaults 0-2.
+- `rage.exploit:force_teleport` in 75 calls -- the teleported shots that
+  aim_fire flags (fl=t), kept out of learning since v8.6.
+- Anti-bruteforce (28 scripts with a handler that drives it): bullet
+  impacts 25, player_hurt 12; radius 50-70 units (gamesense: 100).
+- **No neverlose script switches AA by the enemy's cheat.** Arc uses the
+  voice listener for scoreboard icons; luasense loads it and discards it.
+
+## 6. Candidates, ranked, and what decides each
 
 1. **Force pitch on a pitch breaker** (GILVzQi: pitch jump > 37 deg -> force
    the down value for that tick + safe point). Defensive pitch is in 43-55% of

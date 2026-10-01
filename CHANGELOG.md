@@ -3,6 +3,25 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.12  – Neverlose deep dive (docs/REPO_SURVEY.md section 5).
+          117 unique NL scripts (108 AA), 18 with built-in presets, 215
+          settings files (152 decode; the angelwings MessagePack exports
+          are mangled in most files). Findings:
+          - The desync limit is at 58-60 in nearly every preset state and
+            in players' settings (median 60); yaw offsets are asymmetric,
+            right > left, matching the asymmetric table.
+          - New presets either sit inside the luasense bands (gated to nl /
+            undetected since v8.10) or form a low-offset family (~10/20).
+            Not added: forced values under 20 are the weakest band in all
+            logs (51%).
+          - NL defensive = hidden yaw / pitch overrides (309 / 287 calls),
+            visible only on the frames v8.10 skips.
+          - NL anti-bruteforce: 28 scripts, bullet impacts 25 / player_hurt
+            12, radius 50-70 (gamesense 100). Corrects the v8.11 file-level
+            count, which mixed in unrelated player_hurt handlers.
+          - No NL script adapts its AA to the enemy's cheat.
+          ADDED -- log_report splits BY PREVIOUS SHOT AT THEM by enemy
+          cheat (e.g. "nl after a head hit").
   v8.11  – Survey of s0daa/CSGO-HVH-LUAS (docs/REPO_SURVEY.md).
           1,371 readable unique gamesense Luas (569 anti-aim), ~45
           distinct readable resolvers, 115 neverlose AA scripts, 617

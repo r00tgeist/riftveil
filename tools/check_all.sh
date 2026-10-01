@@ -83,7 +83,7 @@ printf '%s\n' '[00:00:00.000][INF][init] RIFTVEIL v8.0 loaded' \
     '[00:00:00.500][INF][rec] new profile player=a b s64=1 seed=0.35' \
     '[00:00:01.000][INF][hit] player=a b group=head dmg=100 meth=suppress val=-29 bt=0 st=running mv=230 wpn=awp pol=body tr=20/112 hp=100 ar=100 aim=head pdmg=80 cf=0.90 fl=tp pit=-89 df=5 cor=1 ls=0.8 prv=m cht=nl' \
     '[00:00:02.000][WRN][miss] player=a b reason=? meth=hit_mem val=31 bt=0 hc=80% st=air cht=nl' > "$TMP/log.txt"
-lua5.3 tools/log_report.lua "$TMP/log.txt" > "$TMP/rep.txt" 2>&1 && grep -q "BY ENEMY CHEAT" "$TMP/rep.txt" && grep -q "BY AIM POLICY" "$TMP/rep.txt" && grep -q "TRACE CALIBRATION" "$TMP/rep.txt" && grep -q "BY ENEMY SPEED" "$TMP/rep.txt" && grep -q "DB-seeded start" "$TMP/rep.txt" && grep -q "teleported" "$TMP/rep.txt" && grep -q "up (<= -60)" "$TMP/rep.txt" && grep -q "DEFENSIVE FRAMES" "$TMP/rep.txt" && grep -q "on / suppress" "$TMP/rep.txt" && grep -q "after a resolver miss" "$TMP/rep.txt" \
+lua5.3 tools/log_report.lua "$TMP/log.txt" > "$TMP/rep.txt" 2>&1 && grep -q "BY ENEMY CHEAT" "$TMP/rep.txt" && grep -q "BY AIM POLICY" "$TMP/rep.txt" && grep -q "TRACE CALIBRATION" "$TMP/rep.txt" && grep -q "BY ENEMY SPEED" "$TMP/rep.txt" && grep -q "DB-seeded start" "$TMP/rep.txt" && grep -q "teleported" "$TMP/rep.txt" && grep -q "up (<= -60)" "$TMP/rep.txt" && grep -q "DEFENSIVE FRAMES" "$TMP/rep.txt" && grep -q "on / suppress" "$TMP/rep.txt" && grep -q "after resolver miss" "$TMP/rep.txt" && grep -q "nl after resolver miss" "$TMP/rep.txt" \
     && pass "parses hit/miss/st/mv/wpn/pol/fl/pit/df/cor/ls/prv/cht lines" || fail "log_report"
 
 echo "9. Performance on LuaJIT (2v2: net update + 4 paint frames per tick)"

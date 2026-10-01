@@ -5,7 +5,7 @@ and what comes next. Older versions are kept in `versions/` so none of the
 work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 (the decision engine), `riftveil_v8.1.lua`.
 
-## In the script (v8.11)
+## In the script (v8.12)
 
 | Area | Feature | Changes shots? |
 |---|---|---|
@@ -51,6 +51,12 @@ post-v6.2 features off, the script forces the same side and value as v6.2.
 - **Hit memory inside the anti-bruteforce window** -- `BY PREVIOUS SHOT AT
   THEM` / `BY TIME SINCE OUR LAST SHOT AT THEM`.
 - **Freestand side** -- needs its own log field first.
+- **Correction magnitude** -- forced values under 20 hit 51% across all
+  logs (40-50: 77%, 50-60: 63%); neverlose presets and players run the
+  desync limit at 58-60. Not monotonic, so open; a per-magnitude table in
+  log_report would settle it with more v8.x logs.
+- **Low-offset neverlose family** (chimera / idealyaw / exscord, ~10/20) as
+  a fingerprint -- only if the magnitude question says small values work.
 
 ## Next, in order
 

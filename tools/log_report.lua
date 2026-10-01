@@ -126,8 +126,13 @@ for _, path in ipairs(files) do
             end
             local prv = field(line, "prv")
             if prv and prv ~= "-" then
-                targets[#targets + 1] = bucket(by_prv, ({h = "after a head hit", b = "after a body hit",
-                    m = "after a resolver miss", o = "after another miss"})[prv] or prv)
+                local name = ({h = "after head hit", b = "after body hit",
+                    m = "after resolver miss", o = "after other miss"})[prv] or prv
+                targets[#targets + 1] = bucket(by_prv, name)
+                -- per enemy cheat: neverlose anti-bruteforce uses a 50-70
+                -- unit radius, gamesense's 100 (docs/REPO_SURVEY.md)
+                local c = field(line, "cht")
+                if c then targets[#targets + 1] = bucket(by_prv, c .. " " .. name) end
             end
             if seed_of[player] then targets[#targets + 1] = bucket(by_seed, seed_of[player]) end
             local st = field(line, "st")
