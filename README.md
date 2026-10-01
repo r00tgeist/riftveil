@@ -30,6 +30,8 @@ same side with the same value as v6.2 (`tools/check_all.sh`, step 7).
 | **Tight interpolation** | Low-latency interp cvars while the resolver is on; originals restored when off. |
 | **Indicators** | Info panel, ESP flags (`VLN`, `RES`, aim policy `BODY` / `HEAD` / `HEAD SP` / `SAFE PT`, enemy cheat), SHIFT marker. |
 | **Debug log** | Verbose `riftveil_debug.txt` (the log is always written; this adds per-tick detail). |
+| **Fast ladder** | Climbs and descends ladders sideways with the view pitched down (faster). Not while throwing a grenade or holding +use. Works with the resolver off. |
+| **Jumpscout hit chance** | While airborne with the SSG 08, RAGE › Aimbot › Minimum hit chance is set to this; your own value comes back the moment you land, switch weapon, set it to Off or unload. Off by default. |
 
 The accent follows gamesense's own *Menu color*; drag the panel by its
 header while the menu is open. The info panel's INFO row shows the current

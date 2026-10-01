@@ -3,6 +3,29 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.9   – Movement from StarSync (a neverlose script), ported to gamesense.
+          ADDED -- Fast ladder (checkbox, off by default). The logic is the
+          one shipped identically in two gamesense scripts (angelwings,
+          abyss): pitch 89, sideways buttons, yaw +90 / +30 / +150 by
+          strafe. From StarSync: not while a grenade is thrown
+          (m_fThrowTime), not while holding +use. Harness: up, down+right,
+          grenade, +use, off-ladder and switched-off cases.
+          ADDED -- Jumpscout hit chance (slider, 0 = Off). Airborne with the
+          SSG 08, RAGE > Aimbot > "Minimum hit chance" (the reference three
+          uploaded gamesense scripts use) is set to it; the user's value is
+          restored on landing, weapon switch, Off, death and unload.
+          StarSync's version only switches neverlose's SSG Auto Stop to
+          "In Air", a menu gamesense doesn't have. Harness: air 30, landed
+          back to 70, AWP in air untouched.
+          Both are independent of the Resolver switch; neither touches the
+          resolver, the player list or v6.2 parity.
+          NOT PORTED: teleport ladder exit (neverlose double-tap uncharge
+          internals), no fall damage (needs a hull trace; gamesense has
+          trace_line only, and a centre-line trace mistimes the landing on
+          edges), super toss (needs neverlose's grenade_override_view and
+          movement simulation), StarSync's own dormant aimbot (separate
+          script territory; dormant_aimbot.lua already exists for gs), and
+          the visual / AA builder parts (not this script's job).
   v8.8   – Explore tickcount's projects (github.com/tickcount).
           FIXED -- "Correction active" was inverted. It is gamesense's
           own resolver for a player, on by default: vandal turns it off

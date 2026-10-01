@@ -222,6 +222,7 @@ local mock = {
                 if prop == "m_flSimulationTime" then return p and p.sim or 0 end
                 if prop == "m_vecVelocity"      then return p and p.vx or 0, p and p.vy or 0, 0 end
                 if prop == "m_fFlags"           then
+                    if ent == 1 and W.me_flags then return W.me_flags end
                     if p and p.flags_nil then return nil end
                     return p and p.flags or 1
                 end
@@ -236,6 +237,8 @@ local mock = {
                 if prop == "m_iHealth"          then return p and p.hp or 100 end
                 if prop == "m_ArmorValue"       then return p and p.armor or 100 end
                 if prop == "m_iItemDefinitionIndex" then return ent == 900 and W.weapon or 0 end
+                if prop == "m_MoveType"         then return ent == 1 and (W.me_movetype or 2) or 2 end
+                if prop == "m_fThrowTime"       then return ent == 900 and (W.throw or 0) or 0 end
                 return 0
             end
         end
@@ -1208,6 +1211,71 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         SH[91001] = nil
     else
         UNIT_FAIL[#UNIT_FAIL + 1] = "defensive frame test: SHOTS / player 102 not reachable"
+    end
+end
+
+-- MOVEMENT: fast ladder (gamesense-proven form + StarSync's guards) and
+-- the jumpscout hit chance (set while airborne with the scout, restored)
+if not os.getenv("RV_TARGET") then
+    local ladder, jshc
+    for _, el in ipairs(UI_ELEMS) do
+        if el.name == "Fast ladder\nriftveil" then ladder = el end
+    end
+    local function cmd(fwd, side, pitch)
+        return {forwardmove = fwd, sidemove = side, pitch = pitch or 0, yaw = 10,
+                in_forward = 0, in_back = 0, in_moveleft = 0, in_moveright = 0, in_use = 0}
+    end
+    if ladder then
+        ladder.a = true
+        W.me_movetype = 9
+        local c = cmd(450, 0); fire("setup_command", c)
+        if not (c.pitch == 89 and c.yaw == 100 and c.in_back == 1 and c.in_moveright == 1 and c.in_forward == 0) then
+            UNIT_FAIL[#UNIT_FAIL + 1] = string.format("fast ladder up: pitch %s yaw %s back %s right %s", c.pitch, c.yaw, c.in_back, c.in_moveright)
+        end
+        c = cmd(-450, 450); fire("setup_command", c)
+        if not (c.pitch == 89 and c.yaw == 160 and c.in_forward == 1 and c.in_moveleft == 1 and c.in_back == 0) then
+            UNIT_FAIL[#UNIT_FAIL + 1] = string.format("fast ladder down+right: pitch %s yaw %s fwd %s left %s", c.pitch, c.yaw, c.in_forward, c.in_moveleft)
+        end
+        W.throw = 5
+        c = cmd(450, 0); fire("setup_command", c)
+        if c.pitch ~= 0 or c.yaw ~= 10 then UNIT_FAIL[#UNIT_FAIL + 1] = "fast ladder ran during a grenade throw" end
+        W.throw = nil
+        c = cmd(450, 0); c.in_use = 1; fire("setup_command", c)
+        if c.pitch ~= 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "fast ladder ran while holding +use" end
+        W.me_movetype = 2
+        c = cmd(450, 0); fire("setup_command", c)
+        if c.pitch ~= 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "fast ladder ran off a ladder" end
+        ladder.a = false
+        W.me_movetype = 9
+        c = cmd(450, 0); fire("setup_command", c)
+        if c.pitch ~= 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "fast ladder ran while switched off" end
+        W.me_movetype = nil
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "Fast ladder checkbox not found"
+    end
+    -- the slider and the "Minimum hit chance" reference, through the
+    -- movement callbacks' upvalues
+    local HC = probe("HC_REF")
+    jshc = probe("ui_jshc")
+    if jshc and HC then
+        local w0, hc0 = W.weapon, HC.a
+        HC.a = 70
+        W.weapon, W.me_flags, jshc.a = 40, 0, 30          -- scout, airborne, 30%
+        fire("setup_command", cmd(0, 0))
+        local inair = HC.a
+        W.me_flags = 1                                    -- landed
+        fire("setup_command", cmd(0, 0))
+        local landed = HC.a
+        W.me_flags, W.weapon = 0, 9                       -- airborne with the AWP
+        fire("setup_command", cmd(0, 0))
+        local awp = HC.a
+        if inair ~= 30 or landed ~= 70 or awp ~= 70 then
+            UNIT_FAIL[#UNIT_FAIL + 1] = string.format("jumpscout hit chance: air %s (30), landed %s (70), AWP air %s (70)",
+                tostring(inair), tostring(landed), tostring(awp))
+        end
+        W.weapon, W.me_flags, jshc.a, HC.a = w0, nil, 0, hc0
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "jumpscout test: slider / HC_REF not reachable"
     end
 end
 

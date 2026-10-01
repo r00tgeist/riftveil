@@ -5,7 +5,7 @@ and what comes next. Older versions are kept in `versions/` so none of the
 work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 (the decision engine), `riftveil_v8.1.lua`.
 
-## In the script (v8.8)
+## In the script (v8.9)
 
 | Area | Feature | Changes shots? |
 |---|---|---|
@@ -15,6 +15,7 @@ work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 | Cheats | Gamesense Lua presets only for gamesense users | yes, with Cheat profiles on |
 | Cheats | Per-(cheat, method) learned trust, saved across sessions | yes, once a method fails 8+ shots on a cheat |
 | UI | v7.9 menu, info panel, VLN/RES/cheat flags, SHIFT marker | no |
+| Movement | Fast ladder; jumpscout hit chance (scout, airborne) | ragebot hit chance in the air, when set |
 | Speed | Player-list writes only on change (-68% writes), player list refreshed once a second | no |
 | Logging | Every shot: `st= wpn= hp= ar= aim= pdmg= cf= cht=`; bounded log, flushed each round | no |
 | Tools | `rv_perf` profiler, `rv_stats`, `rv_db`, `rv_save` | no |

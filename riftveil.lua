@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.8"
+local RV_VERSION = "8.9"
 
 local ffi = require "ffi"
 
@@ -920,6 +920,9 @@ local ui_detect = ui.new_multiselect("LUA", "B", "Detection\nriftveil", {"Vulner
 local ui_tight  = ui.new_checkbox   ("LUA", "B", "Tight interpolation\nriftveil")
 local ui_ind    = ui.new_multiselect("LUA", "B", "Indicators\nriftveil", {"Info panel", "ESP flags", "Shift marker"})
 local ui_verb   = ui.new_checkbox   ("LUA", "B", "Debug log\nriftveil")
+-- Movement (independent of the Resolver switch; see MOVEMENT)
+local ui_ladder = ui.new_checkbox   ("LUA", "B", "Fast ladder\nriftveil")
+local ui_jshc   = ui.new_slider     ("LUA", "B", "Jumpscout hit chance\nriftveil", 0, 100, 0, true, "%", 1, {[0] = "Off"})
 
 -- First run of the v7.1 layout only. The renamed elements start empty, and
 -- the one-time flag keeps this from overriding a choice the user saved
@@ -3816,6 +3819,84 @@ end
 return {Tick = Tick, Decide = Decide, OnFire = OnFire, Reset = Reset, Write = Write, CAL = CAL, VAL_OK = VAL_OK}
 end)() -- aim policy scope
 
+-- ══════════════════════════════════════════════════════════════════
+--  MOVEMENT  (LUA > B: Fast ladder, Jumpscout hit chance)
+--
+--  FAST LADDER. On a ladder (m_MoveType 9), climbing sideways with the
+--  view pitched down moves faster than climbing straight. The logic is the
+--  one shipped identically in two gamesense scripts (angelwings, abyss);
+--  from StarSync (a neverlose script) come the two guards: never while a
+--  grenade is being thrown (m_fThrowTime set), never while holding +use.
+--
+--  JUMPSCOUT HIT CHANCE. While airborne with the SSG 08, RAGE > Aimbot >
+--  "Minimum hit chance" is set to this value; the moment you land, switch
+--  weapon or turn it to Off, your own value is put back (also on unload).
+--  StarSync's equivalent is a neverlose-only menu override (SSG Auto Stop
+--  "In Air"); gamesense has no such path, so this is the gamesense way.
+--  Changing hit chance by hand while airborne is undone on landing.
+-- ══════════════════════════════════════════════════════════════════
+local MOVE = (function()
+local HC_REF
+do
+    local ok, r = pcall(ui.reference, "RAGE", "Aimbot", "Minimum hit chance")
+    if ok then HC_REF = r end
+end
+local saved_hc   -- the user's hit chance while ours is applied
+
+local function RestoreHC()
+    if saved_hc ~= nil and HC_REF then pcall(ui.set, HC_REF, saved_hc) end
+    saved_hc = nil
+end
+
+local function pressed(v) return v == true or (type(v) == "number" and v ~= 0) end
+
+local function Ladder(cmd, me)
+    if entity.get_prop(me, "m_MoveType") ~= 9 or pressed(cmd.in_use) then return end
+    local w = entity.get_player_weapon(me)
+    local throw = w and entity.get_prop(w, "m_fThrowTime")
+    if type(throw) == "number" and throw ~= 0 then return end
+    local fwd, side = cmd.forwardmove or 0, cmd.sidemove or 0
+    if fwd > 0 then
+        if (cmd.pitch or 0) < 45 then
+            cmd.pitch = 89
+            cmd.in_moveright, cmd.in_moveleft, cmd.in_forward, cmd.in_back = 1, 0, 0, 1
+            cmd.yaw = cmd.yaw + (side == 0 and 90 or (side < 0 and 150 or 30))
+        end
+    elseif fwd < 0 then
+        cmd.pitch = 89
+        cmd.in_moveleft, cmd.in_moveright, cmd.in_forward, cmd.in_back = 1, 0, 1, 0
+        cmd.yaw = cmd.yaw + (side == 0 and 90 or (side > 0 and 150 or 30))
+    end
+end
+
+local function Jumpscout(me)
+    local want = ui.get(ui_jshc)
+    local w = entity.get_player_weapon(me)
+    local idx = w and entity.get_prop(w, "m_iItemDefinitionIndex")
+    local flags = entity.get_prop(me, "m_fFlags")
+    local airborne = type(flags) == "number" and bit.band(flags, 1) == 0
+    if HC_REF and type(want) == "number" and want > 0 and airborne
+       and type(idx) == "number" and bit.band(idx, 0xFFFF) == 40 then
+        if saved_hc == nil then
+            local ok, v = pcall(ui.get, HC_REF)
+            if ok and type(v) == "number" then saved_hc = v end
+        end
+        if saved_hc ~= nil and ui.get(HC_REF) ~= want then pcall(ui.set, HC_REF, want) end
+    else
+        RestoreHC()
+    end
+end
+
+local function OnSetup(cmd)
+    local me = entity.get_local_player()
+    if not me or not entity.is_alive(me) then RestoreHC(); return end
+    if ui.get(ui_ladder) then Ladder(cmd, me) end
+    Jumpscout(me)
+end
+
+return {OnSetup = OnSetup, RestoreHC = RestoreHC, Ladder = Ladder}
+end)() -- movement scope
+
 -- Read by the info panel and ESP flags (paint runs every frame; these only
 -- change once per net update or on a shot event).
 local ESP_VLN, ESP_RES, ESP_AIM = {}, {}, {}   -- ESP_AIM: aim policy tag
@@ -4863,6 +4944,7 @@ local function EndMatch()
 end
 
 local function FullShutdown()
+    MOVE.RestoreHC()
     EndMatch()
     pcall(function()
         cvar.cl_interpolate:set_int(ORIG_IPOLATE)
@@ -4967,6 +5049,7 @@ client.set_event_callback("round_start", Instrument("round_start", function()
     flush_log()
 end))
 client.set_event_callback("voice",       Instrument("voice", OnVoice))
+client.set_event_callback("setup_command", Instrument("setup_command", MOVE.OnSetup))
 client.set_event_callback("player_connect_full", Instrument("connect", function(e)
     local ent = client.userid_to_entindex(e.userid)
     if ent == entity.get_local_player() then ForgetAllCheats() elseif ent then ForgetCheat(ent) end
