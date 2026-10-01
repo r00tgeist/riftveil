@@ -48,7 +48,7 @@ end
 
 local by_meth, by_arm, by_player, by_origin, by_state, by_wpn, by_cheat, by_pol = {}, {}, {}, {}, {}, {}, {}, {}
 local by_speed = {}
-local by_flag, by_pitch, by_df, by_cor = {}, {}, {}, {}   -- v8.6+: aim_fire flags, enemy eye pitch at fire
+local by_flag, by_pitch, by_df, by_cor, by_ls, by_prv = {}, {}, {}, {}, {}, {}   -- v8.6+: aim_fire flags, enemy eye pitch at fire
 local by_seed, seed_of = {}, {}   -- v8.5.6+: DB-seeded start vs cold start, per player
 local calib = {}          -- decile -> {n, heads, psum}
 local trace_ratio = {head = {}, body = {}}   -- v8.4+: ragebot predicted / traced damage
@@ -117,6 +117,17 @@ for _, path in ipairs(files) do
             local cor = field(line, "cor")
             if cor then
                 targets[#targets + 1] = bucket(by_cor, (cor == "1" and "on" or cor == "0" and "OFF" or "unread") .. " / " .. meth)
+            end
+            -- ls= / prv= (v8.11+): anti-bruteforce windows. Most AB scripts
+            -- switch when our bullet passes near them and reset after 1-5 s.
+            local ls = tonumber(field(line, "ls") or "")
+            if ls then
+                targets[#targets + 1] = bucket(by_ls, ls < 0 and "first shot" or ls < 1 and "< 1 s" or ls < 5 and "1-5 s" or "5 s +")
+            end
+            local prv = field(line, "prv")
+            if prv and prv ~= "-" then
+                targets[#targets + 1] = bucket(by_prv, ({h = "after a head hit", b = "after a body hit",
+                    m = "after a resolver miss", o = "after another miss"})[prv] or prv)
             end
             if seed_of[player] then targets[#targets + 1] = bucket(by_seed, seed_of[player]) end
             local st = field(line, "st")
@@ -223,6 +234,8 @@ report("BY SHOT FLAGS (v8.6+: aim_fire flags; teleported / extrapolated shots ca
 report("BY ENEMY PITCH AT FIRE (v8.6+: pitch other than down = defensive AA frame)", by_pitch)
 report("BY DEFENSIVE FRAMES IN THE LAST SECOND (v8.7+: df=; frames lag compensation never records)", by_df)
 report("BY GAMESENSE CORRECTION ACTIVE / METHOD (v8.8+: a builtin shot with it OFF had no resolver)", by_cor)
+report("BY TIME SINCE OUR LAST SHOT AT THEM (v8.11+: anti-bruteforce switches on our bullet, resets after 1-5 s)", by_ls)
+report("BY PREVIOUS SHOT AT THEM (v8.11+)", by_prv)
 report("BY PROFILE START (v8.5.6+: confidence seeded from the saved DB vs cold start)", by_seed)
 report("BY ENEMY SPEED (mv=, u/s: 0-5 still, 5-40 micro / stopping, 40-110 slow walk, 200+ running; v8.2+ logs)", by_speed)
 report("BY WEAPON (v7.7+ logs)", by_wpn)

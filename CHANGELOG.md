@@ -3,6 +3,31 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.11  – Survey of s0daa/CSGO-HVH-LUAS (docs/REPO_SURVEY.md).
+          1,371 readable unique gamesense Luas (569 anti-aim), ~45
+          distinct readable resolvers, 115 neverlose AA scripts, 617
+          settings exports. Findings, all counted by script:
+          - "Correction active" = gamesense's resolver: every resolver
+            that hands a player back sets it true (8 more distinct sources).
+          - Our jitter-side method, animstate struct and live desync cap
+            match or beat what the resolvers use; the "animlayer resolver"
+            in vandal / Cartel fills its slots from its own guess.
+          - The library cheat revealer is byte-identical to ours.
+          - AA meta: delayed jitter 81%, defensive 75%, anti-bruteforce
+            36% (gamesense) / 59% (neverlose), x-way 24% / 57%.
+          - Anti-bruteforce triggers on our bullet passing within ~100
+            units (hit or miss), reacts mostly by changing jitter / limit,
+            resets after 1-5 s. Reconstructed from the v8.8 log: shots
+            within 5 s of our last at the same player 6 head / 0 miss,
+            later ones 19 / 12 -- no cost seen.
+          - No gamesense AA script ships an embedded preset; no new
+            config fingerprint to add.
+          ADDED -- ls= (seconds since our previous shot at that player)
+          and prv= (its outcome) on every shot line; log_report BY TIME
+          SINCE OUR LAST SHOT AT THEM and BY PREVIOUS SHOT AT THEM.
+          Measurement only.
+          CANDIDATES (ROADMAP Next): force pitch on a pitch breaker,
+          hit memory inside the anti-bruteforce window, freestand side.
   v8.10  – First match log on v8.x, and the luasense correction.
           LOG (v8.8, 43 resolver-decided shots): head rate 70% (30/43,
           95% 55-81%) -- back at v6.2's 74% from v6.7-v7.9's 49%. Aim

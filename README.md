@@ -43,7 +43,8 @@ Console: `rv_stats`, `rv_db` (saved profiles and learned cheat profiles),
 cheat profiles included).
 
 Status of every feature, what's waiting on a match log, and what comes
-next: `docs/ROADMAP.md`. Earlier versions are kept in `versions/`.
+next: `docs/ROADMAP.md`. What 5,220 public HvH scripts say about resolving
+and the anti-aim RIFTVEIL faces: `docs/REPO_SURVEY.md`. Earlier versions are kept in `versions/`.
 
 ## Weapon aim
 
@@ -100,7 +101,8 @@ Head rate per method, movement state (`st=`), enemy speed (`mv=`), weapon
 (`wpn=`, and weapon by aimed hitgroup), aim policy, shot flags (`fl=`:
 teleported, extrapolated, ...), enemy pitch at fire (`pit=`, defensive AA),
 defensive frames in the second before the shot (`df=`), gamesense's own
-resolver on/off for the target (`cor=`),
+resolver on/off for the target (`cor=`), seconds since our previous shot
+at them and its outcome (`ls=`, `prv=`; anti-bruteforce windows),
 DB-seeded vs cold start, enemy cheat (`cht=`) and player, with 95% intervals.
 
 ## Development

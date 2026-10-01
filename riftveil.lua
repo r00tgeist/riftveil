@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.10"
+local RV_VERSION = "8.11"
 
 local ffi = require "ffi"
 
@@ -4129,7 +4129,16 @@ local function on_aim_fire(e)
         -- with every body-yaw write): a "builtin" shot with it off had no
         -- resolver at all
         cor     = CorrectionActive(t),
+        -- anti-bruteforce check (measurement only): 207 of 569 gamesense AA
+        -- scripts and 68 of 115 neverlose ones switch side / jitter / limit
+        -- when our bullet passes within ~100 units of their eye -- hit or
+        -- miss -- and most reset after 1-5 s. ls= seconds since our previous
+        -- shot at this player (-1 = first), prv= its outcome (h head hit,
+        -- b other hit, m resolver miss, o other miss, - none).
+        ls      = (r and r.last_fire_t) and (globals.realtime() - r.last_fire_t) or -1,
+        prv     = r and r.last_outcome or "-",
     }
+    if r then r.last_fire_t = globals.realtime(); r.last_outcome = "-" end
     -- Credit a vuln_profile "seen" (trial) here, once per actual shot fired
     -- during an open vuln window -- not once per detection (see the
     -- comment at the DetectVuln call site in ProcessPlayer for why).
@@ -4193,6 +4202,7 @@ local function on_aim_hit(e)
         if is_head and d.aim_hg == 1 and not d.nolearn then CheatCredit(d.cheat, d.meth, true) end
         -- Any hit ends a run of resolver misses ("two in a row")
         rec.aim_miss_streak = 0
+        rec.last_outcome = is_head and "h" or "b"
         if d.side ~= 0 and is_head then
             rec.hit_side  = d.flip and -d.side or d.side
             rec.hit_count = rec.hit_count + 1
@@ -4239,14 +4249,14 @@ local function on_aim_hit(e)
         end
     end
 
-    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s%s%s",
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s%s%s",
         entity.get_player_name(e.target) or "?",
         HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
         isnum(e.damage) and math.floor(e.damage) or 0,
         d.meth, d.val, d.bt, d.state or "?", d.sspd or -1, d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
-        (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0, d.cor or "?",
+        (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0, d.cor or "?", d.ls or -1, d.prv or "-",
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
     SHOTS[e.id] = nil
@@ -4309,13 +4319,17 @@ local function on_aim_miss(e)
     end
 
     local is_resolver = reason == "?" or reason == "" or reason == "prediction error"
+    do
+        local ro = d.s64 and REC[d.s64]
+        if ro then ro.last_outcome = is_resolver and "m" or "o" end
+    end
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s%s%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s%s%s",
         entity.get_player_name(e.target) or "?",
         reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.sspd or -1, d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
-        (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0, d.cor or "?",
+        (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0, d.cor or "?", d.ls or -1, d.prv or "-",
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
 

@@ -5,7 +5,7 @@ and what comes next. Older versions are kept in `versions/` so none of the
 work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 (the decision engine), `riftveil_v8.1.lua`.
 
-## In the script (v8.10)
+## In the script (v8.11)
 
 | Area | Feature | Changes shots? |
 |---|---|---|
@@ -44,6 +44,13 @@ post-v6.2 features off, the script forces the same side and value as v6.2.
    (6 head, 1 miss); the frame count matters, not the pitch on the shot.
 7. **Seeded start 86% (12/14) vs cold start 60% (18/30):** the inflated
    seed (Next 4) doesn't hurt; it stays.
+
+## From the repo survey (docs/REPO_SURVEY.md), each waiting on its log table
+
+- **Force pitch on a pitch breaker** -- `BY ENEMY PITCH AT FIRE`.
+- **Hit memory inside the anti-bruteforce window** -- `BY PREVIOUS SHOT AT
+  THEM` / `BY TIME SINCE OUR LAST SHOT AT THEM`.
+- **Freestand side** -- needs its own log field first.
 
 ## Next, in order
 

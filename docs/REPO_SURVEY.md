@@ -1,0 +1,136 @@
+# Survey: s0daa/CSGO-HVH-LUAS (v8.11)
+
+What 5,220 files of public HvH scripts say about resolving, about the anti-aim
+RIFTVEIL faces, and what is worth adding. Every number below was counted by
+script over the repo (github.com/s0daa/CSGO-HVH-LUAS, Oct 2026), not read off
+menus. Copies were removed by hashing each file with whitespace and comments
+stripped.
+
+## What is in the repo
+
+| Folder | Files | Used here |
+|---|---|---|
+| Gamesense/lua | 2,304 | 1,371 readable unique (117 obfuscated, 9 stubs); 569 of them anti-aim scripts |
+| Gamesense/resolver | 94 | 67 readable (about 45 distinct), 27 obfuscated |
+| Gamesense/lua setts, cfg | 855 | 617 unique settings exports, 79 decodable |
+| Gamesense/lib | 33 | the shared libraries (cheat_revealer, antiaim_funcs, trace, csgo_weapons ...) |
+| Neverlose/lua | 127 | 115 anti-aim scripts |
+| Primordial/lua, resolver | 1,280 | resolvers only (7) |
+| CS2, Other | ~200 | not CS:GO resolving |
+
+## 1. Resolvers: what they do, against what RIFTVEIL does
+
+Signals used by the ~45 distinct readable gamesense resolvers:
+
+| Technique | Resolvers | In RIFTVEIL |
+|---|---|---|
+| Animlayer reads (layer 6 weight / rate, cycle) | most | yes (6lex, layer 6 state) |
+| Animstate (goal feet / eye yaw, duck, speed fraction) | most | yes, same struct (field-for-field match with antiaim_funcs) |
+| Max desync = Valve GetMaxDesyncDelta formula (Synaple, vandal, metaset) | many | better: the live min/max yaw from the animstate (LiveCap) |
+| Jitter side from the circular mean of the last two eye yaws (Synaple CDetectDesyncSide) | several | yes, identical (YawSide) |
+| "Animlayer resolver" with left / centre / right playback rates (vandal, Cartel) | 3 | no, and not real: the slots are filled from its own guess, nothing is re-animated (Lua can't without hooks) |
+| Freestanding from wall traces (GILVzQi, PhantomSight, kitty) | 5 | no; but GILVzQi's traces start at OUR eye, i.e. our own AA's freestanding misapplied to the enemy |
+| Pitch breaker: pitch jump > 37 deg between frames -> "Force pitch" to the down value + safe point (GILVzQi) | 1 (+64 files use Force pitch) | no -- see candidates |
+| "Defensive AA resolver": grounded enemy with pitch < -1 -> Force pitch 0, body yaw 0 (Miracle / Starlight) | 3 | no -- see candidates |
+| Roll zeroing: m_angEyeAngles[2] = 0 every frame (GILVzQi) | 1 | no; roll isn't in what RIFTVEIL reads |
+| Neural networks / "AI" (Neural_resolver, resolverx, mah0ver, chatgpt ...) | ~10 | no; none trains on anything but its own miss events, most are templates |
+| Bruteforce on miss | ~15 | yes (v6.2 flip after resolver misses) |
+
+**"Correction active" confirmed again.** Every resolver that hands a player
+back sets it **true** (Bloodedge, GILVzQi, Synaple, mah0ver, hysteria,
+angelwings, bounty, random_reso2: 8 distinct files). Only "skeet resolver sucks" and
+metaset set it false, to switch gamesense's own resolver off while theirs
+runs. That is the v8.8 fix.
+
+**The cheat revealer in Gamesense/lib is byte-identical** to the one ported
+into RIFTVEIL (same leak header, 5 differing lines: header and final
+newline). No newer signatures exist in this repo.
+
+## 2. The anti-aim RIFTVEIL faces
+
+Mentions in 569 gamesense and 115 neverlose anti-aim scripts. A mention is
+not proof of use -- most scripts reference gamesense's own controls
+(Freestanding body yaw, Edge yaw, Roll, Fake lag) only to hide or override
+them -- so read the gamesense column for scripted features:
+
+| Feature | gamesense | neverlose | RIFTVEIL's answer |
+|---|---|---|---|
+| Conditional builder (per movement state) | 92% | -- | per-state tables, condition tracker (91.7% vs 93.1% ceiling) |
+| Delayed / tick jitter | 81% | 75% | HOLD detection, torso clusters |
+| Defensive AA | 75% | 73% | v8.10 skips defensive frames (backward simtime) |
+| force_defensive in the command | 69% | 70% | same |
+| Defensive pitch (up / zero / random) | 43% | 55% | logged (pit=); v8.8 log: no cost at fire |
+| Center / offset / random jitter | 62-69% | -- | 2-way / skitter classes |
+| Skitter | 42% | -- | SKITTER class |
+| 3-way / 5-way (x-way) | 24% / 14% | 57% | THREE_WAY / FIVE_WAY classes |
+| Body yaw jitter / opposite / static | 37% / 62% / 76% | inverter 83% | the core's side tracking |
+| Anti-bruteforce | 36% | 59% | see section 3 |
+| Fake flick | 21% | 22% | none specific |
+| Animation / leg breakers | 71% / 76% | -- | own-model visuals, no effect on hitboxes |
+
+## 3. Anti-bruteforce, in detail
+
+207 gamesense AA scripts carry it (68 neverlose). How it works in the code:
+
+- **Trigger:** our bullet. 173 use `bullet_impact`: the closest point of our
+  bullet's ray to their eye within **100 units** (most common; 35-45 in
+  others). 86 also use `player_hurt`. A hit that doesn't kill passes inside
+  that radius too.
+- **Reaction:** change the jitter (83%), change the fake limit / body yaw
+  value (49%), cycle phases (39%), change the yaw offset (33%), invert the
+  side (30%), randomise (30%). The Oceanrage family: toggle side if "Side"
+  is ticked, random yaw offset of +-7.
+- **Reset:** after a timer (61%: 1 s and 5 s most common) and at round start.
+
+What it means for RIFTVEIL: the shot after one that passed near them, inside
+the reset window, faces a changed AA. Reconstructed from the v8.8 log's
+timestamps (resolver-decided shots, head / miss):
+
+| Since our last shot at them | Head | Miss |
+|---|---|---|
+| first shot | 5 | 1 |
+| < 5 s | 6 | 0 |
+| 5 s + | 19 | 12 |
+
+No sign anti-bruteforce cost us in that match; the misses are on fresh
+re-engagements. v8.11 logs `ls=` (seconds since our last shot at them) and
+`prv=` (its outcome) on every shot so log_report can keep checking.
+
+## 4. Presets and settings exports
+
+- **Neverlose luasense beta** ships 5 built-in presets; its first is
+  RIFTVEIL's luasense_beta table on all 7 states (v8.10).
+- **No gamesense AA script in the repo ships an embedded preset** with per-
+  state left/right yaw (0 of 569); their values come from each player's
+  imported settings. So there is no new fingerprint to add from gamesense,
+  and the live recogniser (pose spread per player) stays the right tool.
+- **Settings exports:** 79 of 617 decode (the rest use per-script ciphers),
+  giving 906 left/right yaw pairs. Medians by state, |left| / |right|:
+  standing 22 / 10, running 34 / 30, slowmotion 25 / 23, crouch 31 / 32,
+  crouch-moving 24 / 15, air 10 / 10, air-crouch 32 / 19 -- with
+  interquartile ranges ~20 degrees wide. No single setup is the meta.
+  These are yaw-add offsets, not the correction angle RIFTVEIL writes, so the
+  default table is not retuned from them (v6.2 measured 74% with it).
+
+## 5. Candidates, ranked, and what decides each
+
+1. **Force pitch on a pitch breaker** (GILVzQi: pitch jump > 37 deg -> force
+   the down value for that tick + safe point). Defensive pitch is in 43-55% of
+   AA scripts. The v8.8 log saw off-down pitch at fire on 7 resolver-decided
+   shots: 6 head, 1 miss -- no cost yet. Decided by `BY ENEMY PITCH AT FIRE`.
+2. **Hit memory and anti-bruteforce.** A non-lethal hit triggers the
+   enemy's switch. If `BY PREVIOUS SHOT AT THEM` shows "after a head hit"
+   falling well below the rest, hit memory should not reuse a side within the
+   reset window. v8.8: 64% after a head hit vs 73% after a body hit -- no
+   gap yet.
+3. **Freestand side** (trace from either side of the enemy's head to our eye;
+   freestanding body yaw hides the real side from the threat). Needs a log
+   field first, and in 2v2 the enemy's threat may be our teammate.
+4. **Roll.** RIFTVEIL doesn't read the roll angle. GILVzQi zeroes it
+   client-side; whether roll AA works on unmatched.gg and moves the server
+   hitboxes isn't established here. No action without a log showing it.
+5. Not worth porting: neural / "AI" resolvers, the fake animlayer resolver,
+   our-eye freestanding, hook-based animation rebuilds (metaset; unsafe).
+
+Sources: the repo above; earlier passes in this repo cover tickcount's
+lagrecord (defensive frames) and voice-listener (primordial).
