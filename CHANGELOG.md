@@ -3,6 +3,24 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.36  – Steer gamesense instead of replacing it.
+          BEAT_BUILTIN -- the public resolvers that work with gamesense
+          (hysteria / jitterresolver / AlynResolver / GS_RESOLVER -- one
+          script copied five times -- Bloodedge) set Force body yaw only in
+          the moment they know more and leave it off, gamesense's own
+          resolver, everywhere else. Force body yaw is the only lever into
+          gamesense's resolver; the question is when to pull it. Now: a
+          RIFTVEIL method forces only while its learned head rate keeps
+          within 5 points of gamesense's own -- on the enemy's cheat when
+          both have 8+ head-aimed shots there, else across every enemy (new
+          "all" bucket, credited whether a cheat is detected or not, saved
+          like the rest). Below that the enemy goes back to gamesense; every
+          4th shot still tries the method so it can earn its way back.
+          Across the logs gamesense lands 65%: DCK 77%, suppress 70%, hit
+          memory 67% keep forcing; PKA 47%, CTR 50% would hand back. Debug
+          log / save: "[cheat] learned all: ...". Off in the parity run;
+          harness covers release, probe, keep, cheat-vs-all bucket, credit
+          without a cheat and the v6.2 path, each mutation-checked.
   v8.35  – Plan steps 2 and 3 in code: read the enemy, not ourselves; one
           magnitude for every lua.
           POSE_CLEAN -- the AA picture, confidence, side, flips and the

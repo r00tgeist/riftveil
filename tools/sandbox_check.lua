@@ -511,7 +511,7 @@ if os.getenv("RV_PARITY") then
     end
     local F
     for _, cb in pairs(CALLBACKS) do F = F or find(cb, 0) end
-    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false; F.POSE_CLEAN = false; F.FULL_DESYNC = false end
+    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false; F.POSE_CLEAN = false; F.FULL_DESYNC = false; F.BEAT_BUILTIN = false end
 end
 
 local cb_errors = {}
@@ -2180,6 +2180,43 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         W.live = live0
     else
         UNIT_FAIL[#UNIT_FAIL + 1] = "full desync test: CfgAngle / REC / EIDX_S64 / FEATURE not reachable"
+    end
+end
+
+-- Beat builtin (FEATURE.BEAT_BUILTIN): a method more than 5 points under
+-- gamesense's own head rate releases the enemy (every 4th shot probes it);
+-- level with it, it forces. The enemy's cheat bucket counts when it has the
+-- data, else "all"; credits reach "all" without a detected cheat. v6.2
+-- (flag off) trusts the method either way.
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local CT, CC, CS, F = probe("CheatTrusts"), probe("CheatCredit"), probe("CHEAT_STATS"), probe("FEATURE")
+    if CT and CC and CS and F then
+        local all0, nl0 = CS.all, CS.nl
+        local rec = {cheat = nil, shots_fired = 1}
+        F.BEAT_BUILTIN = true
+        CS.all = {builtin = {h = 20, m = 5}, suppress = {h = 5, m = 20}, hit_mem = {h = 19, m = 6}}
+        if CT(rec, "suppress") then UNIT_FAIL[#UNIT_FAIL + 1] = "beat builtin: suppress at 21% vs gamesense 78% still forced" end
+        rec.shots_fired = 4
+        if not CT(rec, "suppress") then UNIT_FAIL[#UNIT_FAIL + 1] = "beat builtin: the every-4th-shot probe didn't try suppress" end
+        rec.shots_fired = 1
+        if not CT(rec, "hit_mem") then UNIT_FAIL[#UNIT_FAIL + 1] = "beat builtin: hit memory level with gamesense was released" end
+        -- the cheat's own bucket wins when it has both sides
+        CS.nl = {builtin = {h = 10, m = 15}, suppress = {h = 11, m = 14}}
+        rec.cheat = "nl"
+        if not CT(rec, "suppress") then UNIT_FAIL[#UNIT_FAIL + 1] = "beat builtin: on nl (suppress level with gamesense there) the 'all' bucket was used" end
+        -- credit without a detected cheat
+        CS.all = nil
+        CC(nil, "vuln_unk", true)
+        if not (CS.all and CS.all.vuln_unk and CS.all.vuln_unk.h == 1) then UNIT_FAIL[#UNIT_FAIL + 1] = "beat builtin: a credit with no cheat didn't reach 'all'" end
+        -- v6.2 path
+        F.BEAT_BUILTIN = false
+        rec.cheat = nil
+        CS.all = {builtin = {h = 20, m = 5}, suppress = {h = 5, m = 20}}
+        if not CT(rec, "suppress") then UNIT_FAIL[#UNIT_FAIL + 1] = "beat builtin test: flag off released suppress -- not v6.2's behaviour" end
+        F.BEAT_BUILTIN = true
+        CS.all, CS.nl = all0, nl0
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "beat builtin test: CheatTrusts / CheatCredit / CHEAT_STATS / FEATURE not reachable"
     end
 end
 

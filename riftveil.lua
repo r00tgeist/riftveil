@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.35"
+local RV_VERSION = "8.36"
 
 local ffi = require "ffi"
 
@@ -979,6 +979,13 @@ local FEATURE = {
     -- the luasense yaw-offset tables, for any lua and any settings. Hit
     -- memory takes the same speed-aware limit. Off in the v6.2 parity run.
     FULL_DESYNC = true,
+    -- v8.36: gamesense resolves by default; a RIFTVEIL method forces only
+    -- while its learned head rate (per enemy cheat, else across everyone)
+    -- keeps within 5 points of gamesense's own -- probed every 4th shot.
+    -- Across the logs gamesense lands 65%; forcing pays where we beat that
+    -- (DCK 77%, suppress 70%, hit memory 67%) and cost where we don't (PKA
+    -- 47%, CTR 50%, suppress on 5-way 56%). Off in the v6.2 parity run.
+    BEAT_BUILTIN = true,
     -- These three are the v6.2 [EXP] switches as the logs show them
     -- running when the resolver hit 74% (suppress fired in every v6.2
     -- match; jitter prediction never did).
@@ -2830,7 +2837,7 @@ do
     local raw = database.read(CHEAT_DB_KEY)
     if type(raw) == "table" then
         for id, T in pairs(raw) do
-            if CHEAT_NAMES[id] and type(T) == "table" then
+            if (CHEAT_NAMES[id] or id == "all") and type(T) == "table" then
                 local dst = {}
                 for meth, c in pairs(T) do
                     if type(meth) == "string" and type(c) == "table" and isnum(c.h, 0) and isnum(c.m, 0) then
@@ -2844,7 +2851,28 @@ do
     end
 end
 
+-- FEATURE.BEAT_BUILTIN: gamesense resolves by default; one of our methods
+-- forces only while it keeps up with gamesense's own head rate -- on the
+-- enemy's cheat when both have CP.MIN_N head-aimed shots there, else across
+-- everyone ("all"). More than CP.MARGIN below it: the enemy goes back to
+-- gamesense, and every CP.PROBE_EVERY-th shot still tries the method. The
+-- public resolvers that steer gamesense work the same way: Force body yaw
+-- on only where they know more, off (gamesense's own) everywhere else.
+CP.MARGIN = 0.05
+local function Rate(st) return (st.h + 1) / (st.h + st.m + 2) end
+local function Enough(st) return st and st.h + st.m >= CP.MIN_N end
+local function BeatsBuiltin(rec, meth)
+    local T = rec.cheat and CHEAT_STATS[rec.cheat]
+    if not (T and Enough(T[meth]) and Enough(T.builtin)) then T = CHEAT_STATS.all end
+    local sm, sb = T and T[meth], T and T.builtin
+    if not (Enough(sm) and Enough(sb)) then return true end
+    return Rate(sm) >= Rate(sb) - CP.MARGIN
+end
+
 local function CheatTrusts(rec, meth)
+    if FEATURE.BEAT_BUILTIN and meth ~= "builtin" and not BeatsBuiltin(rec, meth) then
+        return ((rec.shots_fired or 0) % CP.PROBE_EVERY) == 0
+    end
     if not DET.cheat then return true end
     local c = rec.cheat
     local st = c and CHEAT_STATS[c] and CHEAT_STATS[c][meth]
@@ -2882,14 +2910,19 @@ CheatDB = {
     end,
 }
 
-local function CheatCredit(cheat, meth, head)
-    if not (cheat and CHEAT_NAMES[cheat] and type(meth) == "string") then return end
-    local T = CHEAT_STATS[cheat]
-    if not T then T = {}; CHEAT_STATS[cheat] = T end
+local function Credit1(id, meth, head)
+    local T = CHEAT_STATS[id]
+    if not T then T = {}; CHEAT_STATS[id] = T end
     local st = T[meth]
     if not st then st = {h = 0, m = 0}; T[meth] = st end
     if head then st.h = st.h + 1 else st.m = st.m + 1 end
     CP.Fit(st)
+end
+local function CheatCredit(cheat, meth, head)
+    if type(meth) ~= "string" then return end
+    if cheat and CHEAT_NAMES[cheat] then Credit1(cheat, meth, head) end
+    -- every enemy, cheat known or not: what BEAT_BUILTIN falls back on
+    if FEATURE.BEAT_BUILTIN then Credit1("all", meth, head) end
 end
 
 -- ══════════════════════════════════════════════════════════════════

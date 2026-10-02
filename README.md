@@ -120,7 +120,12 @@ against the ragebot's own damage prediction. How and why, with sources:
    their body-yaw limit sits at 60 almost everywhere, so one model covers
    luasense and every other script and setting. The old luasense tables
    (yaw offsets) are only used with `FEATURE.FULL_DESYNC` off.
-3. **What works per cheat is learned.** Every head-aimed shot (head hit or
+3. **Gamesense first (v8.36).** Force body yaw is the only lever into
+   gamesense's resolver, so RIFTVEIL pulls it only where it does better:
+   each method forces while its learned head rate keeps within 5 points of
+   gamesense's own (per enemy cheat, else across every enemy), and hands
+   the enemy back otherwise -- every 4th shot still tries it.
+4. **What works per cheat is learned.** Every head-aimed shot (head hit or
    resolver miss) is filed under (enemy cheat, method) across all players
    on that cheat and saved between sessions. A method at 30% or worse against a cheat after
    8+ shots is skipped for that cheat (every 4th shot still tries it, so it
