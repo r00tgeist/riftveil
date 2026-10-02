@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.33"
+local RV_VERSION = "8.34"
 
 local ffi = require "ffi"
 
@@ -955,6 +955,19 @@ local FEATURE = {
     -- (gamesense's resolver and our own override), not theirs. Off in the
     -- v6.2 parity run.
     NO_CHOKE_STATIC = true,
+    -- v8.34: the side chain and suppress stand down only for a vuln window
+    -- that is forced. v6.2 checked the window count alone, so a window it
+    -- didn't apply (Vulnerability off, the enemy's cheat distrusting that
+    -- type, confidence under the window minimum) switched suppress off for
+    -- 11 records. Off in the v6.2 parity run.
+    WINDOW_GATE = true,
+    -- v8.34: gamesense's own hit ends its miss streak (meta takeover after
+    -- two in a row); v6.2 only reset it on our hits. Off in the parity run.
+    META_STREAK = true,
+    -- v8.34: the aim policy never forces safe point (see AIMX Decide for
+    -- the numbers). Head kill -> head only, body kill -> body, else the
+    -- ragebot's own setting. Aim policy only.
+    NO_SAFEPOINT = true,
     -- These three are the v6.2 [EXP] switches as the logs show them
     -- running when the resolver hit 74% (suppress fired in every v6.2
     -- match; jitter prediction never did).
@@ -3303,6 +3316,12 @@ local function ProcessPlayer(player, ctx)
         end
 
         -- Sample
+        -- the server's LBY target: when it last moved (shot log lbyu=)
+        local lby = entity.get_prop(player, "m_flLowerBodyYawTarget")
+        if isnum(lby) then
+            if isnum(rec.lby_last) and math.abs(NA(lby - rec.lby_last)) > 1 then rec.lby_t = globals.realtime() end
+            rec.lby_last = lby
+        end
         local praw = entity.get_prop(player, "m_flPoseParameter", 11) or 0
         pose = praw * CFG.POSE_SCALE - 60
         local _, eyy = entity.get_prop(player, "m_angEyeAngles")
@@ -3532,7 +3551,21 @@ local function ProcessPlayer(player, ctx)
         local tracked_method = METH.RING
         rec._brute_half       = false  -- set true below only on a true blind-guess tick
 
-        if rec.vuln_ttl == 0 then
+        -- Lower confidence threshold when meta_aggressive — even a weaker
+        -- vuln read beats the known-failing built-in.
+        local vuln_min = rec.meta_aggressive and 0.20 or 0.35
+        -- The vuln window is forced this record (the [1] branch below).
+        local vuln_on = DET.vuln and rec.vuln_ttl > 0 and rec.conf >= vuln_min
+                        and CheatTrusts(rec, "vuln_" .. tostring(rec.vuln_type))
+        -- FEATURE.WINDOW_GATE: only a window we force stands the side chain
+        -- and suppress down. v6.2 used vuln_ttl alone, so a window it didn't
+        -- apply (Vulnerability off, the cheat distrusting that type, low
+        -- confidence) switched suppress off for its 11 records and left the
+        -- fallback on the raw, unflipped side.
+        local window_blocks
+        if FEATURE.WINDOW_GATE then window_blocks = vuln_on else window_blocks = rec.vuln_ttl > 0 end
+
+        if not window_blocks then
             -- No active vuln window — run the side detection chain
             if rec.hit_count >= 2 and rec.hit_side ~= 0 then
                 -- Empirical: hit this player on this side this match
@@ -3651,11 +3684,7 @@ local function ProcessPlayer(player, ctx)
         local sup_pausing     = false  -- true only during the suppress streak-cap's pause window
 
         -- [1] Vulnerability window: correction is deterministic.
-        -- Lower confidence threshold when meta_aggressive — even a weaker
-        -- vuln read beats the known-failing built-in.
-        local vuln_min = rec.meta_aggressive and 0.20 or 0.35
-        if DET.vuln and rec.vuln_ttl > 0 and rec.conf >= vuln_min
-           and CheatTrusts(rec, "vuln_" .. tostring(rec.vuln_type)) then
+        if vuln_on then
             should_override = true
             override_val    = rec.vuln_val
             override_meth   = "vuln_" .. rec.vuln_type
@@ -3723,7 +3752,7 @@ local function ProcessPlayer(player, ctx)
         -- tick instead of pausing for 4. Fixed with a dedicated pause counter
         -- (_sup_pause) and sup_pausing, which tells the bookkeeping below not
         -- to blow the counters away while a deliberate pause is in progress.
-        elseif FEATURE.SUPPRESS and rec.vuln_ttl == 0 and CheatTrusts(rec, METH.SUPPRESS) then
+        elseif FEATURE.SUPPRESS and not window_blocks and CheatTrusts(rec, METH.SUPPRESS) then
             local is_jitter = aa_type == AA.TWO_WAY  or aa_type == AA.THREE_WAY
                             or aa_type == AA.FIVE_WAY or aa_type == AA.SKITTER
                             or aa_type == AA.HOLD
@@ -4008,6 +4037,12 @@ end
 --   doubt; air: enemy airborne.
 local function Decide(hp, head, body, dt2, unsure, air)
     if not (isnum(hp) and hp > 0) then return "-" end
+    -- FEATURE.NO_SAFEPOINT: never force safe point. Across the logs it
+    -- landed worse than plain shots (sp 47%, head kill + safe point 50%,
+    -- ragebot default 57%, head kill 86%); against x-way after a resolver
+    -- miss it gave 48% (34/71) where no safe point gave 43% (25/58) -- no
+    -- real gain, and safe point is what makes the ragebot wait.
+    if FEATURE.NO_SAFEPOINT then unsure, air = false, false end
     if body >= hp or (dt2 and body * 2 >= hp) then return "body" end
     if head >= hp then return (unsure or air) and "headsp" or "head" end
     if unsure then return "sp" end
@@ -4266,7 +4301,7 @@ local function Tail(segs, d, rec, blame)
     if fl ~= "" then p[#p + 1] = "fl=" .. fl end
     if blame and rec then
         p[#p + 1] = "streak=" .. (rec.aim_miss_streak or 0)
-        if DET.aim and AIMX.InDoubt(rec, globals.realtime()) then p[#p + 1] = "next=sp" end
+        if DET.aim and not FEATURE.NO_SAFEPOINT and AIMX.InDoubt(rec, globals.realtime()) then p[#p + 1] = "next=sp" end
     end
     p[#p + 1] = "lc=" .. lg.lc
     p[#p + 1] = "tc=" .. lg.tc
@@ -4573,6 +4608,20 @@ local function LbyDelta(ent)
     return math.floor(NA(eye - lby) + 0.5)
 end
 
+-- The enemy's eye yaw against facing straight away from us (yaw base "at
+-- targets" + 180): an AA that picks its left / right yaw offset by desync
+-- side shows that side here, in data the server sends (shot log eo=).
+local function EyeOffset(ent, me)
+    if not me then return "-" end
+    local _, eye = entity.get_prop(ent, "m_angEyeAngles")
+    local ex, ey = entity.get_origin(ent)
+    local mx, my = entity.get_origin(me)
+    if not (isnum(eye) and isnum(ex) and isnum(ey) and isnum(mx) and isnum(my)) then return "-" end
+    if (mx - ex) ^ 2 + (my - ey) ^ 2 < 1 then return "-" end
+    local to_me = math.deg(math.atan2(my - ey, mx - ex))
+    return string.format("%d", math.floor(NA(eye - (to_me + 180)) + 0.5))
+end
+
 local function CorrectionActive(ent)
     local ok, v = pcall(plist.get, ent, "Correction active")
     if not ok or v == nil then return "?" end
@@ -4669,6 +4718,9 @@ local function on_aim_fire(e)
         -- 262 uses in the public scripts take its sign as the desync side;
         -- logged to test that against our forced side (measurement only)
         lbyd    = LbyDelta(t),
+        eo      = EyeOffset(t, me),
+        -- seconds since the server last moved their LBY target (- = not seen)
+        lbyu    = (r and isnum(r.lby_t)) and string.format("%.2f", globals.realtime() - r.lby_t) or "-",
         prv     = r and r.last_outcome or "-",
     }
     if r then r.last_fire_t = globals.realtime(); r.last_outcome = "-" end
@@ -4714,7 +4766,11 @@ local function on_aim_hit(e)
         -- doesn't permanently suppress the built-in if we later hit with hit_mem,
         -- 6lex, or any non-builtin method. Checked here, not inside the vuln gate,
         -- so hit_mem and ring-buffer hits also reset it correctly.
-        if d.meth ~= "builtin" then
+        -- FEATURE.META_STREAK: the streak counts gamesense's misses in a
+        -- row, so its own hit ends it too. v6.2 reset it only on our hits,
+        -- so builtin miss, hit, miss read as "failing twice" and handed the
+        -- enemy to the aggressive mode.
+        if d.meth ~= "builtin" or FEATURE.META_STREAK then
             rec.builtin_miss_streak = 0
         end
         -- Only count head and neck hits as confirmed side for hit_mem.
@@ -4786,7 +4842,7 @@ local function on_aim_hit(e)
         end
     end
 
-    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d aa=%s%s%s",
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d eo=%s lbyu=%s aa=%s%s%s",
         entity.get_player_name(e.target) or "?",
         HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
         isnum(e.damage) and math.floor(e.damage) or 0,
@@ -4794,6 +4850,7 @@ local function on_aim_hit(e)
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
         (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0, d.cor or "?", d.ls or -1, d.prv or "-", d.lbyd or 999,
+        d.eo or "-", d.lbyu or "-",
         AA_SHORT[d.aa] or "?",
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
@@ -4866,12 +4923,13 @@ local function on_aim_miss(e)
         if ro then ro.last_outcome = is_resolver and "m" or "o" end
     end
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d aa=%s%s%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d eo=%s lbyu=%s aa=%s%s%s",
         entity.get_player_name(e.target) or "?",
         reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.sspd or -1, d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
         (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0, d.cor or "?", d.ls or -1, d.prv or "-", d.lbyd or 999,
+        d.eo or "-", d.lbyu or "-",
         AA_SHORT[d.aa] or "?",
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
@@ -5620,6 +5678,17 @@ client.set_event_callback("weapon_fire",   Instrument("weapon_fire", LOCALLC.OnS
 -- off still leaves its shots on disk.
 client.set_event_callback("round_start", Instrument("round_start", function()
     ResetPlist()
+    -- STALE_WINDOW: the list is clear, so is what each record says it
+    -- forces (v6.2 kept last round's method and window until the next
+    -- decision, and a shot before it was learned as that method)
+    if FEATURE.STALE_WINDOW then
+        for _, rec in pairs(REC) do
+            rec.active, rec.resolved = false, false
+            rec.last_meth, rec.last_val = "builtin", 0
+            rec.vuln_ttl = 0
+            rec._sup_streak, rec._sup_pause = 0, 0
+        end
+    end
     flush_log()
 end))
 client.set_event_callback("voice",       Instrument("voice", OnVoice))

@@ -28,6 +28,11 @@ Where we are: v6.2 measured 74%. Across all logs the methods sit at
 
 ## Step 2 -- read the enemy, not ourselves
 
+Candidates the server sends, logged on every shot since v8.34: `eo=` (eye
+yaw against facing away from us -- L/R-yaw AAs choose the offset by desync
+side) and `lbyu=` (time since their LBY target moved). log_report tables
+`EYE OFFSET vs FORCED SIDE` and `SINCE THEIR LBY TARGET LAST MOVED`.
+
 Already shown without the probe: 64 shots at bots (no desync) were labelled
 static only 8 times; we forced a value on 54. v8.33 makes non-choking
 enemies static from the server's record timing (`NO_CHOKE_STATIC`); static
@@ -63,6 +68,10 @@ Decided by the probe.
   (stuck at 18-32 today) no worse than the right.
 
 ## Step 4 -- suppress where it pays, no waiting
+
+Done in v8.34 for the waiting: forced safe point is off (`NO_SAFEPOINT`) --
+47-50% head rate against 57% for the ragebot default and 86% for a head
+kill, and no gain where it was meant to help.
 
 - Suppress stays: 70% overall, 92% on 2-way, 83% skitter, 72% 3-way, 69%
   hold. Only 5-way is weak (56%, 16 shots): switch it off there if 5-way

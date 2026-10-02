@@ -382,6 +382,10 @@ local mock = {
         if #content < from then from = 0 end
         for line in content:sub(from + 1):gmatch("[^\n]+") do
             if line:find("%]%[ERR%]") then ERR_LINES[#ERR_LINES + 1] = line end
+            if (line:find("][miss]", 1, true) or line:find("][hit]", 1, true)) and not line:find(" discarded ", 1, true) then
+                SHOT_SEEN = (SHOT_SEEN or 0) + 1
+                if line:find(" eo=%-?[%d]* lbyu=[%d%.%-]+ aa=") then SHOT_EO = (SHOT_EO or 0) + 1 end
+            end
             if line:find("][corr]", 1, true) then
                 CORR_SEEN = (CORR_SEEN or 0) + 1
                 if line:find(" pz=%-?%d* pf=%-?%d*$") then CORR_PROBED = (CORR_PROBED or 0) + 1 end
@@ -507,7 +511,7 @@ if os.getenv("RV_PARITY") then
     end
     local F
     for _, cb in pairs(CALLBACKS) do F = F or find(cb, 0) end
-    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false end
+    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false end
 end
 
 local cb_errors = {}
@@ -1109,13 +1113,22 @@ do
             {100,  80,  40, false, false, false, "-"},       -- nothing kills: ragebot default
             {0,   448, 112, false, false, false, "-"},       -- dead / no HP read
         }
-        for i, c in ipairs(cases) do
-            local got = AX.Decide(c[1], c[2], c[3], c[4], c[5], c[6])
-            if got ~= c[7] then
-                UNIT_FAIL[#UNIT_FAIL + 1] = string.format("AIMX.Decide case %d (hp %d head %d body %d): got %s, expected %s",
-                    i, c[1], c[2], c[3], tostring(got), c[7])
+        -- the safe-point policy (FEATURE.NO_SAFEPOINT off), then without it:
+        -- head kill -> head, nothing kills -> the ragebot's own setting
+        local FE = probe("FEATURE")
+        local nosp = {headsp = "head", sp = "-"}
+        for _, flag in ipairs({false, true}) do
+            if FE then FE.NO_SAFEPOINT = flag end
+            for i, c in ipairs(cases) do
+                local want = (flag and nosp[c[7]]) or c[7]
+                local got = AX.Decide(c[1], c[2], c[3], c[4], c[5], c[6])
+                if got ~= want then
+                    UNIT_FAIL[#UNIT_FAIL + 1] = string.format("AIMX.Decide case %d (hp %d head %d body %d, no safe point %s): got %s, expected %s",
+                        i, c[1], c[2], c[3], tostring(flag), tostring(got), want)
+                end
             end
         end
+        if FE then FE.NO_SAFEPOINT = true end
         -- calibration: the ragebot predicts 4x our head trace on 5 shots
         local fh0 = AX.CAL.fh
         -- lethal predictions first: if the ragebot caps them at health they
@@ -1370,8 +1383,10 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
 
         -- a resolver miss through a wall: two impacts on the aimed ray
         rec.aa_type = "3way"
-        want("resolver", lines(function() shoot(92002); impact(500, 0); impact(1000, 0); miss(92002, "?") end),
-            "due to resolver:0.00°", " · RIFTVEIL ", "streak=", "next=sp")
+        local rl = lines(function() shoot(92002); impact(500, 0); impact(1000, 0); miss(92002, "?") end)
+        want("resolver", rl, "due to resolver:0.00°", " · RIFTVEIL ", "streak=")
+        -- no forced safe point (FEATURE.NO_SAFEPOINT): the line doesn't promise one
+        if (rl[1] or ""):find("next=sp", 1, true) then UNIT_FAIL[#UNIT_FAIL + 1] = "shot log: next=sp printed with safe point off" end
 
         -- double tap: the first bullet 3° off, the second on the ray --
         -- each result takes its own impact
@@ -1925,6 +1940,102 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     W.live = live0
 end
 
+-- Window gate (FEATURE.WINDOW_GATE): with "Vulnerability" (and 6lex) off, a counting
+-- window isn't forced, so it mustn't switch suppress off -- a jittering,
+-- fakelagging enemy gets suppress. v6.2 (flag off) released it.
+-- Round start (STALE_WINDOW): a record that was forcing comes back as
+-- builtin with no window; v6.2 kept last round's.
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local REC_T, EI, F = probe("REC"), probe("EIDX_S64"), probe("FEATURE")
+    local det_el
+    for _, el in ipairs(UI_ELEMS) do
+        if el.kind == "multi" and el.items and el.items[1] == "Vulnerability" then det_el = el end
+    end
+    if REC_T and EI and F and det_el then
+        local det0 = det_el.a
+        local function set_det(list) det_el.a = list; for _, cb in ipairs(UI_CALLBACKS) do pcall(cb) end end
+        local nov = {}
+        for _, it in ipairs(det_el.items) do if it ~= "Vulnerability" and it ~= "Desync angle" then nov[#nov + 1] = it end end
+        set_det(nov)
+        local live0 = W.live
+        local function run(flag, id)
+            F.WINDOW_GATE = flag
+            W.live = {101, 102, id}
+            W.players[id] = {sim = W.tick * TI, vx = 0, vy = 0, pose01 = 0.5, eye = 0, duck = 0, torso = 0, gfy = 0}
+            local r
+            for n = 1, 30 do
+                for _ = 1, 3 do   -- one record every 3 ticks: chokes, so not static
+                    W.tick = W.tick + 1; W.real = W.real + TI
+                    for _, p in ipairs({101, 102}) do W.players[p].sim = W.tick * TI end
+                    if _ == 3 then
+                        W.players[id].sim = W.tick * TI
+                        W.players[id].pose01 = (n % 2 == 0) and 0.15 or 0.85
+                    end
+                    r = EI[id] and REC_T[EI[id]]
+                    if r and n >= 20 then r.vuln_ttl, r.vuln_type, r.vuln_val = 11, "dck", 40 end
+                    fire("net_update_end")
+                end
+            end
+            W.players[id] = nil
+            return r and r.last_meth
+        end
+        local on, off = run(true, 123), run(false, 124)
+        F.WINDOW_GATE = true
+        set_det(det0)
+        if on ~= "suppress" then UNIT_FAIL[#UNIT_FAIL + 1] = "window gate: an unforced window (Vulnerability off) left " .. tostring(on) .. ", expected suppress" end
+        if off == "suppress" then UNIT_FAIL[#UNIT_FAIL + 1] = "window gate test: flag off still suppressed -- the test no longer reaches v6.2's block" end
+        W.live = live0
+        -- round start
+        local function rs(flag)
+            F.STALE_WINDOW = flag
+            local r = next(REC_T) and REC_T[next(REC_T)]
+            if not r then return nil end
+            r.active, r.last_meth, r.last_val, r.vuln_ttl = true, "suppress", -35, 6
+            fire("round_start")
+            return r.last_meth, r.vuln_ttl, r.active
+        end
+        local m1, t1, a1 = rs(true)
+        local m0, t0 = rs(false)
+        F.STALE_WINDOW = true
+        if not (m1 == "builtin" and t1 == 0 and a1 == false) then
+            UNIT_FAIL[#UNIT_FAIL + 1] = string.format("round start: record left as %s / window %s / active %s", tostring(m1), tostring(t1), tostring(a1))
+        end
+        if not (m0 == "suppress" and t0 == 6) then UNIT_FAIL[#UNIT_FAIL + 1] = "round start test: flag off cleared the record -- not v6.2's behaviour" end
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "window gate test: REC / EIDX_S64 / FEATURE / detection menu not reachable"
+    end
+end
+
+-- Meta streak (FEATURE.META_STREAK): gamesense miss, hit, miss is not two
+-- misses in a row -- no takeover. v6.2 (flag off) took over.
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local REC_T, EI, F, SH = probe("REC"), probe("EIDX_S64"), probe("FEATURE"), probe("SHOTS")
+    local r = EI and REC_T and EI[102] and REC_T[EI[102]]
+    if r and F and SH then
+        local function run(flag)
+            F.META_STREAK = flag
+            r.meta_aggressive, r.builtin_miss_streak = false, 0
+            local id = 95000
+            local function shot(outcome)
+                id = id + 1
+                r.last_meth, r.last_val, r.vuln_ttl, r.active = "builtin", 0, 0, false
+                fire("aim_fire", {id = id, target = 102, backtrack = 0, hit_chance = 80, hitgroup = 1, damage = 30})
+                if outcome == "miss" then fire("aim_miss", {id = id, target = 102, hitgroup = 1, reason = "?"})
+                else fire("aim_hit", {id = id, target = 102, hitgroup = 2, damage = 30}) end
+            end
+            shot("miss"); shot("hit"); shot("miss")
+            return r.meta_aggressive
+        end
+        local on, off = run(true), run(false)
+        F.META_STREAK = true
+        r.meta_aggressive, r.builtin_miss_streak = false, 0
+        if on then UNIT_FAIL[#UNIT_FAIL + 1] = "meta streak: builtin miss, hit, miss handed the enemy to the aggressive mode" end
+        if not off then UNIT_FAIL[#UNIT_FAIL + 1] = "meta streak test: flag off didn't take over -- the test no longer shows v6.2's reset" end
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "meta streak test: REC[102] / FEATURE / SHOTS not reachable"
+    end
+end
+
 -- Defensive frames: a frame whose simulation time is below the highest
 -- already received (lag compensation writes no record for it) is counted,
 -- and the next shot at that player carries the count (df=)
@@ -2146,6 +2257,9 @@ do
     end
     -- the v8.32 probe rides on every [corr] line: pose read and what we forced
     local corr, probed = CORR_SEEN or 0, CORR_PROBED or 0
+    if (SHOT_SEEN or 0) == 0 or SHOT_EO ~= SHOT_SEEN then
+        UNIT_FAIL[#UNIT_FAIL + 1] = string.format("shot lines: %d of %d carry eo= / lbyu=", SHOT_EO or 0, SHOT_SEEN or 0)
+    end
     if corr == 0 or probed ~= corr then UNIT_FAIL[#UNIT_FAIL + 1] = string.format("probe: %d of %d [corr] lines carry pz= / pf=", probed, corr) end
     bad = bad - (CRAFTED_COR0 or 0)   -- the shot log test's own "no resolver" shot
     if bad > 0 then UNIT_FAIL[#UNIT_FAIL + 1] = bad .. " builtin shot(s) fired with gamesense's resolver off (cor=0)" end

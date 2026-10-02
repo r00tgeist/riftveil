@@ -56,6 +56,7 @@ local by_lby = {}         -- v8.14+: eye-LBY delta sign vs forced side
 -- resolver miss on them less than 10 s before (FEATURE.XWAY_UNSURE).
 local by_aa, by_xway = {}, {}
 local by_lbyx = {}        -- LBY vuln windows on 3/5-way: a centre pass reads as an LBY snap
+local by_eo, by_lbyu = {}, {}  -- v8.34: eye offset from facing away from us; time since their LBY target moved
 local corr_aa, last_shot = {}, {}   -- per player: last [corr] aa=, last {kind, t}
 local probe_n, probe_total = {}, 0   -- v8.32 pz= / pf= probe on [corr] lines
 local by_seed, seed_of = {}, {}   -- v8.5.6+: DB-seeded start vs cold start, per player
@@ -190,6 +191,23 @@ for _, path in ipairs(files) do
                     or ((lbyd > 0) == (val > 0)) and "same sign as ours" or "opposite sign"
                 targets[#targets + 1] = bucket(by_lby, band)
             end
+            -- eo= (v8.34): their eye yaw against facing straight away from us.
+            -- If L/R yaw offsets follow the desync side, one sign row wins.
+            local eo = tonumber(field(line, "eo") or "")
+            if eo and val and val ~= 0 and meth ~= "builtin" then
+                local grp = meth == "suppress" and "sup" or (meth:match("^vuln") and "vuln" or "side")
+                local band = math.abs(eo) < 5 and "|eo| < 5"
+                    or ((eo > 0) == (val > 0)) and "same sign" or "opposite sign"
+                targets[#targets + 1] = bucket(by_eo, grp .. ": " .. band)
+            end
+            -- lbyu= (v8.34): seconds since the server moved their LBY target
+            local lu = field(line, "lbyu")
+            if lu then
+                local x = tonumber(lu)
+                local band = not x and "never seen move" or (x < 0.1 and "< 0.1 s (just moved)"
+                    or (x < 1.1 and "0.1-1.1 s" or "1.1 s +"))
+                targets[#targets + 1] = bucket(by_lbyu, band)
+            end
             if val and meth ~= "builtin" then
                 local v = math.min(math.abs(val), 60)
                 targets[#targets + 1] = bucket(by_mag, meth .. (v < 20 and " <20" or v < 40 and " 20-40" or " 40-60"))
@@ -303,6 +321,8 @@ report("BY TIME SINCE OUR LAST SHOT AT THEM (v8.11+: anti-bruteforce switches on
 report("BY PREVIOUS SHOT AT THEM (v8.11+)", by_prv)
 report("BY AA TYPE (aa= v8.15+, else the last [corr] line of a debug log)", by_aa)
 report("3/5-WAY AFTER A RESOLVER MISS ON THEM (v8.15: safe point on the head in the 3/5-way rmiss row; pre-v8 logs 43% there)", by_xway)
+report("EYE OFFSET vs FORCED SIDE (v8.34 eo=: their eye yaw against facing away from us, sign vs our forced value; sup = suppress, side = hit memory / meta; a winning row = a side signal the server sends)", by_eo)
+report("SINCE THEIR LBY TARGET LAST MOVED (v8.34 lbyu=; the server updates it moving and every 1.1 s standing)", by_lbyu)
 report("LBY WINDOWS BY AA TYPE (v8.28 check: on 3/5-way a centre pass reads as an LBY snap; pre-v8.28 logs head rate 59%, other vuln 56%: no harm seen)", by_lbyx)
 report("BY EYE - LBY DELTA vs OUR FORCED SIDE (v8.14+: 262 public uses read its sign as the side)", by_lby)
 report("BY FORCED VALUE PER METHOD (|val| clamped at 60, as the player list takes it)", by_mag)

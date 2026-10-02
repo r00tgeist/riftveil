@@ -52,7 +52,7 @@ it, so gamesense shows it in the console and in the top-left corner like its
 own logs:
 
 ```text
-[217] [244/251] Missed moral's head(98)(76%) due to resolver:0.03° · RIFTVEIL vuln_lby -24° [aa=5way | cf=62% | cht=nl | streak=1 | next=sp | lc=0 | tc=1]
+[217] [244/251] Missed moral's head(98)(76%) due to resolver:0.03° · RIFTVEIL vuln_lby -24° [aa=5way | cf=62% | cht=nl | streak=1 | lc=0 | tc=1]
 [218] [260/266] Hit moral's head for 98(98) (0 remaining) aimed=head(81%) · RIFTVEIL hit_mem +31° [aa=hold | cf=70% | pol=head | lc=1 | tc=2]
 [219] [301/307] Missed moral's chest(34)(70%) due to spread:1.84° · GAMESENSE resolver [aa=2way | cf=40% | fl=I | lc=0 | tc=0]
 Naded moral for 34 damage (66 remaining)
@@ -68,7 +68,7 @@ Naded moral for 34 damage (66 remaining)
 | `aa= cf= cht=` | AA type, confidence, enemy cheat |
 | `pol= sp=` | aim policy, safe point (`on` / `off` from the player list, `key` = Force safe point held) |
 | `fl=` | T teleported, I interpolated, E extrapolated, B accuracy boost, H high priority, D defensive |
-| `streak= next=sp` | resolver misses in a row on them; the aim policy goes to safe point for the next shot |
+| `streak=` | resolver misses in a row on them |
 | `lc= tc=` | our / their choked commands |
 
 Each shot takes its own bullet impacts for the angle, so a double tap's two
@@ -96,9 +96,9 @@ body, through whatever is in between.
 - **A body shot kills** (or two with a charged double tap on an auto,
   deagle or pistol) → prefer body.
 - **Only the head kills** (wallbang, body behind cover, scout on a full-HP
-  enemy) → body preference off for that enemy, so the head is taken. On
-  safe points if the resolver just missed twice, if they run 3-way / 5-way
-  and the resolver missed them in the last 10 s, or they're in the air.
+  enemy) → body preference off for that enemy, so the head is taken.
+  Safe point is never forced (since v8.34): in the logs it landed 47-50%
+  against 57% for plain shots, and it is what made the ragebot wait.
 - **Nothing kills** → your ragebot config as it is.
 
 The script checks the player-list fields in game and calibrates its traces

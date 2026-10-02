@@ -3,6 +3,41 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.34  – Full review of the resolver path, function by function.
+          FIXED (WINDOW_GATE) -- an open vuln window that was NOT being
+          forced (Vulnerability off, the enemy's cheat distrusting that
+          type, confidence under the window minimum) still stood the side
+          chain and suppress down for its 11 records; the fallback then used
+          the raw, unflipped side. Now only a forced window does.
+          FIXED (STALE_WINDOW) -- round start reset the player list but not
+          what each record says it forces (method, value, window, suppress
+          streak), so a shot before the round's first decision was learned
+          as last round's method.
+          FIXED (META_STREAK) -- the "gamesense failing twice in a row"
+          streak was reset only by OUR hits; gamesense's own hit didn't end
+          it, so builtin miss, hit, miss handed the enemy to the aggressive
+          mode.
+          CHANGED (NO_SAFEPOINT) -- the aim policy no longer forces safe
+          point. Across the logs: safe point 47%, head kill + safe point
+          50%, ragebot default 57%, head kill 86% head rate; on x-way after
+          a resolver miss 48% (34/71) with it against 43% (25/58) before it
+          existed -- no real gain, and it is what made the ragebot wait.
+          Head kill -> head only, body kill -> body, else the ragebot's own
+          setting. "In doubt" (2 misses, x-way after a miss) now decides
+          nothing; the x-way log table keeps measuring it.
+          NEW LOG FIELDS -- two side signals the server sends, on every shot
+          line, so the next logs can test them: eo= the enemy's eye yaw
+          against facing straight away from us (L/R-yaw AAs pick the offset
+          by desync side), lbyu= seconds since the server moved their LBY
+          target. log_report: EYE OFFSET vs FORCED SIDE, SINCE THEIR LBY
+          TARGET LAST MOVED.
+          Checked, no change: preferred_bt / vuln_pref are learned and saved
+          but no decision reads them (panel only); scout shots under the
+          ragebot default land 48% (87), mostly with no traced line to the
+          head -- peeks and extrapolated positions, gamesense no better
+          (8/13); "Tight interpolation" leaves the lag-comp window as the
+          default (lerp 0.031) and switches entity interpolation off.
+          Each fix: harness test running the v6.2 path too, mutation-checked.
   v8.33  – No choke, no desync: bots and no-AA players are static.
           The logs hold 64 shots at bots (Yogi, Neil, George, Toby, Allen,
           Ulysses, Marvin, Harvey -- no Steam ID). A bot has no desync, yet

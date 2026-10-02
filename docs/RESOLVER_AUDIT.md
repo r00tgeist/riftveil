@@ -1,4 +1,4 @@
-# Resolver audit (v8.32)
+# Resolver audit (v8.32, full review v8.34)
 
 Every function on the path from a network update to the value written into
 the player list, checked for what it reads, what it feeds, whether it fires
@@ -113,3 +113,19 @@ enemy from where heads land (plan step 3).
 Safe point at fire: 3% (v8.8), 9% (v8.24), **15% (v8.27)**, 4% (v8.28),
 7% (v8.29) -- the "delay" period and its end line up with it; suppress
 changes no timing. Plan step 4 adds a wait measurement.
+
+## Full review (v8.34)
+
+Every function on the path read in full, records to plist writes to shot
+events.
+
+| Finding | Fix |
+|---|---|
+| A counting vuln window that isn't forced (Vulnerability off, cheat distrust, low confidence) blocked the side chain and suppress for 11 records | `WINDOW_GATE` |
+| Round start cleared the player list but not each record's method / value / window | `STALE_WINDOW` (round start) |
+| gamesense's own hit didn't end its miss streak (meta takeover on miss, hit, miss) | `META_STREAK` |
+| Forced safe point: 47-50% head rate vs 57% default, 86% head kill; it is the waiting | `NO_SAFEPOINT` |
+| `preferred_bt`, `vuln_pref`: learned, saved, shown -- never used | none (display) |
+| No side signal from server data | logged: `eo=`, `lbyu=` |
+| Vuln windows need pose-derived confidence >= 0.20 to even be detected | plan step 2 (rebased with the pose) |
+| Saved profiles bring the recognised preset back at 0.5 trust -- enough to apply | plan step 3 (presets retired) |
