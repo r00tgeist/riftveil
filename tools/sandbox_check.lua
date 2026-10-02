@@ -2443,6 +2443,10 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
             reset()
             check(near(shot(9, 0, 1, 1, {meth = "builtin", gs = -40}), -1), "a builtin head hit didn't file gamesense's side -1")
             check(near(shot(9, 0, 1, 1, {meth = "builtin"}), -1), "a builtin hit with no gamesense answer taught the memory")
+            -- why nothing was learned without a side
+            check(HM.NoSide({meth = "builtin", gs = 2}) == "gamesense centred (|gs| < 5)"
+                and HM.NoSide({meth = "builtin"}) == "no gamesense answer"
+                and HM.NoSide({meth = "hit_mem", val = 1}) == "forced ~0", "skip reasons for a missing side")
             -- per state first, overall as the fallback
             reset()
             shot(9, 58, 1, 1); shot(9, 58, 1, 1); shot(9, -58, 1, 1, {state = "moving"})

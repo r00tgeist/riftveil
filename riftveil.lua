@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.41"
+local RV_VERSION = "8.42"
 
 local ffi = require "ffi"
 
@@ -3141,6 +3141,16 @@ do
         return (isnum(d.val) and math.abs(d.val) >= 5) and Sign(d.val) or nil
     end
 
+    -- why a shot has no applied side, for the [hmem] line: gamesense
+    -- answering ~0 (a player it resolves as centred -- 11 of 13 such head
+    -- hits in the first v8.39 match) is not the same as no answer at all
+    function HMEM.NoSide(d)
+        if d.meth == "builtin" then
+            return isnum(d.gs) and "gamesense centred (|gs| < 5)" or "no gamesense answer"
+        end
+        return "forced ~0"
+    end
+
     -- remembered side for state st (falls back to overall), and its evidence
     function HMEM.Side(rec, st)
         local v = st and rec.hm_st and rec.hm_st[st]
@@ -3174,7 +3184,7 @@ do
         local gw = (d.aim_hg == 1) and (HMEM.HIT[hg] or 0) or ((d.aim_hg == 8) and ((hg == 1 or hg == 8) and 0.5 or 0) or 0)
         local w = ww * gw
         local why = (d.nolearn and "teleported/extrapolated") or (ww == 0 and "weapon") or (gw == 0 and "hitbox")
-                    or (not side and "no applied side") or nil
+                    or (not side and HMEM.NoSide(d)) or nil
         local g0 = rec.hm or 0
         local s0 = d.state and rec.hm_st[d.state] or 0
         if why then Log("skip", name, d, side, ww, gw, 0, g0, g0, s0, s0, why); return 0 end
@@ -3201,7 +3211,7 @@ do
         local g0 = rec.hm or 0
         local s0 = d.state and rec.hm_st[d.state] or 0
         local why = (d.nolearn and "teleported/extrapolated") or (rw == 0 and "prediction error")
-                    or (ww == 0 and "weapon") or (gw == 0 and "hitbox") or (not side and "no applied side")
+                    or (ww == 0 and "weapon") or (gw == 0 and "hitbox") or (not side and HMEM.NoSide(d))
                     or ((g0 == 0 and s0 == 0) and "no memory yet")
                     or ((Sign(g0) ~= side and Sign(s0) ~= side) and "memory on the other side") or nil
         if why then Log("skip", name, d, side, ww, gw, 0, g0, g0, s0, s0, why); return 0 end

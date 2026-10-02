@@ -3,6 +3,11 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.42  – Log: an [hmem] skip without a side says why -- "gamesense
+          centred (|gs| < 5)", "no gamesense answer" or "forced ~0". In the
+          v8.39 session 13 head hits taught nothing; 11 were gamesense
+          resolving a standing Neverlose player at 0 and landing, which is
+          right (there was no side to learn), not a lost lesson.
   v8.41  – From the first v8.39 match log (45 shots):
           DCK_DELTA -- duck windows forced the torso's WORLD yaw (-166,
           104, 128 ...), clamped to +-60 by the player list: the side came
