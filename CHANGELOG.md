@@ -3,6 +3,29 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.37  – Force only on knowledge; learn from gamesense's own resolver.
+          BEAT_BUILTIN off: deciding by head rates on 8-20 shots is luck
+          (they swing 15-20 points either way).
+          KNOWN_ONLY -- RIFTVEIL forces only where something is known: a
+          confirmed head hit (hit memory) or a server event (vuln windows on
+          unchoke, stop, peek, landing, duck crossing). Everything else is
+          gamesense's own resolver. No longer forced, because they are
+          guesses: suppress (inverts the side our client shows), meta hold /
+          brute, and the LBY / CTR windows (triggered by the client pose).
+          Pose confidence no longer gates event windows or hit memory.
+          LEARN_GS -- on a record built with nothing forced, the body-yaw
+          pose our client shows is gamesense's resolved answer. It is kept
+          per enemy and logged on every shot (gs=); when gamesense's own
+          shot lands the head, hit memory files that answer's side (v6.2
+          filed our 16-record majority, often the other side on jitter).
+          FIXED -- rv_db crashed on a saved profile with fractional counts
+          (old version / hand edit): "%d" on 4.5.
+          Harness: nothing-known enemy left to gamesense (v6.2: suppress),
+          hit memory and a low-confidence unchoke window forced on every
+          record, LBY window not forced; gamesense's answer captured from an
+          unforced record and filed on a builtin head hit (v6.2: our side);
+          rv_db with fractional counts. Each part mutation-checked; v6.2
+          parity exact.
   v8.36  – Steer gamesense instead of replacing it.
           BEAT_BUILTIN -- the public resolvers that work with gamesense
           (hysteria / jitterresolver / AlynResolver / GS_RESOLVER -- one

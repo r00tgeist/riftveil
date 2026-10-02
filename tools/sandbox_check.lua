@@ -384,7 +384,7 @@ local mock = {
             if line:find("%]%[ERR%]") then ERR_LINES[#ERR_LINES + 1] = line end
             if (line:find("][miss]", 1, true) or line:find("][hit]", 1, true)) and not line:find(" discarded ", 1, true) then
                 SHOT_SEEN = (SHOT_SEEN or 0) + 1
-                if line:find(" eo=%-?[%d]* lbyu=[%d%.%-]+ aa=") then SHOT_EO = (SHOT_EO or 0) + 1 end
+                if line:find(" eo=%-?[%d]* lbyu=[%d%.%-]+ gs=%-?[%d]* aa=") then SHOT_EO = (SHOT_EO or 0) + 1 end
             end
             if line:find("][corr]", 1, true) then
                 CORR_SEEN = (CORR_SEEN or 0) + 1
@@ -511,7 +511,7 @@ if os.getenv("RV_PARITY") then
     end
     local F
     for _, cb in pairs(CALLBACKS) do F = F or find(cb, 0) end
-    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false; F.POSE_CLEAN = false; F.FULL_DESYNC = false; F.BEAT_BUILTIN = false end
+    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false; F.POSE_CLEAN = false; F.FULL_DESYNC = false; F.BEAT_BUILTIN = false; F.KNOWN_ONLY = false; F.LEARN_GS = false end
 end
 
 local cb_errors = {}
@@ -1957,6 +1957,7 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         local nov = {}
         for _, it in ipairs(det_el.items) do if it ~= "Vulnerability" and it ~= "Desync angle" then nov[#nov + 1] = it end end
         set_det(nov)
+        F.KNOWN_ONLY = false   -- this test drives suppress
         local live0 = W.live
         local function run(flag, id)
             F.WINDOW_GATE = flag
@@ -1981,6 +1982,7 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         end
         local on, off = run(true, 123), run(false, 124)
         F.WINDOW_GATE = true
+        F.KNOWN_ONLY = true
         set_det(det0)
         if on ~= "suppress" then UNIT_FAIL[#UNIT_FAIL + 1] = "window gate: an unforced window (Vulnerability off) left " .. tostring(on) .. ", expected suppress" end
         if off == "suppress" then UNIT_FAIL[#UNIT_FAIL + 1] = "window gate test: flag off still suppressed -- the test no longer reaches v6.2's block" end
@@ -2045,6 +2047,7 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     local live0 = W.live
     local function run(flag, id)
         F.POSE_CLEAN = flag
+        F.KNOWN_ONLY = false   -- the trap is our own suppress read back
         W.live = {101, 102, id}
         W.players[id] = {sim = W.tick * TI, vx = 0, vy = 0, pose01 = 0.5, eye = 0, duck = 0, torso = 0, gfy = 0}
         local forced_n = 0
@@ -2108,6 +2111,7 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         local aa1, f1 = run(true, 125)
         local aa0, f0 = run(false, 126)
         F.POSE_CLEAN = true
+        F.KNOWN_ONLY = true
         if not (aa1 == "static" and f1 == 0) then
             UNIT_FAIL[#UNIT_FAIL + 1] = string.format("clean pose: a static AA ended as %s, forced on %d of the last 20 records", tostring(aa1), f1)
         end
@@ -2136,6 +2140,7 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         local live0 = W.live
         local function run(flag, id)
             F.FULL_DESYNC = flag
+            F.KNOWN_ONLY = false   -- suppress carries the value here
             W.live = {101, 102, id}
             W.players[id] = {sim = W.tick * TI, vx = 0, vy = 0, pose01 = 0.5, eye = 0, duck = 0, torso = 0, gfy = 0}
             local vals = {}
@@ -2153,6 +2158,7 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
             return vals
         end
         local on, off = run(true, 129), run(false, 130)
+        F.KNOWN_ONLY = true
         -- hit memory on a running enemy: the speed-aware limit, not a flat 58
         F.FULL_DESYNC = true
         W.live = {101, 102, 131}
@@ -2217,6 +2223,101 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         CS.all, CS.nl = all0, nl0
     else
         UNIT_FAIL[#UNIT_FAIL + 1] = "beat builtin test: CheatTrusts / CheatCredit / CHEAT_STATS / FEATURE not reachable"
+    end
+end
+
+-- Known only (FEATURE.KNOWN_ONLY): a jittering enemy with no hit and no
+-- server event is left to gamesense (v6.2: suppress); a confirmed side (hit
+-- memory) and an event window (unchoke) still force; a pose-triggered LBY
+-- window doesn't.
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local REC_T, EI, F = probe("REC"), probe("EIDX_S64"), probe("FEATURE")
+    if REC_T and EI and F then
+        local live0 = W.live
+        local function run(flag, id, setup)
+            F.KNOWN_ONLY = flag
+            W.live = {101, 102, id}
+            W.players[id] = {sim = W.tick * TI, vx = 0, vy = 0, pose01 = 0.5, eye = 0, duck = 0, torso = 0, gfy = 0}
+            local r
+            local seen = {}
+            for n = 1, 24 do
+                for k = 1, 3 do
+                    W.tick = W.tick + 1; W.real = W.real + TI
+                    for _, p in ipairs({101, 102}) do W.players[p].sim = W.tick * TI end
+                    if k == 3 then W.players[id].sim = W.tick * TI; W.players[id].pose01 = (n % 2 == 0) and 0.2 or 0.8 end
+                    r = EI[id] and REC_T[EI[id]]
+                    if r and setup and n >= 20 then setup(r) end
+                    fire("net_update_end")
+                end
+                r = EI[id] and REC_T[EI[id]]
+                if r and n >= 12 then seen[r.last_meth] = true end
+                if r and n >= 21 then seen.n, seen.unk = (seen.n or 0) + 1, (seen.unk or 0) + ((r.last_meth == "vuln_unk") and 1 or 0) end
+            end
+            W.players[id] = nil
+            LAST_KNOWN_RUN = seen
+            -- what was forced over the last records ("builtin" only if nothing was)
+            for _, m in ipairs({"vuln_unk", "vuln_lby", "hit_mem", "suppress"}) do if seen[m] then return m end end
+            return "builtin"
+        end
+        local plain1, plain0 = run(true, 132), run(false, 133)
+        local hm = run(true, 134, function(r) r.hit_count, r.hit_side, r.vuln_ttl = 2, 1, 0 end)
+        local unk = run(true, 135, function(r) r.vuln_ttl, r.vuln_type, r.vuln_val, r.conf = 11, "unk", 30, 0.1 end)
+        local unk_all = LAST_KNOWN_RUN.n and LAST_KNOWN_RUN.unk == LAST_KNOWN_RUN.n
+        local lby = run(true, 136, function(r) r.vuln_ttl, r.vuln_type, r.vuln_val = 11, "lby", 30 end)
+        F.KNOWN_ONLY = true
+        if plain1 ~= "builtin" then UNIT_FAIL[#UNIT_FAIL + 1] = "known only: a jittering enemy with nothing known was forced (" .. tostring(plain1) .. ")" end
+        if plain0 ~= "suppress" then UNIT_FAIL[#UNIT_FAIL + 1] = "known only test: flag off gave " .. tostring(plain0) .. ", not v6.2's suppress" end
+        if hm ~= "hit_mem" then UNIT_FAIL[#UNIT_FAIL + 1] = "known only: a confirmed side (hit memory) wasn't forced: " .. tostring(hm) end
+        if unk ~= "vuln_unk" or not unk_all then UNIT_FAIL[#UNIT_FAIL + 1] = "known only: a low-confidence unchoke window wasn't forced on every record: " .. tostring(unk) end
+        if lby == "vuln_lby" then UNIT_FAIL[#UNIT_FAIL + 1] = "known only: a pose-triggered LBY window was forced" end
+        W.live = live0
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "known only test: REC / EIDX_S64 / FEATURE not reachable"
+    end
+end
+
+-- Learn from gamesense (FEATURE.LEARN_GS): a builtin head hit while
+-- gamesense's answer was +40 and our 16-record majority said the other side
+-- files gamesense's side; v6.2 files ours. The shot line carries gs=40.
+-- And rv_db lists a saved profile with fractional counts (old version /
+-- hand edit) instead of crashing on %d.
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local REC_T, EI, F = probe("REC"), probe("EIDX_S64"), probe("FEATURE")
+    local r = EI and REC_T and EI[102] and REC_T[EI[102]]
+    if r and F then
+        local function run(flag, id)
+            F.LEARN_GS = flag
+            r.hit_side, r.hit_count, r.side, r.flip = 0, 0, -1, false
+            r.last_meth, r.last_val, r.vuln_ttl, r.active = "builtin", 0, 0, false
+            r.gs_pose, r.gs_t = 40, W.real
+            fire("aim_fire", {id = id, target = 102, backtrack = 0, hit_chance = 80, hitgroup = 1, damage = 100})
+            fire("aim_hit", {id = id, target = 102, hitgroup = 1, damage = 100})
+            return r.hit_side
+        end
+        -- a record built with nothing forced: its pose is gamesense's answer
+        r.active, r.gs_pose = false, nil
+        W.tick = W.tick + 1; W.real = W.real + TI
+        for _, p in ipairs({101, 102}) do W.players[p].sim = W.tick * TI end
+        local p0 = W.players[102].pose01
+        W.players[102].pose01 = 0.75
+        fire("net_update_end")
+        W.players[102].pose01 = p0
+        if not (type(r.gs_pose) == "number" and math.abs(r.gs_pose - 30) < 0.5) then
+            UNIT_FAIL[#UNIT_FAIL + 1] = "learn gs: gamesense's answer on an unforced record read as " .. tostring(r.gs_pose) .. ", expected 30"
+        end
+        local on, off = run(true, 96001), run(false, 96002)
+        F.LEARN_GS = true
+        if on ~= 1 then UNIT_FAIL[#UNIT_FAIL + 1] = "learn gs: a builtin head hit filed side " .. tostring(on) .. ", gamesense's answer was +1" end
+        if off ~= -1 then UNIT_FAIL[#UNIT_FAIL + 1] = "learn gs test: flag off filed " .. tostring(off) .. ", not v6.2's majority side -1" end
+        r.hit_side, r.hit_count = 0, 0
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "learn gs test: REC[102] / FEATURE not reachable"
+    end
+    local DB_T = probe("DB")
+    if DB_T then
+        DB_T["frac_test"] = {samples = 4.5, kills = 3.7, hit_rate = {}, bt_pref = 1}
+        fire("console_input", "rv_db")
+        DB_T["frac_test"] = nil
     end
 end
 

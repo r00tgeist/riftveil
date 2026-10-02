@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.36"
+local RV_VERSION = "8.37"
 
 local ffi = require "ffi"
 
@@ -979,13 +979,30 @@ local FEATURE = {
     -- the luasense yaw-offset tables, for any lua and any settings. Hit
     -- memory takes the same speed-aware limit. Off in the v6.2 parity run.
     FULL_DESYNC = true,
-    -- v8.36: gamesense resolves by default; a RIFTVEIL method forces only
+    -- v8.36 (off since v8.37, see below): a RIFTVEIL method forced only
     -- while its learned head rate (per enemy cheat, else across everyone)
     -- keeps within 5 points of gamesense's own -- probed every 4th shot.
     -- Across the logs gamesense lands 65%; forcing pays where we beat that
     -- (DCK 77%, suppress 70%, hit memory 67%) and cost where we don't (PKA
     -- 47%, CTR 50%, suppress on 5-way 56%). Off in the v6.2 parity run.
-    BEAT_BUILTIN = true,
+    -- Off since v8.37: on 8-20 shots a head rate swings 15-20 points by
+    -- luck, so "the stats say we're better" isn't knowing better.
+    BEAT_BUILTIN = false,
+    -- v8.37: force only on knowledge -- a confirmed head hit (hit memory)
+    -- or a server event (vuln windows on unchoke / stop / peek / landing /
+    -- duck) -- and leave everything else to gamesense, as the public
+    -- resolvers that steer it do. Guesses no longer force: suppress
+    -- (inverts the side our client shows), meta hold / brute, and the
+    -- pose-triggered LBY / CTR windows. Pose confidence no longer gates the
+    -- event windows or hit memory. Off in the v6.2 parity run.
+    KNOWN_ONLY = true,
+    -- v8.37: learn from gamesense's own resolver. On a record built with
+    -- nothing forced, the body-yaw pose our client shows IS gamesense's
+    -- resolved answer; when its own shot lands the head, hit memory files
+    -- the side of that answer (v6.2 filed our 16-record majority, which on
+    -- jitter is often the other side). Logged on every shot as gs=. Off in
+    -- the v6.2 parity run.
+    LEARN_GS = true,
     -- These three are the v6.2 [EXP] switches as the logs show them
     -- running when the resolver hit 74% (suppress fired in every v6.2
     -- match; jitter prediction never did).
@@ -1242,8 +1259,8 @@ client.set_event_callback("console_input", function(text)
             out[#out+1] = string.format(
                 "  %s | cfg:%s | vuln:%s | bt:%s | hr:%d%%(n=%d) | hits:%d",
                 s64, e.config_type or "?", e.vuln_pref or "?",
-                tostring(e.bt_pref), math.floor((e.hit_rate or 0)*100),
-                e.samples or 0, e.kills or 0)
+                tostring(e.bt_pref), math.floor((tonumber(e.hit_rate) or 0)*100),
+                math.floor(tonumber(e.samples) or 0), math.floor(tonumber(e.kills) or 0))
         end
         -- learned per-cheat method stats (saved separately, same wipe)
         if CheatDB then for _, l in ipairs(CheatDB.Lines()) do out[#out+1] = "  cheat " .. l end end
@@ -3421,6 +3438,9 @@ local function ProcessPlayer(player, ctx)
         rec.prev_origin_tick = st
 
         if sample then RPush(rec.hist, {p=pose, e=eye_y, t=st}) end
+        -- gamesense's own answer: the pose on a record built with nothing
+        -- forced is its resolved body yaw (LEARN_GS, shot log gs=)
+        if pf == nil and isnum(pose) then rec.gs_pose, rec.gs_t = pose, globals.realtime() end
         -- Pruned by age: clearing only tm[st - TM_HORIZON] leaked every
         -- entry a fakelagging enemy's skipped simtime ticks never revisit
         -- (2,500 after 20k ticks). Lookups stay within the horizon.
@@ -3522,7 +3542,9 @@ local function ProcessPlayer(player, ctx)
             end
         end
 
-        if rec.conf < CFG.CONF_MIN then ClearEnt(player); break end
+        -- KNOWN_ONLY: pose confidence doesn't gate the event windows or hit
+        -- memory (it is a pose number); low confidence only means no guess
+        if rec.conf < CFG.CONF_MIN and not FEATURE.KNOWN_ONLY then ClearEnt(player); break end
 
         -- Vulnerability window
         if rec.vuln_ttl > 0 then rec.vuln_ttl = rec.vuln_ttl - 1 end
@@ -3617,7 +3639,9 @@ local function ProcessPlayer(player, ctx)
         -- vuln read beats the known-failing built-in.
         local vuln_min = rec.meta_aggressive and 0.20 or 0.35
         -- The vuln window is forced this record (the [1] branch below).
-        local vuln_on = DET.vuln and rec.vuln_ttl > 0 and rec.conf >= vuln_min
+        local vuln_on = DET.vuln and rec.vuln_ttl > 0
+                        and (rec.conf >= vuln_min or FEATURE.KNOWN_ONLY)
+                        and not (FEATURE.KNOWN_ONLY and (rec.vuln_type == VTYPE.LBY or rec.vuln_type == VTYPE.CTR))
                         and CheatTrusts(rec, "vuln_" .. tostring(rec.vuln_type))
         -- FEATURE.WINDOW_GATE: only a window we force stands the side chain
         -- and suppress down. v6.2 used vuln_ttl alone, so a window it didn't
@@ -3814,7 +3838,7 @@ local function ProcessPlayer(player, ctx)
         -- tick instead of pausing for 4. Fixed with a dedicated pause counter
         -- (_sup_pause) and sup_pausing, which tells the bookkeeping below not
         -- to blow the counters away while a deliberate pause is in progress.
-        elseif FEATURE.SUPPRESS and not window_blocks and CheatTrusts(rec, METH.SUPPRESS) then
+        elseif FEATURE.SUPPRESS and not FEATURE.KNOWN_ONLY and not window_blocks and CheatTrusts(rec, METH.SUPPRESS) then
             local is_jitter = aa_type == AA.TWO_WAY  or aa_type == AA.THREE_WAY
                             or aa_type == AA.FIVE_WAY or aa_type == AA.SKITTER
                             or aa_type == AA.HOLD
@@ -3860,7 +3884,7 @@ local function ProcessPlayer(player, ctx)
             end
             rec._sup_pause = 0
 
-        elseif rec.meta_aggressive and tracked_side ~= 0 then
+        elseif rec.meta_aggressive and tracked_side ~= 0 and not FEATURE.KNOWN_ONLY then
             -- META_HOLD: built-in has failed this player's meta (serenity ways(),
             -- ambani torpedo, aesthetic records — patterns the 2022-era built-in
             -- has no answer for). Hold our best tracked_side correction rather than
@@ -4781,6 +4805,8 @@ local function on_aim_fire(e)
         -- logged to test that against our forced side (measurement only)
         lbyd    = LbyDelta(t),
         eo      = EyeOffset(t, me),
+        -- gamesense's resolved body yaw at the shot, if read in the last 0.25 s
+        gs      = (r and isnum(r.gs_pose) and isnum(r.gs_t) and globals.realtime() - r.gs_t < 0.25) and r.gs_pose or nil,
         -- seconds since the server last moved their LBY target (- = not seen)
         lbyu    = (r and isnum(r.lby_t)) and string.format("%.2f", globals.realtime() - r.lby_t) or "-",
         prv     = r and r.last_outcome or "-",
@@ -4858,8 +4884,17 @@ local function on_aim_hit(e)
         -- Any hit ends a run of resolver misses ("two in a row")
         rec.aim_miss_streak = 0
         rec.last_outcome = is_head and "h" or "b"
-        if d.side ~= 0 and is_head then
-            rec.hit_side  = d.flip and -d.side or d.side
+        -- FEATURE.LEARN_GS: when gamesense's own resolver landed the head,
+        -- the side is the one it was animating at the shot (its answer, read
+        -- off a record we didn't force) -- not our majority over 16 records
+        local learned
+        if FEATURE.LEARN_GS and d.meth == "builtin" and isnum(d.gs) and math.abs(d.gs) >= 5 then
+            learned = Sign(d.gs)
+        elseif d.side ~= 0 then
+            learned = d.flip and -d.side or d.side
+        end
+        if learned and is_head then
+            rec.hit_side  = learned
             rec.hit_count = rec.hit_count + 1
             -- Per-condition memory: same confirmed side, filed under the
             -- movement state that was active when the shot was fired (see
@@ -4904,7 +4939,7 @@ local function on_aim_hit(e)
         end
     end
 
-    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d eo=%s lbyu=%s aa=%s%s%s",
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d eo=%s lbyu=%s gs=%s aa=%s%s%s",
         entity.get_player_name(e.target) or "?",
         HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
         isnum(e.damage) and math.floor(e.damage) or 0,
@@ -4912,7 +4947,7 @@ local function on_aim_hit(e)
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
         (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0, d.cor or "?", d.ls or -1, d.prv or "-", d.lbyd or 999,
-        d.eo or "-", d.lbyu or "-",
+        d.eo or "-", d.lbyu or "-", isnum(d.gs) and string.format("%.0f", d.gs) or "-",
         AA_SHORT[d.aa] or "?",
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
@@ -4985,13 +5020,13 @@ local function on_aim_miss(e)
         if ro then ro.last_outcome = is_resolver and "m" or "o" end
     end
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d eo=%s lbyu=%s aa=%s%s%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d eo=%s lbyu=%s gs=%s aa=%s%s%s",
         entity.get_player_name(e.target) or "?",
         reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.sspd or -1, d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
         (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0, d.cor or "?", d.ls or -1, d.prv or "-", d.lbyd or 999,
-        d.eo or "-", d.lbyu or "-",
+        d.eo or "-", d.lbyu or "-", isnum(d.gs) and string.format("%.0f", d.gs) or "-",
         AA_SHORT[d.aa] or "?",
         d.cheat and (" cht=" .. d.cheat) or "",
         d.in_vuln and (" !" .. d.vuln_t) or "")
