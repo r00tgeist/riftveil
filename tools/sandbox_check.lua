@@ -507,7 +507,7 @@ if os.getenv("RV_PARITY") then
     end
     local F
     for _, cb in pairs(CALLBACKS) do F = F or find(cb, 0) end
-    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false end
+    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false end
 end
 
 local cb_errors = {}
@@ -1866,6 +1866,63 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     else
         UNIT_FAIL[#UNIT_FAIL + 1] = "max desync test: MaxDesync / REC / EIDX_S64 / FEATURE not reachable"
     end
+end
+
+-- No choke, no desync (FEATURE.NO_CHOKE_STATIC): a bot sending every tick
+-- whose pose (our client's) jitters is static and handed to gamesense; one
+-- bundled packet in 16 doesn't change that; an enemy fakelagging (3-tick
+-- gaps) is resolved; after a 100-tick gap the history starts over. The
+-- flag-off half shows v6.2 resolving the bot.
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local REC_T, EI, F, NC = probe("REC"), probe("EIDX_S64"), probe("FEATURE"), probe("NoChoke")
+    local live0 = W.live
+    local function run(flag, id, gaps)
+        F.NO_CHOKE_STATIC = flag
+        W.live = {101, 102, id}
+        W.players[id] = {sim = W.tick * TI, vx = 0, vy = 0, pose01 = 0.5, eye = 0, duck = 0, torso = 0, gfy = 0}
+        local n = 0
+        for _, gap in ipairs(gaps) do
+            for _ = 1, gap - 1 do
+                W.tick = W.tick + 1; W.real = W.real + TI
+                for _, p in ipairs({101, 102}) do W.players[p].sim = W.tick * TI end
+                fire("net_update_end")
+            end
+            W.tick = W.tick + 1; W.real = W.real + TI
+            n = n + 1
+            W.players[id].sim = W.tick * TI
+            W.players[id].pose01 = (n % 2 == 0) and 0.15 or 0.85   -- what our client shows: jitter
+            for _, p in ipairs({101, 102}) do W.players[p].sim = W.tick * TI end
+            fire("net_update_end")
+        end
+        local r = EI[id] and REC_T[EI[id]]
+        W.players[id] = nil
+        return r
+    end
+    local function rep(v, k) local t = {} for i = 1, k do t[i] = v end return t end
+    if REC_T and EI and F and NC then
+        local bot = run(true, 117, rep(1, 24))
+        if not (bot and bot.aa_type == "static" and bot.last_meth == "builtin") then
+            UNIT_FAIL[#UNIT_FAIL + 1] = string.format("no choke: a bot sending every tick read as %s / %s, expected static / builtin",
+                tostring(bot and bot.aa_type), tostring(bot and bot.last_meth))
+        end
+        local g = rep(1, 24); g[10] = 2
+        local bundled = run(true, 118, g)
+        if not (bundled and bundled.aa_type == "static") then UNIT_FAIL[#UNIT_FAIL + 1] = "no choke: one bundled packet in 16 broke it: " .. tostring(bundled and bundled.aa_type) end
+        local some = {} for i = 1, 24 do some[i] = (i % 3 == 0) and 2 or 1 end
+        local s1 = run(true, 122, some)
+        if not (s1 and s1.aa_type ~= "static") then UNIT_FAIL[#UNIT_FAIL + 1] = "no choke: an enemy choking one tick every third record read as static" end
+        local fl = run(true, 119, rep(3, 24))
+        if not (fl and fl.aa_type ~= "static") then UNIT_FAIL[#UNIT_FAIL + 1] = "no choke: a fakelagging enemy (3-tick gaps) read as static" end
+        local g2 = rep(1, 24); g2[20] = 100
+        local back = run(true, 120, g2)
+        if not (back and not NC(back)) then UNIT_FAIL[#UNIT_FAIL + 1] = "no choke: the history didn't start over after a 100-tick gap" end
+        local off = run(false, 121, rep(1, 24))
+        F.NO_CHOKE_STATIC = true
+        if not (off and off.aa_type ~= "static") then UNIT_FAIL[#UNIT_FAIL + 1] = "no choke test: flag off read the bot as static -- the test no longer shows v6.2's jitter label" end
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "no choke test: REC / EIDX_S64 / FEATURE / NoChoke not reachable"
+    end
+    W.live = live0
 end
 
 -- Defensive frames: a frame whose simulation time is below the highest

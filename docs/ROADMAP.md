@@ -5,7 +5,7 @@ and what comes next. Older versions are kept in `versions/` so none of the
 work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 (the decision engine), `riftveil_v8.1.lua`.
 
-## In the script (v8.32)
+## In the script (v8.33)
 
 | Area | Feature | Changes shots? |
 |---|---|---|
@@ -22,6 +22,7 @@ work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 | Tools | `rv_perf` profiler, `rv_stats`, `rv_db`, `rv_save` | no |
 | Weapons | Aim policy on traced damage: prefer body only when a body shot kills from here, body preference off when only the head kills, safe point when in doubt or airborne; values verified, traces self-calibrated | yes, Detection › Weapon aim |
 | Weapons | "In doubt" includes a 3-way / 5-way enemy missed on the resolver in the last 10 s (43% head there in the pre-v8 logs vs 59-77% elsewhere) | yes, `FEATURE.XWAY_UNSURE` |
+| Core | Enemy sending every tick (no choke: bots, no-AA players) = static, handed to gamesense -- desync needs choked commands | yes, `FEATURE.NO_CHOKE_STATIC` |
 | Core | Correction cap = Valve's per-frame body-yaw limit (58 standing, 29 running), not a line to 0 at 580 u/s | yes, `FEATURE.DESYNC_FORMULA` |
 | Logging | Debug log checkbox works again (dead v8.1-8.31); `[corr]` lines carry the pose read back (`pz=`) and what we forced (`pf=`) -- plan step 2 is decided on them | no |
 | Core | UNK windows force torso - eye within the cap, not the torso world yaw (v7.2 fix, retried on the v8.28 trigger: raw 36% since v8.15) | yes, `FEATURE.UNK_DELTA` |

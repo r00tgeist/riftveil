@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.32"
+local RV_VERSION = "8.33"
 
 local ffi = require "ffi"
 
@@ -948,6 +948,13 @@ local FEATURE = {
     -- log (side methods ~45%, suppress 33%, vs 62-77% from 20 up). Off in
     -- the v6.2 parity run.
     DESYNC_FORMULA = true,
+    -- v8.33: an enemy whose records come one tick apart (nothing choked)
+    -- is static: desync needs choked commands. Bots in the logs (no AA,
+    -- no desync) were labelled hold / 2-way / 3-way on 56 of 64 shots and
+    -- we forced a value on 54 -- the pose we read is our client's
+    -- (gamesense's resolver and our own override), not theirs. Off in the
+    -- v6.2 parity run.
+    NO_CHOKE_STATIC = true,
     -- These three are the v6.2 [EXP] switches as the logs show them
     -- running when the resolver hit 74% (suppress fired in every v6.2
     -- match; jitter prediction never did).
@@ -1915,6 +1922,19 @@ local function ChokedPkts(st_raw, cur_lat)
     local diff = globals.curtime() - st_raw
     if diff < 0 or diff > 2.0 then return 0 end
     return Clamp(TT(math.max(0.0, diff - cur_lat)), 0, 14)
+end
+
+-- No choke, no desync: the server animates every command it gets, and the
+-- angle a desync hides has to sit on a choked one. A player whose records
+-- arrive one tick apart (bots, no-AA players) has no hidden angle to
+-- resolve. NOCHOKE_N records, at most one gap of 2+ (a bundled packet).
+local NOCHOKE_N = 16
+local function NoChoke(rec)
+    local g = rec.gaps
+    if not g or #g < NOCHOKE_N then return false end
+    local big = 0
+    for i = 1, #g do if g[i] >= 2 then big = big + 1 end end
+    return big <= 1
 end
 
 -- ══════════════════════════════════════════════════════════════════
@@ -3174,6 +3194,16 @@ local function ProcessPlayer(player, ctx)
     -- (death, dormancy, a new round) closes the vuln window. It only counts
     -- down on records, so v6.2 carried it -- and its torso yaw -- over.
     if FEATURE.STALE_WINDOW and rec.lt and st - rec.lt > 64 then rec.vuln_ttl = 0 end
+    -- record gaps (ticks between this record and the last) for NoChoke; a
+    -- gap past 64 (death, dormancy, new round) starts the history over
+    if rec.lt then
+        local g = rec.gaps
+        if not g or st - rec.lt > 64 then g = {}; rec.gaps = g end
+        if st - rec.lt <= 64 then
+            g[#g + 1] = st - rec.lt
+            if #g > NOCHOKE_N then table.remove(g, 1) end
+        end
+    end
     rec.lt = st
     -- PROBE (log only): the value we forced for the animation this record
     -- was built with, to set against the pose read back below (pz= / pf=
@@ -3334,6 +3364,18 @@ local function ProcessPlayer(player, ctx)
 
         -- Classify
         local aa_type, dom_side, raw_c, pose_sum = DetectAA(rec.hist)
+        -- FEATURE.NO_CHOKE_STATIC: an enemy that chokes nothing can't desync,
+        -- whatever the pose (which our client computes) shows
+        if FEATURE.NO_CHOKE_STATIC then
+            local nc = NoChoke(rec)
+            if nc then aa_type = AA.STATIC end
+            if DET.verbose and nc ~= (rec._nochoke == true) then
+                dbg("aa", "player=%s %s", entity.get_player_name(player) or "?",
+                    nc and "sends every tick (no choke): no desync possible -> gamesense"
+                       or "chokes again: resolving")
+            end
+            rec._nochoke = nc
+        end
         rec.aa_type = aa_type
 
         -- Use live per-player cap for jitter threshold — previously hardcoded 58*0.45=26.1°

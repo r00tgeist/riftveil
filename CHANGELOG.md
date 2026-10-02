@@ -3,6 +3,24 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.33  – No choke, no desync: bots and no-AA players are static.
+          The logs hold 64 shots at bots (Yogi, Neil, George, Toby, Allen,
+          Ulysses, Marvin, Harvey -- no Steam ID). A bot has no desync, yet
+          RIFTVEIL labelled them hold 27, 2-way 15, 3-way 9, skitter 3,
+          5-way 2 and static only 8, and forced a value on 54 (hit memory
+          21, vuln 17, suppress 16). The pose it reads is our client's --
+          gamesense's resolver and our own override -- not the enemy's.
+          FEATURE.NO_CHOKE_STATIC: desync needs choked commands (the hidden
+          angle sits on a choked one), so an enemy whose last 16 records
+          came one tick apart (one bundled packet allowed) is static and
+          handed to gamesense whatever the pose shows. Choking one tick
+          every third record, fakelag, or a gap past 64 ticks (history
+          starts over) keep resolving. Debug log: [aa] line when an enemy
+          goes in or out. Off in the parity run; harness covers bot,
+          bundled packet, intermittent choke, fakelag, reset and the v6.2
+          path, each mutation-checked.
+          Static troll AA (fakelag on, desync fixed) still reads from the
+          pose: that is plan step 2, decided on the Debug log probe.
   v8.32  – Step 1 of docs/PLAN.md: verify every resolver function.
           docs/RESOLVER_AUDIT.md -- each function on the path to the forced
           value: what it reads (server data, client data, or client data our

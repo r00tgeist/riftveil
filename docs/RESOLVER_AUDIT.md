@@ -41,6 +41,12 @@ line, and log_report's `POSE READ BACK vs WHAT WE FORCED` settles it.
 
 ## AA picture
 
+**Bots prove the pose isn't theirs.** 64 shots at bots (no AA, no desync):
+labelled hold 27, 2-way 15, 3-way 9, static 8, skitter 3, 5-way 2; we forced
+a value on 54. v8.33 `NO_CHOKE_STATIC` makes any enemy whose records come one
+tick apart static (desync needs choked commands) -- server timing, not pose.
+
+
 | Function | Reads | Verdict |
 |---|---|---|
 | `DetectAA`, `PoseVar`, `IsHold`, `CountClusters`, `IsSkitter` | pose history | Logic sound (v8.28 checks). Input suspect. Skitter is a phase-locked match that never sticks; after a resolver miss it still landed 11/11, so it stays out of the x-way safe point |

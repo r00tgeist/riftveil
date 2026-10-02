@@ -28,6 +28,11 @@ Where we are: v6.2 measured 74%. Across all logs the methods sit at
 
 ## Step 2 -- read the enemy, not ourselves
 
+Already shown without the probe: 64 shots at bots (no desync) were labelled
+static only 8 times; we forced a value on 54. v8.33 makes non-choking
+enemies static from the server's record timing (`NO_CHOKE_STATIC`); static
+troll AA with fakelag still needs the rest of this step.
+
 Decided by the probe.
 
 - If `forced: pose within 5 of it` is the large majority, the AA detector,
