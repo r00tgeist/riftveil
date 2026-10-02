@@ -519,7 +519,7 @@ if os.getenv("RV_PARITY") then
     end
     local F
     for _, cb in pairs(CALLBACKS) do F = F or find(cb, 0) end
-    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false; F.POSE_CLEAN = false; F.FULL_DESYNC = false; F.BEAT_BUILTIN = false; F.KNOWN_ONLY = false; F.LEARN_GS = false; F.VULN_DELTA = false; F.HMEM_WEIGHT = false; F.DCK_DELTA = false; F.CAL_FRESH = false; F.DEF_RELEASE = false end
+    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false; F.POSE_CLEAN = false; F.FULL_DESYNC = false; F.BEAT_BUILTIN = false; F.KNOWN_ONLY = false; F.LEARN_GS = false; F.VULN_DELTA = false; F.HMEM_WEIGHT = false; F.DCK_DELTA = false; F.CAL_FRESH = false; F.DEF_PHASE = false end
 end
 
 local cb_errors = {}
@@ -2443,6 +2443,24 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
             reset()
             check(near(shot(9, 0, 1, 1, {meth = "builtin", gs = -40}), -1), "a builtin head hit didn't file gamesense's side -1")
             check(near(shot(9, 0, 1, 1, {meth = "builtin"}), -1), "a builtin hit with no gamesense answer taught the memory")
+            -- a shot in a defensive phase teaches only "def" (DEF_PHASE); v8.39
+            -- filed it under its movement state and the overall memory
+            local function dshot(flag, out)
+                F_H.DEF_PHASE = flag
+                reset()
+                local d = {meth = "hit_mem", val = 58, wc = "awp", aim_hg = 1, df = 5, state = "standing"}
+                if out == "hit" then HM.OnHit(r, d, 1, "t") else r.hm, r.hm_st.def = 2, 2; HM.OnMiss(r, d, "?", "t") end
+                return r.hm, r.hm_st.def, r.hm_st.standing
+            end
+            local g1, d1, s1 = dshot(true, "hit")
+            local g0, d0, s0 = dshot(false, "hit")
+            local mg, md = dshot(true, "miss")
+            F_H.DEF_PHASE = true
+            check(near(g1, 0) and near(d1, 1) and s1 == nil, string.format("defensive hit taught overall %s / def %s / standing %s, expected 0 / 1 / -", tostring(g1), tostring(d1), tostring(s1)))
+            check(near(g0, 1) and d0 == nil and near(s0, 1), "defensive hit test: flag off didn't file it as v8.39 did")
+            check(near(mg, 2) and near(md, 0), string.format("defensive miss: overall %s / def %s, expected 2 / 0", tostring(mg), tostring(md)))
+            check(HM.Side({hm = 3, hm_st = {}}, "standing", true) == 0 and HM.Side({hm = 0, hm_st = {def = -2}}, "standing", true) == -1,
+                "HMEM.Side in a defensive phase reads the def memory only")
             -- why nothing was learned without a side
             check(HM.NoSide({meth = "builtin", gs = 2}) == "gamesense centred (|gs| < 5)"
                 and HM.NoSide({meth = "builtin"}) == "no gamesense answer"
@@ -2687,40 +2705,44 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         else
             UNIT_FAIL[#UNIT_FAIL + 1] = "defensive frame test: player 102's record / history not reachable"
         end
-        -- FEATURE.DEF_RELEASE: a known side (hit memory) isn't forced while
-        -- defensive frames came in the last second; v6.2 forced it. After a
-        -- second without one, it is forced again.
+        -- FEATURE.DEF_PHASE: in a defensive phase (a defensive frame in the
+        -- last second) only the "def" memory is forced -- not the overall one
+        -- learned outside it, which v6.2 / v8.39 forced; after a second
+        -- without a defensive frame the overall memory is back.
         local FE = probe("FEATURE")
         if r and FE then
-            -- a record every 3 ticks: choking, so not static (NO_CHOKE_STATIC)
-            local function rec_once()
+            -- a record every 3 ticks (choking: not NO_CHOKE static), jittering
+            local function rec_once(hm, def)
                 for k = 1, 3 do
                     W.tick = W.tick + 1; W.real = W.real + TI
                     if k == 3 then p.sim = W.tick * TI; p.pose01 = (p.pose01 == 0.2) and 0.8 or 0.2 end
                     W.players[101].sim = W.tick * TI
-                    r.hm, r.hm_st, r.hit_count, r.hit_side, r.vuln_ttl = 2, {}, 2, 1, 0
+                    r.hm, r.hm_st, r.hit_count, r.hit_side, r.vuln_ttl = hm, {def = def}, 2, 1, 0
                     fire("net_update_end")
                 end
-                return r.last_meth
+                return r.last_meth, r.last_val
             end
-            -- a fresh defensive frame just before
             local function def_frame()
                 W.tick = W.tick + 1; W.real = W.real + TI
                 p.sim = (W.tick - 4) * TI
                 W.players[101].sim = W.tick * TI
                 fire("net_update_end")
             end
-            FE.DEF_RELEASE = true; def_frame()
-            local on = rec_once()
-            FE.DEF_RELEASE = false; def_frame()
-            local off = rec_once()
-            FE.DEF_RELEASE = true
+            for _ = 1, 8 do rec_once(2, nil) end   -- warm up: jitter, not static
+            FE.DEF_PHASE = true; def_frame()
+            local overall = rec_once(2, nil)
+            def_frame()
+            local own, own_v = rec_once(0, -2)
+            FE.DEF_PHASE = false; def_frame()
+            local off = rec_once(2, nil)
+            FE.DEF_PHASE = true
             local later
-            for _ = 1, 24 do later = rec_once() end
-            if on ~= "builtin" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive release: hit memory forced (" .. tostring(on) .. ") right after a defensive frame" end
-            if off ~= "hit_mem" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive release test: flag off gave " .. tostring(off) .. ", not v6.2's hit_mem" end
-            if later ~= "hit_mem" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive release: still not forcing 72 ticks after the last defensive frame (" .. tostring(later) .. ")" end
-            r.hm, r.hit_count, r.hit_side = 0, 0, 0
+            for _ = 1, 24 do later = rec_once(2, nil) end
+            if overall ~= "builtin" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive phase: the overall hit memory was forced (" .. tostring(overall) .. ")" end
+            if own ~= "hit_mem" or not (type(own_v) == "number" and own_v < 0) then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive phase: its own memory (-2) wasn't forced: " .. tostring(own) .. " " .. tostring(own_v) end
+            if off ~= "hit_mem" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive phase test: flag off gave " .. tostring(off) .. ", not v6.2's hit_mem" end
+            if later ~= "hit_mem" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive phase: overall memory not back 72 ticks after the last defensive frame (" .. tostring(later) .. ")" end
+            r.hm, r.hm_st, r.hit_count, r.hit_side = 0, {}, 0, 0
         end
     else
         UNIT_FAIL[#UNIT_FAIL + 1] = "defensive frame test: SHOTS / player 102 not reachable"

@@ -3,6 +3,24 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.44  – Defensive is the meta: RIFTVEIL resolves it instead of handing it
+          over (replaces v8.43's DEF_RELEASE). DEF_PHASE:
+          On enemies sending defensive frames the side that lands the head
+          repeats from one head hit to the next 41 of 78 times -- a coin
+          flip -- against 63 of 87 without (all uploaded logs). Defensive
+          AA itself only changes pitch / yaw on the ticks lag compensation
+          never records; the records we shoot keep the builder's jitter
+          body yaw, so one remembered side per player can't hold there:
+          hit memory learned outside defensive went 12 / 12 in it (45 / 4
+          outside); after our head hit, 3 / 5 (28 / 3 outside).
+          So a defensive phase (any defensive frame in the last second) has
+          its own hit memory, "def": shots fired in it teach only "def", and
+          only "def" is forced in it. Signed evidence: it builds on an
+          enemy that holds a side in defensive and cancels on one that
+          jitters. Event windows (unchoke, duck, ...) keep forcing -- they
+          read the record itself; the rest is gamesense's own per-record
+          resolve (26 / 13 on defensive enemies). [aa] lines mark the
+          switch; shot lines' hm= shows the def memory during it.
   v8.43  – DEF_RELEASE: nothing is forced while an enemy sends defensive
           frames (any in the last second); gamesense resolves them.
           The match it comes from: two Neverlose players with 9-25

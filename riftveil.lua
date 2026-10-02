@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.43"
+local RV_VERSION = "8.44"
 
 local ffi = require "ffi"
 
@@ -1017,16 +1017,18 @@ local FEATURE = {
     -- remembered side weakens it by what that shot could prove. Off in the
     -- v6.2 parity run.
     HMEM_WEIGHT = true,
-    -- v8.43: while an enemy sends defensive frames (any in the last second),
-    -- nothing is forced -- gamesense resolves. Across the uploaded logs
-    -- (head / resolver miss) forced shots went 105/24 (81%) with no
-    -- defensive frames but 97/81 (54%) with them, where gamesense alone
-    -- went 24/15 (62%); hit memory fell from 45/4 to 12/12, and forced
-    -- shots at defensive enemies in the air landed 30/32 against
-    -- gamesense's 10/6. Defensive AA (every nl / gs AA script ships it)
-    -- runs its own yaw and body yaw in those ticks: what we learned or
-    -- read outside them doesn't describe them. Off in the v6.2 parity run.
-    DEF_RELEASE = true,
+    -- v8.44: defensive is the meta, so it gets its own hit memory. On
+    -- enemies sending defensive frames (any in the last second) the side
+    -- that lands the head repeats from one head hit to the next 41 of 78
+    -- times -- a coin flip -- against 63 of 87 without (uploaded logs);
+    -- hit memory learned outside defensive went 12/12 there (45/4
+    -- without). So in a defensive phase: shots teach and read only a "def"
+    -- memory (signed evidence -- it builds on an enemy that holds a side in
+    -- defensive and cancels on one that jitters); event windows (unchoke,
+    -- duck ...) still force, they read that record; the rest is gamesense.
+    -- (v8.43 handed everything to gamesense instead.) Off in the v6.2
+    -- parity run.
+    DEF_PHASE = true,
     -- v8.41: duck windows force the torso relative to the eye, within this
     -- frame's limit, like every other window since v8.38. v6.2 forced the
     -- torso's WORLD yaw (-166, 104, ...), clamped to +-60 by the player
@@ -3162,9 +3164,13 @@ do
     end
 
     -- remembered side for state st (falls back to overall), and its evidence
-    function HMEM.Side(rec, st)
+    -- def (FEATURE.DEF_PHASE): the enemy is in a defensive phase -- only
+    -- its own "def" memory counts, never the overall one learned outside it
+    function HMEM.Side(rec, st, def)
+        if def then st = "def" end
         local v = st and rec.hm_st and rec.hm_st[st]
         if isnum(v) and math.abs(v) >= HMEM.GATE then return Sign(v), v end
+        if def then return 0, isnum(v) and v or 0 end
         v = rec.hm or 0
         if math.abs(v) >= HMEM.GATE then return Sign(v), v end
         return 0, v
@@ -3177,11 +3183,19 @@ do
         return string.format("%+.1f/%s", rec.hm or 0, isnum(v) and string.format("%+.1f", v) or "-")
     end
 
+    -- which memory a shot teaches (FEATURE.DEF_PHASE): a shot at an enemy
+    -- in a defensive phase (df > 0) teaches only "def"; any other shot its
+    -- movement state and the overall memory, as in v8.39
+    local function Key(d)
+        if FEATURE.DEF_PHASE and (d.df or 0) > 0 then return "def", false end
+        return d.state, true
+    end
+
     local function Log(what, name, d, side, ww, gw, w, g0, g1, s0, s1, why)
         info("hmem", "player=%s %s side=%+d wc=%s ww=%.2f aim=%s hg=%s gw=%.2f w=%.2f mem=%+.2f->%+.2f st=%s smem=%+.2f->%+.2f meth=%s%s",
             name or "?", what, side or 0, d.wc or "?", ww or 0,
             HGN[d.aim_hg or -1] or "?", HGN[d.hg_out or -1] or "-", gw or 0, w or 0,
-            g0 or 0, g1 or 0, d.state or "?", s0 or 0, s1 or 0, d.meth or "?",
+            g0 or 0, g1 or 0, d.mkey or d.state or "?", s0 or 0, s1 or 0, d.meth or "?",
             why and (" why=" .. why) or "")
     end
 
@@ -3195,13 +3209,16 @@ do
         local w = ww * gw
         local why = (d.nolearn and "teleported/extrapolated") or (ww == 0 and "weapon") or (gw == 0 and "hitbox")
                     or (not side and HMEM.NoSide(d)) or nil
+        local key, g_on = Key(d)
+        d.mkey = key
         local g0 = rec.hm or 0
-        local s0 = d.state and rec.hm_st[d.state] or 0
+        local s0 = key and rec.hm_st[key] or 0
         if why then Log("skip", name, d, side, ww, gw, 0, g0, g0, s0, s0, why); return 0 end
-        rec.hm = Clamp(g0 + side * w, -HMEM.CAP, HMEM.CAP)
-        if d.state then rec.hm_st[d.state] = Clamp(s0 + side * w, -HMEM.CAP, HMEM.CAP) end
-        Log((g0 ~= 0 and Sign(g0) ~= side) and "against" or "learn", name, d, side, ww, gw, w,
-            g0, rec.hm, s0, d.state and rec.hm_st[d.state] or 0)
+        if g_on then rec.hm = Clamp(g0 + side * w, -HMEM.CAP, HMEM.CAP) end
+        if key then rec.hm_st[key] = Clamp(s0 + side * w, -HMEM.CAP, HMEM.CAP) end
+        local ref = g_on and g0 or s0
+        Log((ref ~= 0 and Sign(ref) ~= side) and "against" or "learn", name, d, side, ww, gw, w,
+            g0, rec.hm, s0, key and rec.hm_st[key] or 0)
         return w
     end
 
@@ -3218,19 +3235,21 @@ do
         local gw = HMEM.MISS[d.aim_hg or -1] or 0
         local rw = (reason == "?" or reason == "") and 1 or 0
         local w = ww * gw * rw
-        local g0 = rec.hm or 0
-        local s0 = d.state and rec.hm_st[d.state] or 0
+        local key, g_on = Key(d)
+        d.mkey = key
+        local g0 = g_on and (rec.hm or 0) or 0
+        local s0 = key and rec.hm_st[key] or 0
         local why = (d.nolearn and "teleported/extrapolated") or (rw == 0 and "prediction error")
                     or (ww == 0 and "weapon") or (gw == 0 and "hitbox") or (not side and HMEM.NoSide(d))
                     or ((g0 == 0 and s0 == 0) and "no memory yet")
                     or ((Sign(g0) ~= side and Sign(s0) ~= side) and "memory on the other side") or nil
         if why then Log("skip", name, d, side, ww, gw, 0, g0, g0, s0, s0, why); return 0 end
-        rec.hm = Toward0(g0, side, 2 * w)
-        if d.state then rec.hm_st[d.state] = Toward0(s0, side, 2 * w) end
-        local s1 = d.state and rec.hm_st[d.state] or 0
-        local lost = (math.abs(g0) >= HMEM.GATE and math.abs(rec.hm) < HMEM.GATE)
+        if g_on then rec.hm = Toward0(g0, side, 2 * w) end
+        if key then rec.hm_st[key] = Toward0(s0, side, 2 * w) end
+        local s1 = key and rec.hm_st[key] or 0
+        local lost = (g_on and math.abs(g0) >= HMEM.GATE and math.abs(rec.hm) < HMEM.GATE)
                   or (math.abs(s0) >= HMEM.GATE and math.abs(s1) < HMEM.GATE)
-        Log(lost and "drop" or "weaken", name, d, side, ww, gw, w, g0, rec.hm, s0, s1)
+        Log(lost and "drop" or "weaken", name, d, side, ww, gw, w, g0, g_on and rec.hm or g0, s0, s1)
         return w
     end
 end
@@ -3360,7 +3379,7 @@ end
 -- The player back to gamesense's own resolver: nothing forced, its
 -- correction on, no priority. Every release goes through here.
 -- Defensive frames (see ProcessPlayer) received from this player in the
--- last 64 ticks (one second): the shot log's df= and FEATURE.DEF_RELEASE
+-- last 64 ticks (one second): the shot log's df= and FEATURE.DEF_PHASE
 local function DefFrames(rec, now)
     local n, r = 0, rec.dfr
     if r then for i = 1, #r do if now - r[i] <= 64 and now >= r[i] then n = n + 1 end end end
@@ -3493,7 +3512,7 @@ local function ProcessPlayer(player, ctx)
 
     local st = math.floor(st_raw / ctx.ti)
     if st == rec.lt then return end
-    -- DEFENSIVE FRAME COUNT (read by FEATURE.DEF_RELEASE since v8.43): lag
+    -- DEFENSIVE FRAME COUNT (read by FEATURE.DEF_PHASE since v8.44): lag
     -- compensation writes no record while a player's simulation time is at
     -- or below the highest it has sent (tickcount/lagrecord-csgo.lua), so a
     -- frame arriving with a lower simtime is a defensive frame -- the one
@@ -3885,6 +3904,16 @@ local function ProcessPlayer(player, ctx)
         -- vuln read beats the known-failing built-in.
         local vuln_min = rec.meta_aggressive and 0.20 or 0.35
         -- The vuln window is forced this record (the [1] branch below).
+        -- FEATURE.DEF_PHASE: defensive frames in the last second -> the
+        -- enemy's own "def" hit memory (HMEM); [aa] lines mark the switch
+        local def_on = FEATURE.DEF_PHASE and DefFrames(rec, ctx.cur_tc) > 0
+        if def_on ~= (rec._def_on or false) then
+            rec._def_on = def_on
+            if DET.verbose then
+                dbg("aa", def_on and "player=%s defensive phase: its own hit memory (def)"
+                    or "player=%s no defensive frame for 1 s: normal hit memory", entity.get_player_name(player) or "?")
+            end
+        end
         local vuln_on = DET.vuln and rec.vuln_ttl > 0
                         and (rec.conf >= vuln_min or FEATURE.KNOWN_ONLY)
                         and not (FEATURE.KNOWN_ONLY and (rec.vuln_type == VTYPE.LBY or rec.vuln_type == VTYPE.CTR))
@@ -3899,7 +3928,7 @@ local function ProcessPlayer(player, ctx)
 
         if not window_blocks then
             -- No active vuln window — run the side detection chain
-            local hm_side = FEATURE.HMEM_WEIGHT and HMEM.Side(rec, rec.state) or 0
+            local hm_side = FEATURE.HMEM_WEIGHT and HMEM.Side(rec, rec.state, def_on) or 0
             if (FEATURE.HMEM_WEIGHT and hm_side ~= 0)
                or (not FEATURE.HMEM_WEIGHT and rec.hit_count >= 2 and rec.hit_side ~= 0) then
                 -- Empirical: hit this player on this side this match
@@ -4056,11 +4085,12 @@ local function ProcessPlayer(player, ctx)
         -- static guesses are least trustworthy, not when confirmed data should
         -- be thrown out). Seen directly in a debug log: a hit_mem correction
         -- logged val=0.0 for a fast-moving target.
-        elseif FEATURE.HMEM_WEIGHT and DET.hitmem and HMEM.Side(rec, rec.state) ~= 0
+        elseif FEATURE.HMEM_WEIGHT and DET.hitmem and HMEM.Side(rec, rec.state, def_on) ~= 0
                and CheatTrusts(rec, METH.HIT_MEM) then
-            -- weighted evidence, this state first, then overall (HMEM.Side)
+            -- weighted evidence, this state first, then overall (HMEM.Side);
+            -- in a defensive phase the "def" memory alone
             should_override = true
-            override_val    = CfgAngle(HMEM.Side(rec, rec.state), rec.state, TrustedCfg(rec), FEATURE.FULL_DESYNC and corr_cap or live_cap)
+            override_val    = CfgAngle(HMEM.Side(rec, rec.state, def_on), rec.state, TrustedCfg(rec), FEATURE.FULL_DESYNC and corr_cap or live_cap)
             override_meth   = METH.HIT_MEM
 
         elseif not FEATURE.HMEM_WEIGHT and DET.hitmem and rec.state
@@ -4117,17 +4147,6 @@ local function ProcessPlayer(player, ctx)
                 end
             end
         end
-
-        -- FEATURE.DEF_RELEASE: defensive frames in the last second -> gamesense
-        local def_hold = FEATURE.DEF_RELEASE and DefFrames(rec, ctx.cur_tc) > 0
-        if def_hold ~= (rec._def_hold or false) then
-            rec._def_hold = def_hold
-            if DET.verbose then
-                dbg("aa", def_hold and "player=%s defensive frames: forcing paused -> gamesense"
-                    or "player=%s no defensive frame for 1 s: resolving", entity.get_player_name(player) or "?")
-            end
-        end
-        if def_hold then should_override = false end
 
         if should_override then
             PSet(player, "Force body yaw", true)
@@ -5064,7 +5083,7 @@ local function on_aim_fire(e)
         -- our weapon in full (rifle / smg / shotgun / knife ...) and the
         -- hit memory in effect at the shot, overall/this state (HMEM)
         wc      = HMEM.Class(),
-        hm      = HMEM.Tag(r, r and r.state),
+        hm      = HMEM.Tag(r, r and ((FEATURE.DEF_PHASE and DefFrames(r, globals.tickcount()) > 0) and "def" or r.state)),
         pol     = r and r.aim_pol or "-",
         aim_th  = r and LogInt(r.aim_th or 0) or 0,   -- traced head / body damage
         aim_tb  = r and LogInt(r.aim_tb or 0) or 0,
