@@ -3,6 +3,33 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.35  – Plan steps 2 and 3 in code: read the enemy, not ourselves; one
+          magnitude for every lua.
+          POSE_CLEAN -- the AA picture, confidence, side, flips and the
+          pose-triggered windows (LBY / CTR) come only from records built
+          while nothing was forced. The body-yaw pose is computed by our
+          client; on a record we forced it reads our own value back (bots
+          with no desync were labelled hold / 2-way / 3-way on 56 of 64
+          shots, and a constant hit-memory value showed as "hold" on 50% of
+          its lines vs 11% unforced). A record we forced also clears the
+          previous pose, so our own switch can't read as an LBY "snap".
+          Harness: an enemy on a static AA, fakelagging, whose pose echoes
+          what we force and whose first reads jitter -- v6.2 keeps forcing
+          its own alternating suppress forever, v8.35 reads it static and
+          hands it back; single-record checks for confidence, previous pose
+          and the LBY window.
+          FULL_DESYNC -- every side-based value (hit memory, suppress, LBY,
+          6lex fallback, meta) is the side times the engine's desync limit
+          for that frame (MaxDesync: 58 standing, 29 at a full run) instead
+          of the luasense yaw-offset tables, for any lua and any settings:
+          211 of 330 limit sliders in the repo's AA scripts default to 60,
+          settings exports and presets sit at 58-60; in the logs the right
+          side landed 66% at 30-39 and 77% at 40-60, and under 20 was the
+          weakest band for every method. Hit memory takes the speed-aware
+          limit too (it used a flat 58). Harness: +-cap from CfgAngle,
+          suppress at 58 on a standing enemy, hit memory at the running
+          limit; v6.2 paths checked.
+          Both off in the v6.2 parity run; every part mutation-checked.
   v8.34  – Full review of the resolver path, function by function.
           FIXED (WINDOW_GATE) -- an open vuln window that was NOT being
           forced (Vulnerability off, the enemy's cheat distrusting that

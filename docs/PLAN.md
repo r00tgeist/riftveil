@@ -28,6 +28,10 @@ Where we are: v6.2 measured 74%. Across all logs the methods sit at
 
 ## Step 2 -- read the enemy, not ourselves
 
+**Done in v8.35** (`POSE_CLEAN`): detection reads only records built with
+nothing forced. Still open: classifying the AA from the eye-yaw history,
+and the `eo=` / `lbyu=` side signals once logs show which way they point.
+
 Candidates the server sends, logged on every shot since v8.34: `eo=` (eye
 yaw against facing away from us -- L/R-yaw AAs choose the offset by desync
 side) and `lbyu=` (time since their LBY target moved). log_report tables
@@ -54,6 +58,9 @@ Decided by the probe.
   step 2 is skipped.
 
 ## Step 3 -- one magnitude model instead of presets
+
+**Done in v8.35** (`FULL_DESYNC`): value = side x `MaxDesync`. The
+per-enemy learned scale is left out until a log shows full size missing.
 
 - Value = side x `MaxDesync` for that frame. Almost every AA runs its body
   yaw limit at max (211 of 330 limit sliders default to 60; settings

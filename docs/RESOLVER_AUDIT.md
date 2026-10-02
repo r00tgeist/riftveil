@@ -129,3 +129,9 @@ events.
 | No side signal from server data | logged: `eo=`, `lbyu=` |
 | Vuln windows need pose-derived confidence >= 0.20 to even be detected | plan step 2 (rebased with the pose) |
 | Saved profiles bring the recognised preset back at 0.5 trust -- enough to apply | plan step 3 (presets retired) |
+
+## v8.35
+
+The two root problems above are handled in code: `POSE_CLEAN` (detection
+reads only records with nothing forced) and `FULL_DESYNC` (side x engine
+limit, no preset tables).

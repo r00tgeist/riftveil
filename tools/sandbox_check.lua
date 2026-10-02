@@ -511,7 +511,7 @@ if os.getenv("RV_PARITY") then
     end
     local F
     for _, cb in pairs(CALLBACKS) do F = F or find(cb, 0) end
-    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false end
+    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false; F.POSE_CLEAN = false; F.FULL_DESYNC = false end
 end
 
 local cb_errors = {}
@@ -2033,6 +2033,153 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         if not off then UNIT_FAIL[#UNIT_FAIL + 1] = "meta streak test: flag off didn't take over -- the test no longer shows v6.2's reset" end
     else
         UNIT_FAIL[#UNIT_FAIL + 1] = "meta streak test: REC[102] / FEATURE / SHOTS not reachable"
+    end
+end
+
+-- Clean pose (FEATURE.POSE_CLEAN): the game's body-yaw pose echoes what
+-- we force. A fakelagging enemy on a static AA whose first reads jitter
+-- (gamesense's early guesses) must end up static and released; v6.2 (flag
+-- off) reads its own alternating suppress back as jitter and keeps forcing.
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local REC_T, EI, F = probe("REC"), probe("EIDX_S64"), probe("FEATURE")
+    local live0 = W.live
+    local function run(flag, id)
+        F.POSE_CLEAN = flag
+        W.live = {101, 102, id}
+        W.players[id] = {sim = W.tick * TI, vx = 0, vy = 0, pose01 = 0.5, eye = 0, duck = 0, torso = 0, gfy = 0}
+        local forced_n = 0
+        for n = 1, 120 do
+            for k = 1, 3 do   -- a record every 3 ticks: chokes
+                W.tick = W.tick + 1; W.real = W.real + TI
+                for _, p in ipairs({101, 102}) do W.players[p].sim = W.tick * TI end
+                if k == 3 then
+                    local pl = W.players[id]
+                    pl.sim = W.tick * TI
+                    local forced = PLIST_STATE[tostring(id) .. "\tForce body yaw"] == true
+                    local v = tonumber(PLIST_STATE[tostring(id) .. "\tForce body yaw value"]) or 0
+                    if forced then pl.pose01 = (v + 60) / 120          -- our own value read back
+                    elseif n <= 8 then pl.pose01 = (n % 2 == 0) and 0.2 or 0.8   -- early guesses jitter
+                    else pl.pose01 = 0.75 end                          -- the real thing: static
+                    if n > 100 and forced then forced_n = forced_n + 1 end
+                end
+                fire("net_update_end")
+            end
+        end
+        local r = EI[id] and REC_T[EI[id]]
+        W.players[id] = nil
+        return r and r.aa_type, forced_n
+    end
+    -- one record built while we forced: confidence doesn't move, and the
+    -- previous pose is cleared (no LBY / CTR "snap" across it)
+    local function one(flag, id)
+        F.POSE_CLEAN = flag
+        W.live = {101, 102, id}
+        W.players[id] = {sim = W.tick * TI, vx = 0, vy = 0, pose01 = 0.5, eye = 0, duck = 0, torso = 0, gfy = 0}
+        local r
+        local function rec_step(p01)
+            for k = 1, 3 do
+                W.tick = W.tick + 1; W.real = W.real + TI
+                for _, p in ipairs({101, 102}) do W.players[p].sim = W.tick * TI end
+                if k == 3 then W.players[id].sim = W.tick * TI; W.players[id].pose01 = p01 end
+                fire("net_update_end")
+            end
+            r = EI[id] and REC_T[EI[id]]
+        end
+        for n = 1, 20 do rec_step((n % 2 == 0) and 0.2 or 0.8) end
+        if not r then return nil end
+        -- a clean read (+36), then a record forced to 0: the shape of an
+        -- LBY "snap" made of our own value
+        r.active, r.last_val = false, 0
+        rec_step(0.8)
+        r.active, r.last_val, r.conf, r.vuln_type, r.vuln_ttl = true, 0.5, 0.6, nil, 0
+        rec_step(0.5)
+        local c, pp, lby = r.conf, r.prev_pose, r.vuln_type == "lby"
+        W.players[id] = nil
+        return c, pp, lby
+    end
+    local c1, pp1, l1 = one(true, 127)
+    local c0, pp0, l0 = one(false, 128)
+    if c1 ~= 0.6 or pp1 ~= nil or l1 then
+        UNIT_FAIL[#UNIT_FAIL + 1] = string.format("clean pose: a forced record moved confidence to %s / kept previous pose %s / opened LBY %s",
+            tostring(c1), tostring(pp1), tostring(l1))
+    end
+    if c0 == 0.6 or pp0 == nil or not l0 then UNIT_FAIL[#UNIT_FAIL + 1] = "clean pose test: flag off didn't move confidence, keep the pose and open LBY -- the single-record check no longer reaches v6.2's path" end
+    if REC_T and EI and F then
+        local aa1, f1 = run(true, 125)
+        local aa0, f0 = run(false, 126)
+        F.POSE_CLEAN = true
+        if not (aa1 == "static" and f1 == 0) then
+            UNIT_FAIL[#UNIT_FAIL + 1] = string.format("clean pose: a static AA ended as %s, forced on %d of the last 20 records", tostring(aa1), f1)
+        end
+        if not (aa0 ~= "static" and f0 > 0) then
+            UNIT_FAIL[#UNIT_FAIL + 1] = string.format("clean pose test: flag off ended as %s, forced %d -- the echo trap isn't reproduced", tostring(aa0), f0)
+        end
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "clean pose test: REC / EIDX_S64 / FEATURE not reachable"
+    end
+    W.live = live0
+end
+
+-- Full desync (FEATURE.FULL_DESYNC): side x the engine's limit, not the
+-- luasense yaw-offset tables. A standing jittering enemy is forced at the
+-- full 58 (v6.2 path: a table value).
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local CA, REC_T, EI, F = probe("CfgAngle"), probe("REC"), probe("EIDX_S64"), probe("FEATURE")
+    if CA and REC_T and EI and F then
+        F.FULL_DESYNC = true
+        local a, b, c = CA(1, "standing", "luasense_beta", 58), CA(-1, "standing", "luasense_beta", 58), CA(-1, "running", nil, 29)
+        if not (a == 58 and b == -58 and c == -29) then
+            UNIT_FAIL[#UNIT_FAIL + 1] = string.format("full desync: CfgAngle gave %s / %s / %s, expected 58 / -58 / -29", tostring(a), tostring(b), tostring(c))
+        end
+        F.FULL_DESYNC = false
+        if CA(1, "standing", "luasense_beta", 58) ~= 41 then UNIT_FAIL[#UNIT_FAIL + 1] = "full desync test: flag off didn't give the luasense table value 41" end
+        local live0 = W.live
+        local function run(flag, id)
+            F.FULL_DESYNC = flag
+            W.live = {101, 102, id}
+            W.players[id] = {sim = W.tick * TI, vx = 0, vy = 0, pose01 = 0.5, eye = 0, duck = 0, torso = 0, gfy = 0}
+            local vals = {}
+            for n = 1, 30 do
+                for k = 1, 3 do
+                    W.tick = W.tick + 1; W.real = W.real + TI
+                    for _, p in ipairs({101, 102}) do W.players[p].sim = W.tick * TI end
+                    if k == 3 then W.players[id].sim = W.tick * TI; W.players[id].pose01 = (n % 2 == 0) and 0.2 or 0.8 end
+                    fire("net_update_end")
+                end
+                local r = EI[id] and REC_T[EI[id]]
+                if r and r.last_meth == "suppress" then vals[math.abs(math.floor(r.last_val + 0.5))] = true end
+            end
+            W.players[id] = nil
+            return vals
+        end
+        local on, off = run(true, 129), run(false, 130)
+        -- hit memory on a running enemy: the speed-aware limit, not a flat 58
+        F.FULL_DESYNC = true
+        W.live = {101, 102, 131}
+        W.players[131] = {sim = W.tick * TI, vx = 250, vy = 0, pose01 = 0.5, eye = 0, duck = 0, torso = 0, gfy = 0}
+        local hm, cap
+        for n = 1, 12 do
+            for k = 1, 3 do
+                W.tick = W.tick + 1; W.real = W.real + TI
+                for _, p in ipairs({101, 102}) do W.players[p].sim = W.tick * TI end
+                if k == 3 then W.players[131].sim = W.tick * TI; W.players[131].pose01 = (n % 2 == 0) and 0.2 or 0.8 end
+                local r = EI[131] and REC_T[EI[131]]
+                if r then r.hit_count, r.hit_side, r.vuln_ttl = 2, 1, 0 end
+                fire("net_update_end")
+            end
+            local r = EI[131] and REC_T[EI[131]]
+            if r and r.last_meth == "hit_mem" then hm, cap = r.last_val, r.corr_cap end
+        end
+        W.players[131] = nil
+        if not (hm and cap and cap < 57 and math.abs(hm - cap) < 0.05) then
+            UNIT_FAIL[#UNIT_FAIL + 1] = string.format("full desync: hit memory on a running enemy forced %s, expected its limit %s (< 58)", tostring(hm), tostring(cap))
+        end
+        if not on[58] then UNIT_FAIL[#UNIT_FAIL + 1] = "full desync: a standing jittering enemy's suppress never forced 58" end
+        for v in pairs(on) do if v ~= 58 then UNIT_FAIL[#UNIT_FAIL + 1] = "full desync: suppress forced " .. v .. ", expected only 58" end end
+        if off[58] then UNIT_FAIL[#UNIT_FAIL + 1] = "full desync test: flag off forced 58 -- not v6.2's table value" end
+        W.live = live0
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "full desync test: CfgAngle / REC / EIDX_S64 / FEATURE not reachable"
     end
 end
 

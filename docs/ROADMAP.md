@@ -5,7 +5,7 @@ and what comes next. Older versions are kept in `versions/` so none of the
 work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 (the decision engine), `riftveil_v8.1.lua`.
 
-## In the script (v8.34)
+## In the script (v8.35)
 
 | Area | Feature | Changes shots? |
 |---|---|---|
@@ -22,6 +22,8 @@ work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 | Tools | `rv_perf` profiler, `rv_stats`, `rv_db`, `rv_save` | no |
 | Weapons | Aim policy on traced damage: prefer body only when a body shot kills from here, body preference off when only the head kills, safe point when in doubt or airborne; values verified, traces self-calibrated | yes, Detection › Weapon aim |
 | Weapons | "In doubt" includes a 3-way / 5-way enemy missed on the resolver in the last 10 s (43% head there in the pre-v8 logs vs 59-77% elsewhere) | measured only since v8.34 (it fed safe point) |
+| Core | AA picture, side, flips and LBY / CTR windows only from records built with nothing forced (the pose is our client's; forced records read our own value back) | yes, `FEATURE.POSE_CLEAN` |
+| Core | Forced value = side x the engine's desync limit for that frame, for every lua and setting -- no luasense tables | yes, `FEATURE.FULL_DESYNC` |
 | Core | Only a forced vuln window stands the side chain and suppress down; round start clears what each record forces; gamesense's own hit ends its miss streak | yes, `WINDOW_GATE`, `STALE_WINDOW`, `META_STREAK` |
 | Weapons | No forced safe point (it landed 47-50% against 57% default and 86% head-kill, and made the ragebot wait) | yes, `FEATURE.NO_SAFEPOINT` |
 | Logging | Shot lines: `eo=` (eye yaw vs facing away from us) and `lbyu=` (time since their LBY target moved) -- side signals the server sends, tested by log_report | no |

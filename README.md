@@ -114,13 +114,12 @@ against the ragebot's own damage prediction. How and why, with sources:
    plaguecheat, ev0lve, rifk7, airflow, primordial (from tickcount's
    voice-listener). The label is saved with the
    player's profile.
-2. **A Lua's presets only for the cheat that runs it.** The `luasense_beta`
-   fingerprint is the built-in preset of the **Neverlose** luasense beta,
-   all 7 states exact (`luasense_std` is the same family). A player
-   detected on any other cheat can't be running it, so they get the
-   default L/R table instead of a false match. `symmetric` is a desync
-   shape, not a Lua, and applies to everyone. (v8.0–v8.9 had this
-   backwards: only gamesense users got the luasense presets.)
+2. **No per-Lua presets (v8.35).** The forced value is the side times
+   the engine's desync limit for that frame (58 standing, down to 29 at a
+   full run). AA scripts differ in yaw offsets and side patterns, but
+   their body-yaw limit sits at 60 almost everywhere, so one model covers
+   luasense and every other script and setting. The old luasense tables
+   (yaw offsets) are only used with `FEATURE.FULL_DESYNC` off.
 3. **What works per cheat is learned.** Every head-aimed shot (head hit or
    resolver miss) is filed under (enemy cheat, method) across all players
    on that cheat and saved between sessions. A method at 30% or worse against a cheat after

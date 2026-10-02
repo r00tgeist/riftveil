@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.34"
+local RV_VERSION = "8.35"
 
 local ffi = require "ffi"
 
@@ -968,6 +968,17 @@ local FEATURE = {
     -- the numbers). Head kill -> head only, body kill -> body, else the
     -- ragebot's own setting. Aim policy only.
     NO_SAFEPOINT = true,
+    -- v8.35: the AA picture, side, flips and the pose-triggered windows
+    -- (LBY / CTR) come only from records built while nothing was forced --
+    -- on the others the body-yaw pose (computed by our client) is our own
+    -- value read back. Bots (no desync) were labelled hold / 2-way / 3-way
+    -- on 56 of 64 shots before. Off in the v6.2 parity run.
+    POSE_CLEAN = true,
+    -- v8.35: every side-based value is the side times the engine's desync
+    -- limit for that frame (MaxDesync: 58 standing, 29 running) instead of
+    -- the luasense yaw-offset tables, for any lua and any settings. Hit
+    -- memory takes the same speed-aware limit. Off in the v6.2 parity run.
+    FULL_DESYNC = true,
     -- These three are the v6.2 [EXP] switches as the logs show them
     -- running when the resolver hit 74% (suppress fired in every v6.2
     -- match; jitter prediction never did).
@@ -1866,6 +1877,13 @@ end
 -- Optional cap clamps the static guess to the velocity/live-desync bound
 -- (VelCap) so a fast-moving enemy doesn't get an overshoot correction.
 local function CfgAngle(side, state, config_type, cap)
+    -- FEATURE.FULL_DESYNC: the side times the engine's limit for this frame
+    -- (MaxDesync, passed as cap). The tables below are luasense YAW offsets;
+    -- what an AA desyncs by is its body-yaw limit, at 60 in 211 of 330
+    -- limit sliders in the repo's AA scripts, settings exports and presets
+    -- alike -- whatever the lua. Bigger values landed better in the logs
+    -- (right side 30-39: 66%, 40-60: 77%; under 20 the weakest everywhere).
+    if FEATURE.FULL_DESYNC and isnum(cap) then return side > 0 and cap or -cap end
     local tbl = config_type and CFG_COUNTER[config_type] and CFG_COUNTER[config_type][state]
     local raw
     if tbl then
@@ -3223,6 +3241,12 @@ local function ProcessPlayer(player, ctx)
     -- on [corr]). The body-yaw pose is computed by our client, not sent by
     -- the server, so it may be our own forced value coming back.
     local pf = rec.active and rec.last_val or nil
+    -- FEATURE.POSE_CLEAN: the body-yaw pose is our client's; on a record
+    -- built while we forced a value it reads that value back (bots with no
+    -- desync came out hold / 2-way / 3-way on 56 of 64 shots). Only records
+    -- built with nothing forced feed the AA picture, side, flips and the
+    -- pose-triggered windows (LBY / CTR).
+    local sample = not FEATURE.POSE_CLEAN or pf == nil
 
     -- pose/spd/duck/on_ground are nil until sampled.
     -- They are saved to rec at the end of the function regardless of path taken.
@@ -3363,11 +3387,11 @@ local function ProcessPlayer(player, ctx)
         rec.prev_origin_x, rec.prev_origin_y, rec.prev_origin_z = ox, oy, oz
         rec.prev_origin_tick = st
 
-        RPush(rec.hist, {p=pose, e=eye_y, t=st})
+        if sample then RPush(rec.hist, {p=pose, e=eye_y, t=st}) end
         -- Pruned by age: clearing only tm[st - TM_HORIZON] leaked every
         -- entry a fakelagging enemy's skipped simtime ticks never revisit
         -- (2,500 after 20k ticks). Lookups stay within the horizon.
-        if not rec.tm[st] then
+        if sample and not rec.tm[st] then
             rec.tm[st] = {p=pose, e=eye_y, t=st}
             rec.tm_n = (rec.tm_n or 0) + 1
             if rec.tm_n > CFG.TM_HORIZON * 2 then
@@ -3411,27 +3435,30 @@ local function ProcessPlayer(player, ctx)
         -- (asymmetric torso delta was tracked here but rec.asym_left/right
         --  are never read — RecognizeCfg uses MeanSidePose directly)
 
-        -- Confidence
-        if six_side ~= 0 then
-            rec.conf = math.min(rec.conf + 0.08, 1.0)
-            if dom_side ~= 0 and dom_side == six_side then
-                rec.conf = math.min(rec.conf + 0.05, 1.0)
-            end
-        end
-        if raw_c > 0.35 or yaw_jit then
-            rec.conf = math.min(rec.conf + CFG.CONF_GROW, 1.0)
-            if dom_side ~= 0 then
-                if rec.side ~= 0 and dom_side ~= rec.side then
-                    -- Record flip BEFORE updating rec.side so fl timestamps
-                    -- stay aligned with the side value PredictSide reads
-                    rec.fl[#rec.fl+1] = st
-                    if #rec.fl > 24 then table.remove(rec.fl, 1) end
+        -- Confidence and side: from a clean record only (POSE_CLEAN); on one
+        -- we forced, the pose is our own value read back
+        if sample then
+            if six_side ~= 0 then
+                rec.conf = math.min(rec.conf + 0.08, 1.0)
+                if dom_side ~= 0 and dom_side == six_side then
+                    rec.conf = math.min(rec.conf + 0.05, 1.0)
                 end
-                rec.side = dom_side
             end
-        else
-            rec.conf = rec.conf * CFG.CONF_DECAY
-            if rec.conf < 0.08 then rec.side = 0 end
+            if raw_c > 0.35 or yaw_jit then
+                rec.conf = math.min(rec.conf + CFG.CONF_GROW, 1.0)
+                if dom_side ~= 0 then
+                    if rec.side ~= 0 and dom_side ~= rec.side then
+                        -- Record flip BEFORE updating rec.side so fl timestamps
+                        -- stay aligned with the side value PredictSide reads
+                        rec.fl[#rec.fl+1] = st
+                        if #rec.fl > 24 then table.remove(rec.fl, 1) end
+                    end
+                    rec.side = dom_side
+                end
+            else
+                rec.conf = rec.conf * CFG.CONF_DECAY
+                if rec.conf < 0.08 then rec.side = 0 end
+            end
         end
 
         -- Config recognition (throttled)
@@ -3467,6 +3494,8 @@ local function ProcessPlayer(player, ctx)
         -- Vulnerability window
         if rec.vuln_ttl > 0 then rec.vuln_ttl = rec.vuln_ttl - 1 end
 
+        -- POSE_CLEAN: no LBY / CTR "snap" across a record we forced
+        if not sample then rec.prev_pose = nil end
         local vtype, vcorr = DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
         if vtype and not rec.vuln_profile[vtype] then
             rec.vuln_profile[vtype] = {seen=0, hit=0}
@@ -3727,13 +3756,13 @@ local function ProcessPlayer(player, ctx)
                and (rec.hit_side_by_state[rec.state] or 0) ~= 0
                and CheatTrusts(rec, METH.HIT_MEM) then
             should_override = true
-            override_val    = CfgAngle(rec.hit_side_by_state[rec.state], rec.state, TrustedCfg(rec), live_cap)
+            override_val    = CfgAngle(rec.hit_side_by_state[rec.state], rec.state, TrustedCfg(rec), FEATURE.FULL_DESYNC and corr_cap or live_cap)
             override_meth   = METH.HIT_MEM
 
         elseif DET.hitmem and rec.hit_count >= 2 and rec.hit_side ~= 0
                and CheatTrusts(rec, METH.HIT_MEM) then
             should_override = true
-            override_val    = CfgAngle(rec.hit_side, rec.state, TrustedCfg(rec), live_cap)
+            override_val    = CfgAngle(rec.hit_side, rec.state, TrustedCfg(rec), FEATURE.FULL_DESYNC and corr_cap or live_cap)
             override_meth   = METH.HIT_MEM
 
         -- [4] Suppress [EXP]: force wrong angle to gate aimbot hit-chance.
@@ -3811,7 +3840,7 @@ local function ProcessPlayer(player, ctx)
             -- moving target would still get its confirmed correction clamped
             -- to literal 0 right here, via this second call site, even after
             -- the [3] branch itself was fixed. Use live_cap for that case.
-            local meta_cap = (tracked_method == METH.HIT_MEM) and live_cap or corr_cap
+            local meta_cap = (tracked_method == METH.HIT_MEM and not FEATURE.FULL_DESYNC) and live_cap or corr_cap
             local meta_val = CfgAngle(tracked_side, rec.state, TrustedCfg(rec), meta_cap)
             if rec._brute_half then meta_val = meta_val * 0.5 end
             PSet(player, "Force body yaw", true)
@@ -3860,7 +3889,7 @@ local function ProcessPlayer(player, ctx)
     until true  -- end of repeat block; break exits without running save
 
     -- Save previous frame state (always, for every path that sampled data)
-    rec.prev_pose     = pose
+    rec.prev_pose     = sample and pose or nil
     rec.prev_spd2     = rec.prev_spd  -- shift: spd2 = last tick's spd before this update
     rec.prev_spd      = spd
     -- FEATURE.DCK_GAP: nil when this record wasn't sampled (stale, no
