@@ -511,7 +511,7 @@ if os.getenv("RV_PARITY") then
     end
     local F
     for _, cb in pairs(CALLBACKS) do F = F or find(cb, 0) end
-    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false; F.POSE_CLEAN = false; F.FULL_DESYNC = false; F.BEAT_BUILTIN = false; F.KNOWN_ONLY = false; F.LEARN_GS = false end
+    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false; F.POSE_CLEAN = false; F.FULL_DESYNC = false; F.BEAT_BUILTIN = false; F.KNOWN_ONLY = false; F.LEARN_GS = false; F.VULN_DELTA = false end
 end
 
 local cb_errors = {}
@@ -2309,6 +2309,34 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         F.LEARN_GS = true
         if on ~= 1 then UNIT_FAIL[#UNIT_FAIL + 1] = "learn gs: a builtin head hit filed side " .. tostring(on) .. ", gamesense's answer was +1" end
         if off ~= -1 then UNIT_FAIL[#UNIT_FAIL + 1] = "learn gs test: flag off filed " .. tostring(off) .. ", not v6.2's majority side -1" end
+        -- a forced shot (vuln window at -40) landing the head while our pose
+        -- majority says +1: memory files -1, the side on the hitbox
+        local function forced(flag, id)
+            F.LEARN_GS = flag
+            r.hit_side, r.hit_count, r.side, r.flip = 0, 0, 1, false
+            r.last_meth, r.last_val, r.vuln_ttl, r.vuln_type, r.active = "vuln_unk", -40, 5, "unk", true
+            fire("aim_fire", {id = id, target = 102, backtrack = 0, hit_chance = 80, hitgroup = 1, damage = 100})
+            fire("aim_hit", {id = id, target = 102, hitgroup = 1, damage = 100})
+            return r.hit_side
+        end
+        local f1, f0 = forced(true, 96003), forced(false, 96004)
+        F.LEARN_GS = true
+        if f1 ~= -1 then UNIT_FAIL[#UNIT_FAIL + 1] = "learn gs: a forced -40 head hit filed side " .. tostring(f1) .. ", expected -1" end
+        if f0 ~= 1 then UNIT_FAIL[#UNIT_FAIL + 1] = "learn gs test: flag off filed " .. tostring(f0) .. ", not v6.2's +1" end
+        -- a hit-memory resolver miss: KNOWN_ONLY drops the global memory
+        local function hmmiss(flag, id)
+            F.KNOWN_ONLY = flag
+            r.hit_side, r.hit_count, r.state = 1, 3, "standing"
+            r.hit_side_by_state.standing, r.hit_count_by_state.standing = 1, 2
+            r.last_meth, r.last_val, r.vuln_ttl, r.active = "hit_mem", 58, 0, true
+            fire("aim_fire", {id = id, target = 102, backtrack = 0, hit_chance = 80, hitgroup = 1, damage = 100})
+            fire("aim_miss", {id = id, target = 102, hitgroup = 1, reason = "?"})
+            return r.hit_count
+        end
+        local m1, m0 = hmmiss(true, 96005), hmmiss(false, 96006)
+        F.KNOWN_ONLY = true
+        if m1 ~= 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "known only: a hit-memory miss left the global memory at " .. tostring(m1) .. " hits" end
+        if m0 ~= 3 then UNIT_FAIL[#UNIT_FAIL + 1] = "known only test: flag off cleared the global memory -- not v6.2's behaviour" end
         r.hit_side, r.hit_count = 0, 0
     else
         UNIT_FAIL[#UNIT_FAIL + 1] = "learn gs test: REC[102] / FEATURE not reachable"
@@ -2318,6 +2346,77 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         DB_T["frac_test"] = {samples = 4.5, kills = 3.7, hit_rate = {}, bt_pref = 1}
         fire("console_input", "rv_db")
         DB_T["frac_test"] = nil
+    end
+end
+
+-- Vuln values in one unit (FEATURE.VULN_DELTA): stop / peek / landing force
+-- the world yaw relative to the eye (eye 100, feet / torso 150 -> +50); v6.2
+-- forced the world yaw (150). And (POSE_CLEAN) no window opens on a record
+-- we forced -- its animstate is our own value.
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local DV, F, REC_T, EI = probe("DetectVuln"), probe("FEATURE"), probe("REC"), probe("EIDX_S64")
+    if DV and F and REC_T and EI then
+        local function rec0() return {hist = {b = {}, h = 0, n = 16}, torso_hist = {}, prev_duck = 0, _dck_cooldown = 0} end   -- RNew(16)
+        local as = {goal_feet_yaw = 150, torso_yaw = 150, on_ground = true, duck_amount = 0}
+        local cases = {
+            {"stop", function(r) r.prev_spd, r.prev_spd2 = 250, 250 end, 0, "stp"},
+            {"peek", function(r) r.prev_spd, r.prev_spd2 = 0, 0 end, 250, "pka"},
+            {"landing", function(r) r.prev_onground = false end, 0, "lnd"},
+        }
+        for _, c in ipairs(cases) do
+            for _, flag in ipairs({true, false}) do
+                F.VULN_DELTA = flag
+                local r = rec0(); c[2](r)
+                local t, v = DV(r, as, 0, 100, c[3], 58, nil)
+                local want = flag and 50 or ((c[4] == "lnd") and 100 or 150)
+                if t ~= c[4] or not (type(v) == "number" and math.abs(v - want) < 0.05) then
+                    UNIT_FAIL[#UNIT_FAIL + 1] = string.format("vuln delta (%s, flag %s): %s %s, expected %s %s", c[1], tostring(flag), tostring(t), tostring(v), c[4], want)
+                end
+            end
+        end
+        F.VULN_DELTA = true
+        -- no window on records we forced
+        local live0 = W.live
+        local function run(flag, id)
+            F.POSE_CLEAN = flag
+            W.live = {101, 102, id}
+            W.players[id] = {sim = W.tick * TI, vx = 0, vy = 0, pose01 = 0.5, eye = 100, duck = 0, torso = 150, gfy = 146}
+            local got
+            for step = 1, 40 do
+                W.tick = W.tick + 1; W.real = W.real + TI
+                local c = W.players[id]
+                if (step % 5) >= 3 then c.sim = W.tick * TI end
+                c.pose01 = (step % 2 == 0) and 0.78 or 0.24
+                for _, p in ipairs({101, 102}) do W.players[p].sim = W.tick * TI end
+                local r = EI[id] and REC_T[EI[id]]
+                if r then r.active, r.last_val = true, 10 end   -- every record built while we force
+                fire("net_update_end")
+                r = EI[id] and REC_T[EI[id]]
+                if r and r.vuln_type then got = r.vuln_type end
+            end
+            W.players[id] = nil
+            return got
+        end
+        local on, off = run(true, 137), run(false, 138)
+        F.POSE_CLEAN = true
+        if on then UNIT_FAIL[#UNIT_FAIL + 1] = "clean pose: a vuln window (" .. on .. ") opened on records we forced" end
+        if not off then UNIT_FAIL[#UNIT_FAIL + 1] = "clean pose test: flag off opened no window -- the scenario no longer reaches detection" end
+        W.live = live0
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "vuln delta test: DetectVuln / FEATURE / REC not reachable"
+    end
+end
+
+-- CanSeeHead: the vuln window's standing boost only matters under ~25 tick,
+-- so the scripted match (64 tick) no longer reaches it -- called directly:
+-- fails open on missing players, a real trace gives a boolean.
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local CSH = probe("CanSeeHead")
+    if CSH then
+        if CSH(nil, 101) ~= true then UNIT_FAIL[#UNIT_FAIL + 1] = "CanSeeHead: a missing player didn't fail open" end
+        if type(CSH(1, 101)) ~= "boolean" then UNIT_FAIL[#UNIT_FAIL + 1] = "CanSeeHead: no boolean from a real trace" end
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "CanSeeHead test: not reachable"
     end
 end
 

@@ -135,3 +135,11 @@ events.
 The two root problems above are handled in code: `POSE_CLEAN` (detection
 reads only records with nothing forced) and `FULL_DESYNC` (side x engine
 limit, no preset tables).
+
+## v8.38 wiring pass
+
+- Hit memory learns the side that was applied (forced value's sign, or
+  gamesense's answer on its own shots) and is dropped by its own miss.
+- Vuln windows: detected on clean records only; STP / PKA / LND values
+  eye-relative (`VULN_DELTA`); DCK unchanged on its numbers.
+- One release path; dead `get_desync` probe and dead ttl-boost trace gone.

@@ -3,6 +3,33 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.38  – Wiring pass: the v8.32-8.37 pieces made to agree with each other.
+          Hit memory stores the side that was on the hitbox (LEARN_GS):
+          a forced shot that lands the head files the sign of the value we
+          forced, gamesense's own shot files gamesense's answer. v6.2 filed
+          our pose majority, even when a vuln window had forced the other
+          side.
+          A hit-memory resolver miss now drops the whole memory under
+          KNOWN_ONLY (v6.2 cleared only that movement state and forced the
+          missed side again from the global memory); gamesense resolves
+          until a new head hit confirms a side.
+          Vuln windows are detected only on clean records (POSE_CLEAN):
+          their value comes from the animstate our client built, which on a
+          record we forced is our own value.
+          VULN_DELTA -- stop / peek / landing windows force the goal-feet /
+          torso yaw relative to the eye, within this frame's limit, like UNK
+          since v8.29; they forced world yaws (the side came from map
+          facing). DCK keeps its value (77%, the best method in the logs).
+          FIXED -- the shot log line could crash aim_hit / aim_miss when a
+          window's type was missing ("!" .. nil).
+          Quality: one release path (PListRelease) instead of two copies of
+          the four player-list writes; the per-record entity.get_desync()
+          probe removed (never logged a line in 34k verbose decisions); the
+          vuln window "+1 tick" boosts -- and CanSeeHead's trace -- skipped
+          where they can't beat the 200 ms lag-comp window (every 64 / 128
+          tick server); CanSeeHead unit-called by the harness.
+          Each change behind its flag where it decides anything, harness
+          test with the v6.2 path, mutation-checked; parity exact.
   v8.37  – Force only on knowledge; learn from gamesense's own resolver.
           BEAT_BUILTIN off: deciding by head rates on 8-20 shots is luck
           (they swing 15-20 points either way).

@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.37"
+local RV_VERSION = "8.38"
 
 local ffi = require "ffi"
 
@@ -1003,6 +1003,13 @@ local FEATURE = {
     -- jitter is often the other side). Logged on every shot as gs=. Off in
     -- the v6.2 parity run.
     LEARN_GS = true,
+    -- v8.38: stop / peek / landing windows force the torso or goal-feet yaw
+    -- relative to the eye, within this frame's limit, as UNK has since v8.29
+    -- -- not the world yaw (which the player list clamps to +-60, so the
+    -- side came from where on the map they faced). DCK keeps its value: the
+    -- best method in the logs (77%), not changed without data. Off in the
+    -- v6.2 parity run.
+    VULN_DELTA = true,
     -- These three are the v6.2 [EXP] switches as the logs show them
     -- running when the resolver hit 74% (suppress fired in every v6.2
     -- match; jitter prediction never did).
@@ -2415,6 +2422,12 @@ local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
     local safe_eye = (math.abs(eye_y) > 1.0) and eye_y
                      or (RLen(rec.hist) > 0 and RGet(rec.hist, 1) and RGet(rec.hist, 1).e)
                      or nil
+    -- VULN_DELTA: a world yaw (torso / goal feet) as the body yaw the
+    -- player list takes -- relative to the eye, within this frame's limit
+    local function Rel(world)
+        if not (isnum(world) and isnum(safe_eye)) then return nil end
+        return Clamp(NA(world - safe_eye), -corr_cap, corr_cap)
+    end
 
     -- [LBY] lean body yaw snap: pose collapsed from high to near-zero
     if rec.prev_pose
@@ -2515,6 +2528,11 @@ local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
         if (spd or 0) < CFG.STOP_SPD_LO then
             local gfy = as.goal_feet_yaw or safe_eye
             if not gfy or math.abs(gfy) < 1.0 then return nil, 0, 0 end
+            if FEATURE.VULN_DELTA then
+                local v = Rel(as.goal_feet_yaw)
+                if not v then return nil, 0, 0 end
+                return VTYPE.STP, v, 0.80
+            end
             return VTYPE.STP, gfy, 0.80
         end
     end
@@ -2533,6 +2551,11 @@ local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
         -- Skip near-zero: faszsag/defensive-pose torso reads are as unreliable
         -- here as they are for UNK (see torpedo counter above).
         if torso and math.abs(torso) >= 8 then
+            if FEATURE.VULN_DELTA then
+                local v = Rel(torso)
+                if not v then return nil, 0, 0 end
+                return VTYPE.PKA, v, 0.75
+            end
             return VTYPE.PKA, torso, 0.75
         end
     end
@@ -2540,6 +2563,11 @@ local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
     -- [LND] landing: on_ground flipped false → true
     if rec.prev_onground == false and as.on_ground == true then
         if not safe_eye then return nil, 0, 0 end
+        if FEATURE.VULN_DELTA then
+            local v = Rel(as.torso_yaw)
+            if not v then return nil, 0, 0 end
+            return VTYPE.LND, v, 0.85
+        end
         return VTYPE.LND, safe_eye, 0.85
     end
 
@@ -3124,11 +3152,17 @@ end
 -- here set it OFF -- "release to the built-in" left the player with no
 -- resolver at all, and after a round reset, switching RIFTVEIL off or
 -- unloading it, all 64 slots stayed that way. Releases now hand it back on.
-local function ClearEnt(player)
+-- The player back to gamesense's own resolver: nothing forced, its
+-- correction on, no priority. Every release goes through here.
+local function PListRelease(player)
     PSet(player, "Force body yaw", false)
     PSet(player, "Force body yaw value", 0)
     PSet(player, "Correction active", true)
     PSet(player, "High priority", false)
+end
+
+local function ClearEnt(player)
+    PListRelease(player)
     local s64 = EIDX_S64[player]
     if s64 and REC[s64] then
         REC[s64].active = false; REC[s64].resolved = false
@@ -3354,17 +3388,8 @@ local function ProcessPlayer(player, ctx)
                 dbg("dcap", "player=%s live=[%.1f .. %.1f] cap=%.1f corr=%.1f spd=%.0f",
                     entity.get_player_name(player) or "?", live_mn, live_mx, live_cap, corr_cap, spd)
             end
-            -- Probe skeet's entity.get_desync() if exposed — compare vs struct read.
-            -- Skeet DLL (Dec 2024) confirmed get_desync() exists as Lua-callable.
-            -- If it differs from live_cap, get_desync() is the post-correction value;
-            -- we want the raw struct reads for our own resolver.
-            local ok_gd, gd = pcall(function()
-                return type(entity.get_desync) == "function" and entity.get_desync(player) or nil
-            end)
-            if ok_gd and gd and isnum(gd) then
-                dbg("gdesync", "player=%s entity.get_desync()=%.2f live_cap=%.1f diff=%.2f",
-                    entity.get_player_name(player) or "?", gd, live_cap, math.abs(gd - live_cap))
-            end
+            -- (the entity.get_desync() probe that stood here never logged a
+            -- line in any verbose log -- 34k decision lines -- removed v8.38)
         end
 
         -- 6lex — pass live cap so playback_rate magnitude clamps to real bounds
@@ -3551,7 +3576,11 @@ local function ProcessPlayer(player, ctx)
 
         -- POSE_CLEAN: no LBY / CTR "snap" across a record we forced
         if not sample then rec.prev_pose = nil end
-        local vtype, vcorr = DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
+        -- POSE_CLEAN: a window's value comes from the animstate our client
+        -- built; on a record we forced that is our own value, so windows are
+        -- only detected on clean records
+        local vtype, vcorr
+        if sample then vtype, vcorr = DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight) end
         if vtype and not rec.vuln_profile[vtype] then
             rec.vuln_profile[vtype] = {seen=0, hit=0}
         end
@@ -3579,7 +3608,11 @@ local function ProcessPlayer(player, ctx)
             -- blocked line, e.g. standing behind a window frame or thin wall).
             -- +1 tick gives the aimbot more backtrack candidates to find
             -- a clean headshot position within the vulnerability window.
-            if is_standing and (vtype == VTYPE.LBY or vtype == VTYPE.UNK)
+            -- The two +1 boosts below only matter while base_ttl + 2 could
+            -- beat lc_ttl (11 records at 64 tick, 24 at 128): skipped
+            -- otherwise, which also saves CanSeeHead's trace.
+            local boosts = base_ttl + 2 > lc_ttl
+            if boosts and is_standing and (vtype == VTYPE.LBY or vtype == VTYPE.UNK)
                and CanSeeHead(entity.get_local_player(), player) then
                 base_ttl = base_ttl + 1
             end
@@ -3587,7 +3620,7 @@ local function ProcessPlayer(player, ctx)
             -- Large unchoke desync = high confidence real position exposed.
             -- Extend so the aimbot can catch the peak exposure on backtrack.
             -- safe_eye: use eye_y if valid, else last ring buffer entry
-            if vtype == VTYPE.UNK then
+            if boosts and vtype == VTYPE.UNK then
                 local torso    = as.torso_yaw
                 local safe_eye_pp = (math.abs(eye_y) > 1.0) and eye_y
                                     or (RLen(rec.hist) > 0 and RGet(rec.hist, 1) and RGet(rec.hist, 1).e)
@@ -3913,11 +3946,8 @@ local function ProcessPlayer(player, ctx)
             if not sup_pausing then rec._sup_streak = 0; rec._sup_pause = 0 end
 
         else
-            -- release: gamesense's own resolver takes the player (see ClearEnt)
-            PSet(player, "Force body yaw", false)
-            PSet(player, "Force body yaw value", 0)
-            PSet(player, "Correction active", true)
-            PSet(player, "High priority", false)
+            -- release: gamesense's own resolver takes the player
+            PListRelease(player)
             rec.active = false; rec.resolved = false
             rec.last_val = 0; rec.last_meth = "builtin"
             -- Same sup_pausing guard as the meta_aggressive branch above.
@@ -4887,9 +4917,14 @@ local function on_aim_hit(e)
         -- FEATURE.LEARN_GS: when gamesense's own resolver landed the head,
         -- the side is the one it was animating at the shot (its answer, read
         -- off a record we didn't force) -- not our majority over 16 records
+        -- A forced shot learns the sign of the value we forced -- the side
+        -- that was on the hitbox (v6.2 filed rec.side, our pose majority,
+        -- even when a vuln window had forced the other side).
         local learned
         if FEATURE.LEARN_GS and d.meth == "builtin" and isnum(d.gs) and math.abs(d.gs) >= 5 then
             learned = Sign(d.gs)
+        elseif FEATURE.LEARN_GS and d.meth ~= "builtin" and isnum(d.val) and math.abs(d.val) >= 5 then
+            learned = Sign(d.val)
         elseif d.side ~= 0 then
             learned = d.flip and -d.side or d.side
         end
@@ -4950,7 +4985,7 @@ local function on_aim_hit(e)
         d.eo or "-", d.lbyu or "-", isnum(d.gs) and string.format("%.0f", d.gs) or "-",
         AA_SHORT[d.aa] or "?",
         d.cheat and (" cht=" .. d.cheat) or "",
-        d.in_vuln and (" !" .. d.vuln_t) or "")
+        d.in_vuln and (" !" .. tostring(d.vuln_t or "?")) or "")
     SHOTLOG.Hit(e, d)
     SHOTS[e.id] = nil
 end
@@ -5029,7 +5064,7 @@ local function on_aim_miss(e)
         d.eo or "-", d.lbyu or "-", isnum(d.gs) and string.format("%.0f", d.gs) or "-",
         AA_SHORT[d.aa] or "?",
         d.cheat and (" cht=" .. d.cheat) or "",
-        d.in_vuln and (" !" .. d.vuln_t) or "")
+        d.in_vuln and (" !" .. tostring(d.vuln_t or "?")) or "")
 
     if is_resolver then
         if d.aim_hg == 1 and not d.nolearn then CheatCredit(d.cheat, d.meth, false) end
@@ -5085,6 +5120,10 @@ local function on_aim_miss(e)
                     rec.hit_side_by_state[d.state]  = 0
                     rec.hit_count_by_state[d.state] = 0
                 end
+                -- KNOWN_ONLY: the miss contradicts what we knew, so the global
+                -- memory goes too (v6.2 kept it and forced the missed side
+                -- again); gamesense resolves until a new head hit
+                if FEATURE.KNOWN_ONLY then rec.hit_side, rec.hit_count = 0, 0 end
             elseif (d.conf or 0) > 0.65 then
                 should_flip = false   -- high confidence = prediction error, not wrong side
             end

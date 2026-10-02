@@ -5,7 +5,7 @@ and what comes next. Older versions are kept in `versions/` so none of the
 work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 (the decision engine), `riftveil_v8.1.lua`.
 
-## In the script (v8.37)
+## In the script (v8.38)
 
 | Area | Feature | Changes shots? |
 |---|---|---|
@@ -23,6 +23,7 @@ work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 | Weapons | Aim policy on traced damage: prefer body only when a body shot kills from here, body preference off when only the head kills, safe point when in doubt or airborne; values verified, traces self-calibrated | yes, Detection › Weapon aim |
 | Weapons | "In doubt" includes a 3-way / 5-way enemy missed on the resolver in the last 10 s (43% head there in the pre-v8 logs vs 59-77% elsewhere) | measured only since v8.34 (it fed safe point) |
 | Core | Force only on knowledge: hit memory (confirmed head hit) and event windows (unchoke / stop / peek / landing / duck); everything else is gamesense's own resolver -- suppress, meta hold, LBY / CTR windows no longer force | yes, `FEATURE.KNOWN_ONLY` |
+| Core | Hit memory stores the side that was on the hitbox (forced value's sign / gamesense's answer); its own miss drops it; vuln windows only from clean records; stop / peek / landing values eye-relative | yes, `LEARN_GS`, `KNOWN_ONLY`, `POSE_CLEAN`, `VULN_DELTA` |
 | Core | Learn from gamesense: its resolved answer (pose on unforced records) is kept, logged as `gs=`, and filed by hit memory when its own shot lands the head | yes, `FEATURE.LEARN_GS` |
 | Core | (v8.36 stats rule, off: a method forced while its head rate kept up with gamesense's) | `FEATURE.BEAT_BUILTIN` = false |
 | Core | AA picture, side, flips and LBY / CTR windows only from records built with nothing forced (the pose is our client's; forced records read our own value back) | yes, `FEATURE.POSE_CLEAN` |
