@@ -3,6 +3,21 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.43  – DEF_RELEASE: nothing is forced while an enemy sends defensive
+          frames (any in the last second); gamesense resolves them.
+          The match it comes from: two Neverlose players with 9-25
+          defensive frames a second, mostly in the air, teleporting (508,
+          676, 2156 u/s) -- resolver-decided shots 6 head / 12 miss, and
+          gamesense alone 2 / 4 on them too.
+          Across every uploaded log (head / resolver miss):
+            no defensive frames  forced 105/24 (81%)  gamesense 25/14 (64%)
+            defensive frames     forced  97/81 (54%)  gamesense 24/15 (62%)
+            ... in the air       forced  30/32 (48%)  gamesense 10/6  (62%)
+            hit memory           45/4 without, 12/12 with defensive frames
+          Defensive AA runs its own yaw and body yaw in those ticks; what we
+          learned or read outside them doesn't describe them. Forcing comes
+          back after a second without a defensive frame; [aa] lines mark
+          both transitions.
   v8.42  – Log: an [hmem] skip without a side says why -- "gamesense
           centred (|gs| < 5)", "no gamesense answer" or "forced ~0". In the
           v8.39 session 13 head hits taught nothing; 11 were gamesense

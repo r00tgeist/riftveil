@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.42"
+local RV_VERSION = "8.43"
 
 local ffi = require "ffi"
 
@@ -1017,6 +1017,16 @@ local FEATURE = {
     -- remembered side weakens it by what that shot could prove. Off in the
     -- v6.2 parity run.
     HMEM_WEIGHT = true,
+    -- v8.43: while an enemy sends defensive frames (any in the last second),
+    -- nothing is forced -- gamesense resolves. Across the uploaded logs
+    -- (head / resolver miss) forced shots went 105/24 (81%) with no
+    -- defensive frames but 97/81 (54%) with them, where gamesense alone
+    -- went 24/15 (62%); hit memory fell from 45/4 to 12/12, and forced
+    -- shots at defensive enemies in the air landed 30/32 against
+    -- gamesense's 10/6. Defensive AA (every nl / gs AA script ships it)
+    -- runs its own yaw and body yaw in those ticks: what we learned or
+    -- read outside them doesn't describe them. Off in the v6.2 parity run.
+    DEF_RELEASE = true,
     -- v8.41: duck windows force the torso relative to the eye, within this
     -- frame's limit, like every other window since v8.38. v6.2 forced the
     -- torso's WORLD yaw (-166, 104, ...), clamped to +-60 by the player
@@ -3349,6 +3359,14 @@ end
 -- unloading it, all 64 slots stayed that way. Releases now hand it back on.
 -- The player back to gamesense's own resolver: nothing forced, its
 -- correction on, no priority. Every release goes through here.
+-- Defensive frames (see ProcessPlayer) received from this player in the
+-- last 64 ticks (one second): the shot log's df= and FEATURE.DEF_RELEASE
+local function DefFrames(rec, now)
+    local n, r = 0, rec.dfr
+    if r then for i = 1, #r do if now - r[i] <= 64 and now >= r[i] then n = n + 1 end end end
+    return n
+end
+
 local function PListRelease(player)
     PSet(player, "Force body yaw", false)
     PSet(player, "Force body yaw value", 0)
@@ -3475,7 +3493,7 @@ local function ProcessPlayer(player, ctx)
 
     local st = math.floor(st_raw / ctx.ti)
     if st == rec.lt then return end
-    -- DEFENSIVE FRAME COUNT (measurement only, no decision reads it): lag
+    -- DEFENSIVE FRAME COUNT (read by FEATURE.DEF_RELEASE since v8.43): lag
     -- compensation writes no record while a player's simulation time is at
     -- or below the highest it has sent (tickcount/lagrecord-csgo.lua), so a
     -- frame arriving with a lower simtime is a defensive frame -- the one
@@ -4099,6 +4117,17 @@ local function ProcessPlayer(player, ctx)
                 end
             end
         end
+
+        -- FEATURE.DEF_RELEASE: defensive frames in the last second -> gamesense
+        local def_hold = FEATURE.DEF_RELEASE and DefFrames(rec, ctx.cur_tc) > 0
+        if def_hold ~= (rec._def_hold or false) then
+            rec._def_hold = def_hold
+            if DET.verbose then
+                dbg("aa", def_hold and "player=%s defensive frames: forcing paused -> gamesense"
+                    or "player=%s no defensive frame for 1 s: resolving", entity.get_player_name(player) or "?")
+            end
+        end
+        if def_hold then should_override = false end
 
         if should_override then
             PSet(player, "Force body yaw", true)
@@ -5004,14 +5033,6 @@ local function CorrectionActive(ent)
     local ok, v = pcall(plist.get, ent, "Correction active")
     if not ok or v == nil then return "?" end
     return v and "1" or "0"
-end
-
--- Defensive frames (see ProcessPlayer) received from this player in the
--- last 64 ticks (one second)
-local function DefFrames(rec, now)
-    local n, r = 0, rec.dfr
-    if r then for i = 1, #r do if now - r[i] <= 64 and now >= r[i] then n = n + 1 end end end
-    return n
 end
 
 local function LogInt(v)
