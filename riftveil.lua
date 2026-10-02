@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.31"
+local RV_VERSION = "8.32"
 
 local ffi = require "ffi"
 
@@ -939,6 +939,15 @@ local FEATURE = {
     -- (v7.2-7.9) measured 59% (17/29). The v8.28 roadmap set "under ~50%
     -- in the next logs" as the trigger. Off in the v6.2 parity run.
     UNK_DELTA = true,
+    -- v8.32: the cap on our correction guesses is Valve's per-frame body-yaw
+    -- limit (MaxDesync: 58 standing, 29 at a full run, never lower) instead
+    -- of VelCap's straight line to 0 at 580 u/s. animstate min/max yaw read
+    -- +-58 on 97% of 16.7k samples -- they are the fixed aim limits, not the
+    -- speed-scaled ones -- so VelCap was the only speed model, and it put
+    -- fast enemies under 20 deg: forced < 20 is the weakest band in every
+    -- log (side methods ~45%, suppress 33%, vs 62-77% from 20 up). Off in
+    -- the v6.2 parity run.
+    DESYNC_FORMULA = true,
     -- These three are the v6.2 [EXP] switches as the logs show them
     -- running when the resolver hit 74% (suppress fired in every v6.2
     -- match; jitter prediction never did).
@@ -1069,7 +1078,9 @@ end
 local function SyncFlags()
     ReadMulti(ui_detect, DET_KEYS, DET)
     ReadMulti(ui_ind, IND_KEYS, IND)
-    DET.verbose = DET.verbose == true
+    -- the Debug log checkbox. v8.1-8.31 set this from DET itself (never
+    -- true), so no [corr] / [vuln] / [cfg] / [dcap] line was ever written
+    DET.verbose = ui.get(ui_verb) == true
 end
 
 -- ui.set_callback only fires on a change, never for a value already
@@ -1868,6 +1879,25 @@ local function VelCap(spd, cap)
     cap = cap or CFG.DESYNC_CAP
     if not isnum(spd, 0) then return cap end
     return Clamp(cap * (1 - spd / CFG.VEL_CAP_SPD), 0, cap)
+end
+
+-- Valve's body-yaw limit for this frame (CCSGOPlayerAnimState::SetUpVelocity),
+-- as antiaim_funcs and the public resolvers compute it: the full cap standing,
+-- down to half of it at a full run (walk-to-run transition 1, speed >= 52%
+-- of the weapon's max), ducking pulls it toward half as well. Never under
+-- half: VelCap's line went to 0 at 580 u/s (18 deg at 400), the weakest band
+-- in every log (FEATURE.DESYNC_FORMULA).
+local function MaxDesync(as, spd, maxspd, cap)
+    cap = cap or CFG.DESYNC_CAP
+    if not (as and isnum(spd, 0) and isnum(maxspd, 1)) then return cap end
+    local w2r = as.stop_to_full_run
+    if not isnum(w2r, 0, 1) then w2r = 1 end   -- unread: the running (smaller) limit
+    local m = ((w2r * -0.3) - 0.2) * Clamp(spd / (maxspd * 0.52), 0, 1) + 1
+    local duck = as.duck_amount
+    if isnum(duck, 0, 1) and duck > 0 then
+        m = m + duck * Clamp(spd / (maxspd * 0.34), 0, 1) * (0.5 - m)
+    end
+    return Clamp(cap * m, cap * 0.5, cap)
 end
 
 -- (GenAngle removed — override block uses CfgAngle directly;
@@ -3145,6 +3175,11 @@ local function ProcessPlayer(player, ctx)
     -- down on records, so v6.2 carried it -- and its torso yaw -- over.
     if FEATURE.STALE_WINDOW and rec.lt and st - rec.lt > 64 then rec.vuln_ttl = 0 end
     rec.lt = st
+    -- PROBE (log only): the value we forced for the animation this record
+    -- was built with, to set against the pose read back below (pz= / pf=
+    -- on [corr]). The body-yaw pose is computed by our client, not sent by
+    -- the server, so it may be our own forced value coming back.
+    local pf = rec.active and rec.last_val or nil
 
     -- pose/spd/duck/on_ground are nil until sampled.
     -- They are saved to rec at the end of the function regardless of path taken.
@@ -3192,12 +3227,15 @@ local function ProcessPlayer(player, ctx)
 
         -- Velocity-constrained correction cap — see VelCap(). Used only to
         -- clamp CfgAngle's static guesses, never the engine-read live_cap.
-        local corr_cap = VelCap(spd, live_cap)
+        local corr_cap
+        if FEATURE.DESYNC_FORMULA then corr_cap = MaxDesync(as, spd, EnemyMaxSpeed(player), live_cap)
+        else corr_cap = VelCap(spd, live_cap) end
+        rec.corr_cap = corr_cap
 
         if DET.verbose then
             if live_cap ~= CFG.DESYNC_CAP then
-                dbg("dcap", "player=%s live=[%.1f .. %.1f] cap=%.1f",
-                    entity.get_player_name(player) or "?", live_mn, live_mx, live_cap)
+                dbg("dcap", "player=%s live=[%.1f .. %.1f] cap=%.1f corr=%.1f spd=%.0f",
+                    entity.get_player_name(player) or "?", live_mn, live_mx, live_cap, corr_cap, spd)
             end
             -- Probe skeet's entity.get_desync() if exposed — compare vs struct read.
             -- Skeet DLL (Dec 2024) confirmed get_desync() exists as Lua-callable.
@@ -3737,10 +3775,12 @@ local function ProcessPlayer(player, ctx)
             local val_changed  = math.abs((rec.last_val  or 0) - (rec._prev_log_val  or 0)) > 1.0
             local meth_changed = rec.last_meth ~= rec._prev_log_meth
             if val_changed or meth_changed then
-                dbg("corr", "player=%s aa=%s side=%d meth=%s val=%.1f override=%s",
+                dbg("corr", "player=%s aa=%s side=%d meth=%s val=%.1f override=%s pz=%s pf=%s",
                     entity.get_player_name(player) or "?",
                     aa_type, tracked_side, rec.last_meth, rec.last_val,
-                    tostring(should_override))
+                    tostring(should_override),
+                    isnum(pose) and string.format("%.0f", pose) or "-",
+                    isnum(pf) and string.format("%.0f", SafeYaw(pf)) or "-")
                 rec._prev_log_val  = rec.last_val
                 rec._prev_log_meth = rec.last_meth
             end

@@ -5,7 +5,7 @@ and what comes next. Older versions are kept in `versions/` so none of the
 work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 (the decision engine), `riftveil_v8.1.lua`.
 
-## In the script (v8.31)
+## In the script (v8.32)
 
 | Area | Feature | Changes shots? |
 |---|---|---|
@@ -22,6 +22,8 @@ work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 | Tools | `rv_perf` profiler, `rv_stats`, `rv_db`, `rv_save` | no |
 | Weapons | Aim policy on traced damage: prefer body only when a body shot kills from here, body preference off when only the head kills, safe point when in doubt or airborne; values verified, traces self-calibrated | yes, Detection › Weapon aim |
 | Weapons | "In doubt" includes a 3-way / 5-way enemy missed on the resolver in the last 10 s (43% head there in the pre-v8 logs vs 59-77% elsewhere) | yes, `FEATURE.XWAY_UNSURE` |
+| Core | Correction cap = Valve's per-frame body-yaw limit (58 standing, 29 running), not a line to 0 at 580 u/s | yes, `FEATURE.DESYNC_FORMULA` |
+| Logging | Debug log checkbox works again (dead v8.1-8.31); `[corr]` lines carry the pose read back (`pz=`) and what we forced (`pf=`) -- plan step 2 is decided on them | no |
 | Core | UNK windows force torso - eye within the cap, not the torso world yaw (v7.2 fix, retried on the v8.28 trigger: raw 36% since v8.15) | yes, `FEATURE.UNK_DELTA` |
 | Core | v6.2 defect fixes: a released enemy's shots count as builtin and stale vuln windows close (`STALE_WINDOW`); no DCK window without a real duck crossing (`DCK_GAP`); config recognition every 32 sim ticks whatever the record cadence (`CFG_CADENCE`) | yes, each its own flag, off in the parity run |
 
@@ -90,6 +92,11 @@ the same (95%), vuln 50/50. Hit-memory shots taught by a vuln head hit land
 51% (22/43) when their value's sign is opposite to the teaching hit's and
 66% (21/32) when it matches (p ~0.24). If a bigger log keeps that gap,
 teach hit memory the forced value's sign instead of the tracked side.
+
+## The plan from here
+
+`docs/PLAN.md` (steps 1-6, each with the log_report table that decides it)
+and `docs/RESOLVER_AUDIT.md` (every resolver function, verdict and evidence).
 
 ## Watch list from the v8.28 bug hunt (not changed)
 

@@ -382,6 +382,10 @@ local mock = {
         if #content < from then from = 0 end
         for line in content:sub(from + 1):gmatch("[^\n]+") do
             if line:find("%]%[ERR%]") then ERR_LINES[#ERR_LINES + 1] = line end
+            if line:find("][corr]", 1, true) then
+                CORR_SEEN = (CORR_SEEN or 0) + 1
+                if line:find(" pz=%-?%d* pf=%-?%d*$") then CORR_PROBED = (CORR_PROBED or 0) + 1 end
+            end
         end
         LOG_SCANNED[name] = #content
         LOG_CAPTURE[1] = content
@@ -503,7 +507,7 @@ if os.getenv("RV_PARITY") then
     end
     local F
     for _, cb in pairs(CALLBACKS) do F = F or find(cb, 0) end
-    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false end
+    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false end
 end
 
 local cb_errors = {}
@@ -1814,6 +1818,56 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
     W.live = live0
 end
 
+-- Max desync (FEATURE.DESYNC_FORMULA): Valve's limit -- 58 standing, 29
+-- at a full run (never lower), ~51 slow-walking, ducking toward half; an
+-- unreadable input keeps the cap. A 500 u/s enemy's correction cap is 29+
+-- (VelCap: 8, the flag-off half).
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local MD, REC_T, EI, F = probe("MaxDesync"), probe("REC"), probe("EIDX_S64"), probe("FEATURE")
+    if MD and REC_T and EI and F then
+        local function near(a, b) return type(a) == "number" and math.abs(a - b) < 0.05 end
+        local cases = {
+            {"standing", {stop_to_full_run = 0, duck_amount = 0}, 0, 58},
+            {"full run", {stop_to_full_run = 1, duck_amount = 0}, 250, 29},
+            {"air 400 u/s", {stop_to_full_run = 1, duck_amount = 0}, 400, 29},
+            {"slow walk 80 u/s", {stop_to_full_run = 0, duck_amount = 0}, 80, 58 * (1 - 0.2 * 80 / 130)},
+            {"crouch-walk 85 u/s", {stop_to_full_run = 0, duck_amount = 1}, 85, 58 * (function()
+                local m = 1 - 0.2 * 85 / 130; return m + 1 * 1 * (0.5 - m) end)()},
+            {"unread transition", {duck_amount = 0}, 250, 29},
+            {"NaN speed", {stop_to_full_run = 1, duck_amount = 0}, 0 / 0, 58},
+        }
+        for _, c in ipairs(cases) do
+            local got = MD(c[2], c[3], 250, 58)
+            if not near(got, c[4]) then UNIT_FAIL[#UNIT_FAIL + 1] = string.format("max desync %s: %s, expected %.1f", c[1], tostring(got), c[4]) end
+        end
+        if not near(MD(nil, 100, 250, 58), 58) then UNIT_FAIL[#UNIT_FAIL + 1] = "max desync: no animstate didn't keep the cap" end
+        -- in the resolver: a 500 u/s enemy
+        local live0 = W.live
+        local function run(flag, id)
+            F.DESYNC_FORMULA = flag
+            W.live = {101, 102, id}
+            W.players[id] = {sim = W.tick * TI, vx = 500, vy = 0, pose01 = 0.5, eye = 0, duck = 0, torso = 0, gfy = 0}
+            for _ = 1, 6 do
+                W.tick = W.tick + 1; W.real = W.real + TI
+                W.players[id].sim = W.tick * TI
+                W.players[id].pose01 = (W.tick % 2 == 0) and 0.15 or 0.85
+                for _, p in ipairs({101, 102}) do W.players[p].sim = W.tick * TI end
+                fire("net_update_end")
+            end
+            local r = EI[id] and REC_T[EI[id]]
+            W.players[id] = nil
+            return r and r.corr_cap
+        end
+        local on, off = run(true, 115), run(false, 116)
+        F.DESYNC_FORMULA = true
+        if not (on and on >= 29 - 0.05) then UNIT_FAIL[#UNIT_FAIL + 1] = "max desync: a 500 u/s enemy's cap is " .. tostring(on) .. ", expected >= 29" end
+        if not (off and near(off, 58 * (1 - 500 / 580))) then UNIT_FAIL[#UNIT_FAIL + 1] = "max desync test: flag off gave " .. tostring(off) .. ", not VelCap's 8" end
+        W.live = live0
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "max desync test: MaxDesync / REC / EIDX_S64 / FEATURE not reachable"
+    end
+end
+
 -- Defensive frames: a frame whose simulation time is below the highest
 -- already received (lag compensation writes no record for it) is counted,
 -- and the next shot at that player carries the count (df=)
@@ -2033,6 +2087,9 @@ do
     for line in (LOG_CAPTURE[1] or ""):gmatch("[^\n]+") do
         if line:find("meth=builtin", 1, true) and line:find(" cor=0", 1, true) then bad = bad + 1 end
     end
+    -- the v8.32 probe rides on every [corr] line: pose read and what we forced
+    local corr, probed = CORR_SEEN or 0, CORR_PROBED or 0
+    if corr == 0 or probed ~= corr then UNIT_FAIL[#UNIT_FAIL + 1] = string.format("probe: %d of %d [corr] lines carry pz= / pf=", probed, corr) end
     bad = bad - (CRAFTED_COR0 or 0)   -- the shot log test's own "no resolver" shot
     if bad > 0 then UNIT_FAIL[#UNIT_FAIL + 1] = bad .. " builtin shot(s) fired with gamesense's resolver off (cor=0)" end
 end

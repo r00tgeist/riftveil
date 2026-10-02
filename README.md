@@ -29,7 +29,7 @@ same side with the same value as v6.2 (`tools/check_all.sh`, step 7).
 | **Detection** | Vulnerability windows, Hit memory, Desync angle (6lex), Cheat profiles, Weapon aim. |
 | **Tight interpolation** | Low-latency interp cvars while the resolver is on; originals restored when off. |
 | **Indicators** | Info panel, ESP flags (`VLN`, `RES`, aim policy `BODY` / `HEAD` / `HEAD SP` / `SAFE PT`, enemy cheat), SHIFT marker, Shot log (below), Local lagcomp (below). |
-| **Debug log** | Verbose `riftveil_debug.txt` (the log is always written; this adds per-tick detail). |
+| **Debug log** | Verbose `riftveil_debug.txt` (the log is always written; this adds every resolver decision: `[corr]` with the pose read back and what was forced, `[vuln]`, `[cfg]`, `[dcap]`). Turn it on for matches you send in. |
 
 The accent follows gamesense's own *Menu color*; drag the panel by its
 header while the menu is open. The info panel's INFO row shows the current

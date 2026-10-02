@@ -3,6 +3,38 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.32  – Step 1 of docs/PLAN.md: verify every resolver function.
+          docs/RESOLVER_AUDIT.md -- each function on the path to the forced
+          value: what it reads (server data, client data, or client data our
+          own override writes), what it feeds, how its shots land.
+          FIXED -- the Debug log checkbox did nothing since v8.1: SyncFlags
+          set DET.verbose from itself, so no [corr] / [vuln] / [cfg] / [dcap]
+          line was written for 30 versions (the v8.x logs only had shot
+          lines; the v8.28 phantom-DCK counter could never print). Logging
+          only.
+          FIXED (DESYNC_FORMULA) -- the cap on our correction guesses is
+          Valve's per-frame body-yaw limit (antiaim_funcs' SetUpVelocity
+          formula: 58 standing, 29 at a full run, ducking toward half, never
+          lower) instead of VelCap's line to 0 at 580 u/s (18 deg at 400).
+          The animstate min/max yaw LiveCap reads are +-58 on 97% of 16.7k
+          samples -- fixed aim limits -- so VelCap was the only speed model;
+          forced values under 20 deg are the weakest band in every log (side
+          methods ~45%, suppress 33%, against 62-77% from 20 up). Off in the
+          parity run; harness covers standing / run / air / slow walk /
+          crouch-walk / unreadable input, mutation-checked.
+          PROBE (log only): every [corr] line carries pz= (the body-yaw pose
+          read on that record) and pf= (what we forced). Players' pose
+          parameters are computed by our client, not sent by the server, so
+          the AA detector may be reading our own override back (hit memory,
+          one constant value, is labelled hold on 50% of its lines vs 11%
+          when nothing is forced). log_report: POSE READ BACK vs WHAT WE
+          FORCED decides plan step 2.
+          Measured, no change: suppress lands 70% (2-way 92%, skitter 83%,
+          3-way 72%, hold 69%; 5-way 56%, 16 shots) and changes no shot
+          timing; safe point at fire was 15% in v8.27 against 4-7% after,
+          which lines up with the delay. 211 of 330 desync-limit sliders in
+          the repo's AA scripts default to 60 -- presets differ in yaw
+          offsets and side patterns, not in desync size.
   v8.31  – Local lagcomp box: the shot + teleport alone, no speed condition.
           v8.30's 64-unit rule hid it on a normal ground double tap; the
           exploit is the shot followed by the tickbase teleport, so that is

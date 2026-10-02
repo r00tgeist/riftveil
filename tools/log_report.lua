@@ -57,6 +57,7 @@ local by_lby = {}         -- v8.14+: eye-LBY delta sign vs forced side
 local by_aa, by_xway = {}, {}
 local by_lbyx = {}        -- LBY vuln windows on 3/5-way: a centre pass reads as an LBY snap
 local corr_aa, last_shot = {}, {}   -- per player: last [corr] aa=, last {kind, t}
+local probe_n, probe_total = {}, 0   -- v8.32 pz= / pf= probe on [corr] lines
 local by_seed, seed_of = {}, {}   -- v8.5.6+: DB-seeded start vs cold start, per player
 local calib = {}          -- decile -> {n, heads, psum}
 local trace_ratio = {head = {}, body = {}}   -- v8.4+: ragebot predicted / traced damage
@@ -80,6 +81,20 @@ for _, path in ipairs(files) do
         if line:find("%]%[init%]") or line:find("%]%[match%] ended") then corr_aa, last_shot = {}, {} end
         local cp, caa = line:match("%]%[corr%] player=(.-) aa=(%S+)")
         if cp then corr_aa[cp] = caa end
+        -- v8.32 probe: the body-yaw pose read on a record (pz=) against the
+        -- value we forced for it (pf=, "-" = nothing forced)
+        local pz, pfv = line:match("%]%[corr%] .- pz=(%-?%d+) pf=(%S+)")
+        if pz then
+            pz = tonumber(pz)
+            local pfn = tonumber(pfv)
+            local k
+            if not pfn then k = "nothing forced (gamesense's own)"
+            elseif math.abs(pz - pfn) <= 5 then k = "forced: pose within 5 of it"
+            elseif (pz > 0) == (pfn > 0) then k = "forced: same sign, farther"
+            else k = "forced: opposite sign" end
+            probe_n[k] = (probe_n[k] or 0) + 1
+            probe_total = probe_total + 1
+        end
 
         -- "new profile player=NAME s64=... seed=0.35": this match's start for NAME
         local np, sd = line:match("%]%[rec%] new profile player=(.-) s64=%S+ seed=([%d%.]+)")
@@ -307,6 +322,16 @@ end
 report("BY ENGINE ARM", by_arm)
 report("ENGINE OVERRIDES vs CHAIN PICKS", by_origin)
 report("BY PLAYER (5+ shots)", by_player, 5)
+
+if probe_total > 0 then
+    print("\nPOSE READ BACK vs WHAT WE FORCED (v8.32 probe, [corr] pz= / pf=; mostly \"within 5\" =")
+    print("the AA detector reads our own output, not the enemy)")
+    for _, k in ipairs({"forced: pose within 5 of it", "forced: same sign, farther", "forced: opposite sign",
+                        "nothing forced (gamesense's own)"}) do
+        local n = probe_n[k] or 0
+        print(("  %-36s %6d  %3.0f%%"):format(k, n, 100 * n / probe_total))
+    end
+end
 
 if brier_n > 0 then
     print("\nENGINE CALIBRATION (predicted head chance vs what happened)")
