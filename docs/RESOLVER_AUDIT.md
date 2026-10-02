@@ -73,7 +73,7 @@ tick apart static (desync needs choked commands) -- server timing, not pose.
 | vuln LBY | 629 | 61% | table angle for the side opposite the pose collapse | trigger is a pose collapse: on 3/5-way that is the centre pass, and if the pose is ours, our own switch. Watch (table in log_report) |
 | hit memory | 498 | 67% | table angle, live cap | keep; magnitude in plan step 3 |
 | suppress | 385 | 70% | minus the table angle for the tracked side | **keep**: 2-way 92%, skitter 83%, 3-way 72%, hold 69%; 5-way 56% (16) is the only weak spot |
-| vuln DCK | 281 | 77% | torso world yaw (unit mismatch) | best method despite the units; don't touch without data |
+| vuln DCK | 281 | 77% | torso world yaw (unit mismatch) | v8.41 `DCK_DELTA`: torso - eye. Its rate is the same clamped (73%) and unclamped (82%), so the value never drove it |
 | vuln LND | 59 | 61% | the eye's world yaw (unit mismatch) | move to delta / side value when it has 20+ decided shots |
 | vuln STP / PKA / CTR | 28 / 23 / 22 | 67% / 47% / 50% | goal-feet / torso world yaw, pose | same as LND |
 | builtin | 176 | 65% | gamesense | the reference everything must beat |

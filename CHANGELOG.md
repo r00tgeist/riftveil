@@ -3,6 +3,22 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.41  – From the first v8.39 match log (45 shots):
+          DCK_DELTA -- duck windows forced the torso's WORLD yaw (-166,
+          104, 128 ...), clamped to +-60 by the player list: the side came
+          from which way on the map the enemy faced (13 of 13 DCK values in
+          that log were past 59). Now torso - eye within this frame's limit,
+          like every other window. Across all uploaded logs DCK landed 82%
+          under 60 and 73% clamped: its rate never came from the value.
+          CAL_FRESH -- the aim policy's damage calibration compared the
+          ragebot's prediction (from where we stand, now) with our stored
+          trace (best of two eyes, the second 4 ticks ahead, up to 6 ticks
+          old). That match calibrated head damage x1.52 from ratios of 0.69
+          to 12, so "the head kills" read true on enemies it wouldn't kill.
+          Now only current-eye traces made at most 2 ticks before the shot
+          count (the fresh pairs in that log read x1.0).
+          [hmem] skip reasons: "no memory yet" vs "memory on the other
+          side" (one label covered both).
   v8.40  – FIXED -- the local lagcomp box missed most double-tap shots and
           every manual one. It learned of our shot only from weapon_fire,
           a server event that arrives a ping after the shot; double tap's

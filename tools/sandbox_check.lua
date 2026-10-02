@@ -176,11 +176,13 @@ local mock = {
         end end
         -- Traced damage per hitbox from W.players[ent].tdmg (default: head
         -- 180, body 55 -- an armored enemy behind nothing, scout-like).
-        if k == "trace_bullet"       then return function(_, _, _, _, tx)
+        if k == "trace_bullet"       then return function(_, sx, _, _, tx)
             local target, hb = math.floor(tx / 1000), math.floor(tx % 1000)
             local p = W.players[target]
             if not p then return nil, 0 end
             if p.trace_other then return p.trace_other, 90 end   -- the line hits someone else
+            -- per eye (keyed by the eye's x): the peek eye sees more
+            if p.tdmg_eye and p.tdmg_eye[sx] then return target, p.tdmg_eye[sx][hb] or 0 end
             local d = p.tdmg and p.tdmg[hb]
             if d == nil then d = (hb == 0) and 180 or 55 end
             return target, d
@@ -517,7 +519,7 @@ if os.getenv("RV_PARITY") then
     end
     local F
     for _, cb in pairs(CALLBACKS) do F = F or find(cb, 0) end
-    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false; F.POSE_CLEAN = false; F.FULL_DESYNC = false; F.BEAT_BUILTIN = false; F.KNOWN_ONLY = false; F.LEARN_GS = false; F.VULN_DELTA = false; F.HMEM_WEIGHT = false end
+    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false; F.POSE_CLEAN = false; F.FULL_DESYNC = false; F.BEAT_BUILTIN = false; F.KNOWN_ONLY = false; F.LEARN_GS = false; F.VULN_DELTA = false; F.HMEM_WEIGHT = false; F.DCK_DELTA = false; F.CAL_FRESH = false end
 end
 
 local cb_errors = {}
@@ -1139,11 +1141,11 @@ do
         local fh0 = AX.CAL.fh
         -- lethal predictions first: if the ragebot caps them at health they
         -- would read as x0.22 (100 / 448); they must not move the factor
-        for _ = 1, 5 do AX.OnFire({aim_th = 448, aim_tb = 112}, 1, 100, 100) end
+        for _ = 1, 5 do AX.OnFire({aim_th = 448, aim_tb = 112, aim_th1 = 448, aim_tb1 = 112, aim_t_tc = W.tick}, 1, 100, 100) end
         if AX.CAL.fh ~= fh0 or #AX.CAL.head ~= 0 then
             UNIT_FAIL[#UNIT_FAIL + 1] = string.format("AIMX calibration: lethal predictions moved the head factor to %.2f", AX.CAL.fh)
         end
-        for _ = 1, 5 do AX.OnFire({aim_th = 20, aim_tb = 40}, 1, 80, 100) end
+        for _ = 1, 5 do AX.OnFire({aim_th = 20, aim_tb = 40, aim_th1 = 20, aim_tb1 = 40, aim_t_tc = W.tick}, 1, 80, 100) end
         if math.abs(AX.CAL.fh - 4) > 0.01 then
             UNIT_FAIL[#UNIT_FAIL + 1] = string.format("AIMX calibration: head factor %.2f after 5 shots at 4x, expected 4", AX.CAL.fh)
         end
@@ -2497,6 +2499,21 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
             end
         end
         F.VULN_DELTA = true
+        -- duck crossing (DCK_DELTA): torso 150 against eye 100 -> +50; v6.2
+        -- forced the world yaw 150. Torso 30 against eye 100 -> -58 (capped)
+        for _, c in ipairs({{150, 50, 150}, {30, -58, 30}}) do
+            for _, flag in ipairs({true, false}) do
+                F.DCK_DELTA = flag
+                local r = rec0(); r.prev_spd, r.prev_spd2, r.prev_onground = 0, 0, true
+                local das = {goal_feet_yaw = 100, torso_yaw = c[1], on_ground = true, duck_amount = 1}
+                local t, v = DV(r, das, 0, 100, 0, 58, nil)
+                local want = flag and c[2] or c[3]
+                if t ~= "dck" or not (type(v) == "number" and math.abs(v - want) < 0.05) then
+                    UNIT_FAIL[#UNIT_FAIL + 1] = string.format("dck delta (torso %d, flag %s): %s %s, expected dck %s", c[1], tostring(flag), tostring(t), tostring(v), want)
+                end
+            end
+        end
+        F.DCK_DELTA = true
         -- no window on records we forced
         local live0 = W.live
         local function run(flag, id)
@@ -2526,6 +2543,66 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         W.live = live0
     else
         UNIT_FAIL[#UNIT_FAIL + 1] = "vuln delta test: DetectVuln / FEATURE / REC not reachable"
+    end
+end
+
+-- Damage calibration (CAL_FRESH): only current-eye traces made at most 2
+-- ticks before the shot. Best-of-two-eyes trace 100, current eye 50, the
+-- ragebot predicting 50: x1.0 (flag on) / x0.5 (v8.4-8.40). A 6-tick-old
+-- trace teaches nothing.
+if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
+    local AX, F = probe("AIMX"), probe("FEATURE")
+    local CAL
+    if AX and AX.OnFire then
+        for i = 1, 255 do
+            local n, v = debug.getupvalue(AX.OnFire, i)
+            if not n then break end
+            if n == "CAL" then CAL = v end
+        end
+    end
+    if CAL and F then
+        local h0, f0 = CAL.head, CAL.fh
+        local function feed(flag, age)
+            F.CAL_FRESH = flag
+            CAL.head, CAL.fh = {}, 1
+            local r = {aim_th = 100, aim_th1 = 50, aim_tb = 40, aim_tb1 = 40, aim_t_tc = W.tick - age}
+            for _ = 1, 6 do AX.OnFire(r, 1, 50, 100) end
+            return CAL.fh, #CAL.head
+        end
+        local on = feed(true, 1)
+        local off = feed(false, 1)
+        local _, stale_n = feed(true, 6)
+        F.CAL_FRESH = true
+        if math.abs(on - 1) > 0.01 then UNIT_FAIL[#UNIT_FAIL + 1] = "damage calibration: a fresh current-eye trace calibrated x" .. on .. ", expected x1.0" end
+        if math.abs(off - 0.5) > 0.01 then UNIT_FAIL[#UNIT_FAIL + 1] = "damage calibration test: flag off gave x" .. off .. ", not v8.4's x0.5" end
+        if stale_n ~= 0 then UNIT_FAIL[#UNIT_FAIL + 1] = "damage calibration: a 6-tick-old trace was used (" .. stale_n .. " samples)" end
+        CAL.head, CAL.fh = h0, f0
+        -- the traces themselves: eye 1 (where we stand) sees head 40 /
+        -- stomach 35, the peek eye head 120 / pelvis 60 -> best 120 / 60, now 40 / 35
+        local TR, TB, EY
+        for i = 1, 255 do
+            local n, v = debug.getupvalue(AX.Tick, i)
+            if not n then break end
+            if n == "Traced" then TR = v elseif n == "TracedBody" then TB = v elseif n == "EYES" then EY = v end
+        end
+        if TR and TB and EY then
+            local e1, e2 = {EY[1][1], EY[1][2], EY[1][3]}, {EY[2][1], EY[2][2], EY[2][3]}
+            EY[1][1], EY[2][1] = 11, 22
+            W.players[139] = {tdmg_eye = {[11] = {[0] = 40, [2] = 10, [3] = 35, [5] = 30}, [22] = {[0] = 120, [2] = 60, [3] = 5, [5] = 5}}}
+            local hb, hn = TR(1, 2, 139, 0)
+            local bb, bn = TB(1, 2, 139)
+            local b1, n1 = TB(1, 1, 139)
+            if hb ~= 120 or hn ~= 40 then UNIT_FAIL[#UNIT_FAIL + 1] = "traced head: best " .. tostring(hb) .. " / now " .. tostring(hn) .. ", expected 120 / 40" end
+            if bb ~= 60 or bn ~= 35 then UNIT_FAIL[#UNIT_FAIL + 1] = "traced body: best " .. tostring(bb) .. " / now " .. tostring(bn) .. ", expected 60 / 35" end
+            if b1 ~= 35 or n1 ~= 35 then UNIT_FAIL[#UNIT_FAIL + 1] = "traced body standing: " .. tostring(b1) .. " / " .. tostring(n1) .. ", expected 35 / 35" end
+            W.players[139] = nil
+            EY[1][1], EY[1][2], EY[1][3] = e1[1], e1[2], e1[3]
+            EY[2][1], EY[2][2], EY[2][3] = e2[1], e2[2], e2[3]
+        else
+            UNIT_FAIL[#UNIT_FAIL + 1] = "traced test: Traced / TracedBody / EYES not reachable from AIMX.Tick"
+        end
+    else
+        UNIT_FAIL[#UNIT_FAIL + 1] = "damage calibration test: AIMX.OnFire / CAL not reachable"
     end
 end
 

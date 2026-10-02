@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.40"
+local RV_VERSION = "8.41"
 
 local ffi = require "ffi"
 
@@ -1017,6 +1017,19 @@ local FEATURE = {
     -- remembered side weakens it by what that shot could prove. Off in the
     -- v6.2 parity run.
     HMEM_WEIGHT = true,
+    -- v8.41: duck windows force the torso relative to the eye, within this
+    -- frame's limit, like every other window since v8.38. v6.2 forced the
+    -- torso's WORLD yaw (-166, 104, ...), clamped to +-60 by the player
+    -- list: the side came from which way on the map they faced. Across the
+    -- uploaded logs DCK landed 82% under 60 and 73% clamped -- its rate
+    -- never came from the value. Off in the v6.2 parity run.
+    DCK_DELTA = true,
+    -- v8.41: the aim policy's damage calibration takes only traces from our
+    -- current eye made at most 2 ticks before the shot. The ragebot predicts
+    -- from where we stand; the stored trace is the best of two eyes (the
+    -- second 4 ticks ahead) and up to 6 ticks old, so one match calibrated
+    -- head damage x1.52 from ratios of 0.69 to 12 (fresh ones read 1.0).
+    CAL_FRESH = true,
     -- These three are the v6.2 [EXP] switches as the logs show them
     -- running when the resolver hit 74% (suppress fired in every v6.2
     -- match; jitter prediction never did).
@@ -2608,6 +2621,11 @@ local function DetectVuln(rec, as, pose, eye_y, spd, corr_cap, al6_weight)
         local torso = as.torso_yaw or safe_eye
         if torso and math.abs(torso) >= 1.0 then
             rec._dck_cooldown = 10   -- set before returning so it persists
+            if FEATURE.DCK_DELTA then
+                local v = Rel(as.torso_yaw)
+                if not v then return nil, 0, 0 end
+                return VTYPE.DCK, v, 0.78
+            end
             return VTYPE.DCK, torso, 0.78
         end
     end
@@ -3184,7 +3202,8 @@ do
         local s0 = d.state and rec.hm_st[d.state] or 0
         local why = (d.nolearn and "teleported/extrapolated") or (rw == 0 and "prediction error")
                     or (ww == 0 and "weapon") or (gw == 0 and "hitbox") or (not side and "no applied side")
-                    or ((Sign(g0) ~= side and Sign(s0) ~= side) and "memory not on that side") or nil
+                    or ((g0 == 0 and s0 == 0) and "no memory yet")
+                    or ((Sign(g0) ~= side and Sign(s0) ~= side) and "memory on the other side") or nil
         if why then Log("skip", name, d, side, ww, gw, 0, g0, g0, s0, s0, why); return 0 end
         rec.hm = Toward0(g0, side, 2 * w)
         if d.state then rec.hm_st[d.state] = Toward0(s0, side, 2 * w) end
@@ -4292,13 +4311,29 @@ end
 local function Traced(me, ne, target, hb)
     local okp, x, y, z = pcall(entity.hitbox_position, target, hb)
     if not (okp and isnum(x) and isnum(y) and isnum(z)) then return 0 end
-    local best = 0
+    local best, now = 0, 0
     for i = 1, ne do
         local e = EYES[i]
         local okt, hit, dmg = pcall(client.trace_bullet, me, e[1], e[2], e[3], x, y, z, false)
-        if okt and hit == target and isnum(dmg) and dmg > best then best = dmg end
+        if okt and hit == target and isnum(dmg) then
+            if dmg > best then best = dmg end
+            if i == 1 then now = dmg end
+        end
     end
-    return best
+    -- best of both eyes (the decision: a peek is judged from where we will
+    -- be); from where we stand (the calibration: what the ragebot predicts)
+    return best, now
+end
+
+-- the body: the best hitbox of HB_BODY, both ways
+local function TracedBody(me, ne, target)
+    local b, b1 = 0, 0
+    for j = 1, #HB_BODY do
+        local d, d1 = Traced(me, ne, target, HB_BODY[j])
+        if d > b then b = d end
+        if d1 > b1 then b1 = d1 end
+    end
+    return b, b1
 end
 
 -- FEATURE.XWAY_UNSURE: last shot at a 3-way / 5-way enemy was a resolver
@@ -4361,6 +4396,12 @@ local function OnFire(rec, hitgroup, pred, hp)
     local group = (hitgroup == 1) and "head" or ((hitgroup == 2 or hitgroup == 3) and "body" or nil)
     if not group then return end
     local traced = (group == "head") and rec.aim_th or rec.aim_tb
+    if FEATURE.CAL_FRESH then
+        -- same eye, same moment as the ragebot's prediction
+        local age = isnum(rec.aim_t_tc) and globals.tickcount() - rec.aim_t_tc or nil
+        if not (age and age >= 0 and age <= 2) then return end
+        traced = (group == "head") and rec.aim_th1 or rec.aim_tb1
+    end
     if not (isnum(traced) and traced > 0) then return end
     local t = CAL[group]
     t[#t + 1] = pred / traced
@@ -4404,13 +4445,8 @@ local function Tick(tc, threat, ti)
             local every = (ent == threat) and 2 or 6
             if not rec.aim_t_tc or tc - rec.aim_t_tc >= every or tc < rec.aim_t_tc then
                 rec.aim_t_tc = tc
-                rec.aim_th = Traced(me, ne, ent, HB_HEAD)
-                local b = 0
-                for j = 1, #HB_BODY do
-                    local d = Traced(me, ne, ent, HB_BODY[j])
-                    if d > b then b = d end
-                end
-                rec.aim_tb = b
+                rec.aim_th, rec.aim_th1 = Traced(me, ne, ent, HB_HEAD)
+                rec.aim_tb, rec.aim_tb1 = TracedBody(me, ne, ent)
             end
             local hp = tonumber(entity.get_prop(ent, "m_iHealth"))
             -- vuln windows don't exempt the x-way case: vuln shots there

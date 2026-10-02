@@ -363,7 +363,7 @@ for _, g in ipairs({"head", "body"}) do
     local t = trace_ratio[g]
     if #t > 0 then
         table.sort(t)
-        if g == "head" then print("\nTRACE CALIBRATION (ragebot predicted damage / traced damage; 1.0 = traces already final)") end
+        if g == "head" then print("\nTRACE CALIBRATION (ragebot predicted damage / traced damage; 1.0 = traces already final;") ; print("tr= is the best of two eyes and up to 6 ticks old -- since v8.41 the script calibrates on fresh current-eye traces only)") end
         print(("  %-5s median x%.2f over %d shots  (the script applies this itself after 5)"):format(g, t[math.floor((#t + 1) / 2)], #t))
     end
 end

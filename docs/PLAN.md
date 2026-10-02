@@ -91,9 +91,9 @@ kill, and no gain where it was meant to help.
 
 ## Step 5 -- vuln values in one unit
 
-- STP / PKA / CTR / LND still force world yaws (as UNK did before v8.29).
-  Move each to eye-relative values once it has 20+ decided shots in logs
-  with the probe; DCK (77%, world yaw) is left alone unless its rate drops.
+- Done: STP / PKA / LND (v8.38 `VULN_DELTA`) and DCK (v8.41 `DCK_DELTA`)
+  force torso / feet - eye within the frame's limit. CTR (pose-triggered)
+  is no longer forced under KNOWN_ONLY.
 
 ## Step 6 -- cut what never fires
 
