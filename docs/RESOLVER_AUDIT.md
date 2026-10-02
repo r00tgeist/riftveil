@@ -143,3 +143,13 @@ limit, no preset tables).
 - Vuln windows: detected on clean records only; STP / PKA / LND values
   eye-relative (`VULN_DELTA`); DCK unchanged on its numbers.
 - One release path; dead `get_desync` probe and dead ttl-boost trace gone.
+
+## v8.39 hit memory evidence
+
+| Finding | Fix |
+|---|---|
+| Two head hits on opposite sides counted as two confirmations of the last side | signed evidence: they cancel (`HMEM_WEIGHT`) |
+| A shotgun pellet, a spray bullet and an AWP head shot each counted 1 | weight by our weapon: 1 / 0.75 pistol / 0.5 rifle, smg / 0.25 mg / 0 shotgun, taser, knife |
+| Any head or neck hit taught, even off a body-aimed shot | aimed head -> head 1, neck 0.5; stray head hit 0 |
+| A "prediction error" or teleported shot missing dropped memory (KNOWN_ONLY) | only resolver misses on the remembered side, weighted by weapon and aimed hitbox, never past zero |
+| No log said why memory changed | `[hmem]` per shot; `wc= hw= hm=` on hit / miss lines |

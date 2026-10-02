@@ -59,6 +59,8 @@ local by_lbyx = {}        -- LBY vuln windows on 3/5-way: a centre pass reads as
 local by_eo, by_lbyu = {}, {}  -- v8.34: eye offset from facing away from us; time since their LBY target moved
 local corr_aa, last_shot = {}, {}   -- per player: last [corr] aa=, last {kind, t}
 local probe_n, probe_total = {}, 0   -- v8.32 pz= / pf= probe on [corr] lines
+local by_wc = {}          -- v8.39: our weapon in full (wc=) x aimed hitgroup
+local hmem_n, hmem_keys = {}, {}   -- v8.39 [hmem]: what each weapon / hitbox did to hit memory
 local by_seed, seed_of = {}, {}   -- v8.5.6+: DB-seeded start vs cold start, per player
 local calib = {}          -- decile -> {n, heads, psum}
 local trace_ratio = {head = {}, body = {}}   -- v8.4+: ragebot predicted / traced damage
@@ -100,6 +102,19 @@ for _, path in ipairs(files) do
         -- "new profile player=NAME s64=... seed=0.35": this match's start for NAME
         local np, sd = line:match("%]%[rec%] new profile player=(.-) s64=%S+ seed=([%d%.]+)")
         if np then seed_of[np] = tonumber(sd) > 0 and "DB-seeded start" or "cold start" end
+        -- [hmem] (v8.39): one line per learn / against / weaken / drop / skip
+        if line:find("%]%[hmem%]") then
+            local what = line:match("%]%[hmem%] player=.- (%a+) side=")
+            local wc, aim, hg = field(line, "wc"), field(line, "aim"), field(line, "hg")
+            local why = line:match(" why=(.+)$")
+            if what and wc then
+                local k = what == "skip" and ("skip: " .. (why or "?")) or what
+                for _, key in ipairs({wc .. "  " .. k, "aim " .. (aim or "?") .. " / hit " .. (hg or "?") .. "  " .. k}) do
+                    if not hmem_n[key] then hmem_n[key] = 0; hmem_keys[#hmem_keys + 1] = key end
+                    hmem_n[key] = hmem_n[key] + 1
+                end
+            end
+        end
         local is_hit  = line:find("%]%[hit%]") ~= nil
         local is_miss = line:find("%]%[miss%]") ~= nil and line:find("reason=") ~= nil
         if is_hit or is_miss then
@@ -223,6 +238,12 @@ for _, path in ipairs(files) do
                     or mv < 200 and "110-200" or "200+"
                 targets[#targets + 1] = bucket(by_speed, band)
             end
+            local wc = field(line, "wc")
+            if wc then
+                targets[#targets + 1] = bucket(by_wc, wc)
+                local aim = line:match(" aim=(.-) pdmg=")
+                if aim then targets[#targets + 1] = bucket(by_wc, wc .. " -> " .. aim) end
+            end
             local wpn = field(line, "wpn")
             if wpn then
                 targets[#targets + 1] = bucket(by_wpn, wpn)
@@ -329,6 +350,13 @@ report("BY FORCED VALUE PER METHOD (|val| clamped at 60, as the player list take
 report("BY PROFILE START (v8.5.6+: confidence seeded from the saved DB vs cold start)", by_seed)
 report("BY ENEMY SPEED (mv=, u/s: 0-5 still, 5-40 micro / stopping, 40-110 slow walk, 200+ running; v8.2+ logs)", by_speed)
 report("BY WEAPON (v7.7+ logs)", by_wpn)
+report("BY OUR WEAPON IN FULL (v8.39 wc=; shotgun / smg / rifle / knife no longer \"other\")", by_wc)
+if #hmem_keys > 0 then
+    print("\nHIT MEMORY EVIDENCE (v8.39 [hmem]: learn / against = head hit added, weaken / drop = resolver")
+    print("miss took, skip = taught nothing and why; by our weapon, then by aimed / landed hitbox)")
+    table.sort(hmem_keys)
+    for _, k in ipairs(hmem_keys) do print(("  %-52s %6d"):format(k, hmem_n[k])) end
+end
 report("BY ENEMY CHEAT (v7.9+ logs, cheat revealer running)", by_cheat)
 report("BY AIM POLICY (body = prefer body, head = head is the only kill, sp / headsp = safe point, - = ragebot default)", by_pol)
 for _, g in ipairs({"head", "body"}) do

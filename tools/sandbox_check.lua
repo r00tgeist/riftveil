@@ -385,6 +385,11 @@ local mock = {
             if (line:find("][miss]", 1, true) or line:find("][hit]", 1, true)) and not line:find(" discarded ", 1, true) then
                 SHOT_SEEN = (SHOT_SEEN or 0) + 1
                 if line:find(" eo=%-?[%d]* lbyu=[%d%.%-]+ gs=%-?[%d]* aa=") then SHOT_EO = (SHOT_EO or 0) + 1 end
+                if line:find(" wc=[%w%?]+ hw=[%d%.%-]+ hm=[%d%.%+%-/]+ eo=") then SHOT_WC = (SHOT_WC or 0) + 1 end
+            end
+            if line:find("][hmem]", 1, true) then
+                HMEM_SEEN = (HMEM_SEEN or 0) + 1
+                if line:find(" side=[%+%-]%d wc=%S+ ww=[%d%.]+ aim=%S+ hg=%S+ gw=[%d%.]+ w=[%d%.]+ mem=") then HMEM_FULL = (HMEM_FULL or 0) + 1 end
             end
             if line:find("][corr]", 1, true) then
                 CORR_SEEN = (CORR_SEEN or 0) + 1
@@ -511,7 +516,7 @@ if os.getenv("RV_PARITY") then
     end
     local F
     for _, cb in pairs(CALLBACKS) do F = F or find(cb, 0) end
-    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false; F.POSE_CLEAN = false; F.FULL_DESYNC = false; F.BEAT_BUILTIN = false; F.KNOWN_ONLY = false; F.LEARN_GS = false; F.VULN_DELTA = false end
+    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false; F.POSE_CLEAN = false; F.FULL_DESYNC = false; F.BEAT_BUILTIN = false; F.KNOWN_ONLY = false; F.LEARN_GS = false; F.VULN_DELTA = false; F.HMEM_WEIGHT = false end
 end
 
 local cb_errors = {}
@@ -2170,7 +2175,7 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
                 for _, p in ipairs({101, 102}) do W.players[p].sim = W.tick * TI end
                 if k == 3 then W.players[131].sim = W.tick * TI; W.players[131].pose01 = (n % 2 == 0) and 0.2 or 0.8 end
                 local r = EI[131] and REC_T[EI[131]]
-                if r then r.hit_count, r.hit_side, r.vuln_ttl = 2, 1, 0 end
+                if r then r.hit_count, r.hit_side, r.hm, r.vuln_ttl = 2, 1, 2, 0 end
                 fire("net_update_end")
             end
             local r = EI[131] and REC_T[EI[131]]
@@ -2260,7 +2265,7 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
             return "builtin"
         end
         local plain1, plain0 = run(true, 132), run(false, 133)
-        local hm = run(true, 134, function(r) r.hit_count, r.hit_side, r.vuln_ttl = 2, 1, 0 end)
+        local hm = run(true, 134, function(r) r.hit_count, r.hit_side, r.hm, r.vuln_ttl = 2, 1, 2, 0 end)
         local unk = run(true, 135, function(r) r.vuln_ttl, r.vuln_type, r.vuln_val, r.conf = 11, "unk", 30, 0.1 end)
         local unk_all = LAST_KNOWN_RUN.n and LAST_KNOWN_RUN.unk == LAST_KNOWN_RUN.n
         local lby = run(true, 136, function(r) r.vuln_ttl, r.vuln_type, r.vuln_val = 11, "lby", 30 end)
@@ -2340,6 +2345,88 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         r.hit_side, r.hit_count = 0, 0
     else
         UNIT_FAIL[#UNIT_FAIL + 1] = "learn gs test: REC[102] / FEATURE not reachable"
+    end
+    -- v8.39 hit memory evidence (HMEM_WEIGHT): weighted by our weapon and
+    -- the hitbox aimed / landed; a +, - pair cancels; a resolver miss on
+    -- the remembered side weakens it, never past zero. v6.2 (flag off): any
+    -- two head hits, any weapon, confirm the last side.
+    do
+        local REC_H, EI_H, F_H, HM = probe("REC"), probe("EIDX_S64"), probe("FEATURE"), probe("HMEM")
+        local r = EI_H and REC_H and EI_H[102] and REC_H[EI_H[102]]
+        if r and F_H and HM then
+            local id, w0 = 97000, W.weapon
+            local function shot(wpn, val, aim, out, opt)
+                opt = opt or {}
+                id = id + 1; W.weapon = wpn
+                r.last_meth, r.last_val, r.vuln_ttl, r.active = opt.meth or "hit_mem", val, 0, true
+                r.state = opt.state or "standing"
+                r.gs_pose, r.gs_t = opt.gs, W.real
+                -- each case alone; three misses in a row are the soft reset's case
+                if not opt.keep then r.resolver_misses = 0 end
+                fire("aim_fire", {id = id, target = 102, backtrack = 0, hit_chance = 80, hitgroup = aim, damage = 100, teleported = opt.tele})
+                if type(out) == "number" then fire("aim_hit", {id = id, target = 102, hitgroup = out, damage = 100})
+                else fire("aim_miss", {id = id, target = 102, hitgroup = aim, reason = out}) end
+                return r.hm
+            end
+            local function reset()
+                r.hm, r.hm_st, r.hit_side, r.hit_count, r.resolver_misses = 0, {}, 0, 0, 0
+                r.hit_side_by_state, r.hit_count_by_state = {}, {}
+            end
+            local function near(a, b) return type(a) == "number" and math.abs(a - b) < 1e-6 end
+            local function check(ok, msg) if not ok then UNIT_FAIL[#UNIT_FAIL + 1] = "hit memory evidence: " .. msg end end
+            F_H.HMEM_WEIGHT = true
+            reset()
+            check(near(shot(9, 58, 1, 1), 1), "an awp head hit on a head-aimed shot didn't add 1")
+            check(near(shot(40, 58, 1, 1), 2) and HM.Side(r, "standing") == 1, "two precise head hits didn't make side +1")
+            check(near(shot(9, -58, 1, 1), 1) and HM.Side(r, "standing") == 0, "an opposite head hit didn't cancel a confirmation")
+            reset()
+            check(near(shot(35, 58, 1, 1), 0), "a shotgun head hit taught the memory")
+            check(near(shot(515, 58, 1, 1), 0), "a knife hit taught the memory")
+            check(near(shot(7, 58, 1, 1), 0.5), "a rifle head hit didn't add 0.5")
+            check(near(shot(9, 58, 1, 8), 1), "a neck hit on a head-aimed shot didn't add 0.5")
+            check(near(shot(9, 58, 2, 1), 1), "a head hit off a body-aimed shot taught the memory")
+            check(near(shot(9, 58, 1, 1, {tele = true}), 1), "a teleported shot taught the memory")
+            check(near(shot(9, 58, 1, 2), 1), "a chest hit taught the memory")
+            check(near(shot(1, 58, 1, 1), 2), "a deagle head hit didn't add 1")
+            check(near(shot(9, 58, 1, 1), 3) and near(shot(9, 58, 1, 1), 3), "the evidence wasn't capped at 3")
+            check(near(shot(9, 58, 1, "prediction error"), 3), "a prediction error weakened the memory")
+            check(near(shot(9, -58, 1, "?"), 3), "a miss on the other side weakened the memory")
+            check(near(shot(9, 58, 2, "?"), 2), "a chest-aimed awp miss didn't take 1")
+            check(near(shot(17, 58, 1, "?"), 1), "a head-aimed smg miss didn't take 1")
+            check(near(shot(9, 58, 1, "?"), 0), "a head-aimed awp miss didn't drop the memory")
+            check(near(shot(61, 58, 1, 1), 0.75) and near(shot(9, 58, 1, "?"), 0), "a miss carried the memory past zero")
+            reset(); r.hm = 2
+            check(near(shot(9, 58, 1, "?", {tele = true}), 2), "a teleported miss weakened the memory")
+            check(near(shot(29, 58, 1, "?"), 2), "a shotgun miss weakened the memory")
+            -- overall on the missed side, this state on the other: only the
+            -- overall memory pays for the miss
+            reset(); r.hm, r.hm_st.standing = 2, -1
+            check(near(shot(9, 58, 1, "?"), 0) and near(r.hm_st.standing, -1), "a miss touched a state memory on the other side")
+            -- gamesense's own shot: its answer is the side on the hitbox
+            reset()
+            check(near(shot(9, 0, 1, 1, {meth = "builtin", gs = -40}), -1), "a builtin head hit didn't file gamesense's side -1")
+            check(near(shot(9, 0, 1, 1, {meth = "builtin"}), -1), "a builtin hit with no gamesense answer taught the memory")
+            -- per state first, overall as the fallback
+            reset()
+            shot(9, 58, 1, 1); shot(9, 58, 1, 1); shot(9, -58, 1, 1, {state = "moving"})
+            check(HM.Side(r, "standing") == 1 and HM.Side(r, "moving") == 0 and near(r.hm, 1),
+                "per-state evidence: standing " .. tostring(HM.Side(r, "standing")) .. ", moving " .. tostring(HM.Side(r, "moving")))
+            -- a soft reset (three resolver misses) clears the evidence too
+            reset(); r.hm, r.hm_st.standing = 3, 3
+            for _ = 1, 3 do shot(9, -58, 1, "?", {meth = "suppress", keep = true}) end
+            check(near(r.hm, 0) and next(r.hm_st) == nil, "a soft reset left evidence " .. tostring(r.hm))
+            -- v6.2: shotgun and opposite-side hits all count as confirmations
+            F_H.HMEM_WEIGHT = false
+            reset()
+            shot(35, 58, 1, 1); shot(9, -58, 1, 1)
+            check(r.hit_count == 2 and r.hit_side == -1 and near(r.hm, 0),
+                "flag off: hit_count " .. tostring(r.hit_count) .. " side " .. tostring(r.hit_side) .. " hm " .. tostring(r.hm) .. ", not v6.2's 2 / -1 / untouched")
+            F_H.HMEM_WEIGHT = true
+            reset()
+            W.weapon = w0
+        else
+            UNIT_FAIL[#UNIT_FAIL + 1] = "hit memory evidence test: REC / HMEM / FEATURE not reachable"
+        end
     end
     local DB_T = probe("DB")
     if DB_T then
@@ -2641,6 +2728,12 @@ do
     end
     -- the v8.32 probe rides on every [corr] line: pose read and what we forced
     local corr, probed = CORR_SEEN or 0, CORR_PROBED or 0
+    if not os.getenv("RV_PARITY") and ((HMEM_SEEN or 0) == 0 or HMEM_FULL ~= HMEM_SEEN) then
+        UNIT_FAIL[#UNIT_FAIL + 1] = string.format("hmem lines: %d of %d carry weapon / aim / hitbox / weights", HMEM_FULL or 0, HMEM_SEEN or 0)
+    end
+    if SHOT_WC ~= SHOT_SEEN then
+        UNIT_FAIL[#UNIT_FAIL + 1] = string.format("shot lines: %d of %d carry wc= / hw= / hm=", SHOT_WC or 0, SHOT_SEEN or 0)
+    end
     if (SHOT_SEEN or 0) == 0 or SHOT_EO ~= SHOT_SEEN then
         UNIT_FAIL[#UNIT_FAIL + 1] = string.format("shot lines: %d of %d carry eo= / lbyu=", SHOT_EO or 0, SHOT_SEEN or 0)
     end

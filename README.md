@@ -125,7 +125,12 @@ against the ragebot's own damage prediction. How and why, with sources:
    on knowledge: a confirmed head hit (hit memory) or a server event
    (unchoke, stop, peek, landing, duck crossing). Everything else is
    gamesense's own resolver -- and when gamesense lands the head, the side
-   it was using is remembered.
+   it was using is remembered. Hit memory (v8.39) weighs each shot by our
+   weapon and the hitbox: an AWP bullet through the aimed head counts 1, a
+   rifle or SMG head hit 0.5, a neck hit half, a shotgun pellet or a head
+   hit off a body shot nothing. Hits on opposite sides cancel; a resolver
+   miss on the remembered side takes its weight back twice. Each step is
+   logged as an `[hmem]` line with weapon and hitbox.
 4. **What works per cheat is learned.** Every head-aimed shot (head hit or
    resolver miss) is filed under (enemy cheat, method) across all players
    on that cheat and saved between sessions. A method at 30% or worse against a cheat after

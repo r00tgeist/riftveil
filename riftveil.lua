@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.38"
+local RV_VERSION = "8.39"
 
 local ffi = require "ffi"
 
@@ -1010,6 +1010,13 @@ local FEATURE = {
     -- best method in the logs (77%), not changed without data. Off in the
     -- v6.2 parity run.
     VULN_DELTA = true,
+    -- v8.39: hit memory is signed evidence weighted by our weapon and by
+    -- the hitbox aimed / landed (HMEM): a +, - pair of head hits cancels
+    -- instead of reading as two confirmations, a shotgun pellet or a stray
+    -- head hit off a body shot teaches nothing, and a resolver miss on the
+    -- remembered side weakens it by what that shot could prove. Off in the
+    -- v6.2 parity run.
+    HMEM_WEIGHT = true,
     -- These three are the v6.2 [EXP] switches as the logs show them
     -- running when the resolver hit 74% (suppress fired in every v6.2
     -- match; jitter prediction never did).
@@ -1221,11 +1228,21 @@ client.set_event_callback("console_input", function(text)
             -- shows whether the enemy is actually desyncing differently
             -- per state (different signs) or just needed a few states to warm up.
             local cond_n, cond_parts = 0, {}
-            for st, cnt in pairs(rec.hit_count_by_state or {}) do
-                if cnt >= 2 and (rec.hit_side_by_state[st] or 0) ~= 0 then
-                    cond_n = cond_n + 1
-                    cond_parts[#cond_parts+1] =
-                        string.format("%s:%+d", st, rec.hit_side_by_state[st])
+            if FEATURE.HMEM_WEIGHT then
+                -- signed evidence per state; 2 is HMEM.GATE (defined below)
+                for st, v in pairs(rec.hm_st or {}) do
+                    if math.abs(v) >= 2 then
+                        cond_n = cond_n + 1
+                        cond_parts[#cond_parts+1] = string.format("%s:%+.1f", st, v)
+                    end
+                end
+            else
+                for st, cnt in pairs(rec.hit_count_by_state or {}) do
+                    if cnt >= 2 and (rec.hit_side_by_state[st] or 0) ~= 0 then
+                        cond_n = cond_n + 1
+                        cond_parts[#cond_parts+1] =
+                            string.format("%s:%+d", st, rec.hit_side_by_state[st])
+                    end
                 end
             end
             -- Per-vuln-type accuracy: vuln_profile has been tracked
@@ -1246,7 +1263,7 @@ client.set_event_callback("console_input", function(text)
             table.sort(vp_parts)
 
             out[#out+1] = string.format(
-                "  %s | %s | conf:%d%% | %d/%d (%d%%) | head:%d miss streak:%d | 6lex:%d/%d | bt:%d | cfg:%s | cond[%d]:%s | vuln:%s",
+                "  %s | %s | conf:%d%% | %d/%d (%d%%) | head:%d miss streak:%d | 6lex:%d/%d | bt:%d | cfg:%s | cond[%d]:%s | vuln:%s | hm:%+.1f",
                 entity.get_player_name(rec.eidx or 0) or s64,
                 rec.aa_type, math.floor(rec.conf*100),
                 rec.total_hits or 0, tot, hr,
@@ -1254,7 +1271,7 @@ client.set_event_callback("console_input", function(text)
                 rec.six_agree or 0, (rec.six_agree or 0) + (rec.six_disagree or 0),
                 rec.preferred_bt, rec.config_type or "?",
                 cond_n, cond_n > 0 and table.concat(cond_parts, ",") or "-",
-                #vp_parts > 0 and table.concat(vp_parts, ",") or "-")
+                #vp_parts > 0 and table.concat(vp_parts, ",") or "-", rec.hm or 0)
         end
         out[#out+1] = string.format("  log lines: %d", log_total)
         local s = table.concat(out, "\n")
@@ -3032,6 +3049,153 @@ local function GetS64(player)
     return nil
 end
 
+-- ══════════════════════════════════════════════════════════════════
+--  HIT MEMORY EVIDENCE  (FEATURE.HMEM_WEIGHT, v8.39)
+--
+--  v6.2 counted head hits: two of them, whatever the side of each, made a
+--  "confirmed" side -- a +, - pair read as two confirmations of the last
+--  one. Here each enemy carries one signed number per movement state and
+--  one overall: a head hit adds (applied side) x weight, so two hits on
+--  opposite sides cancel; memory is used once it reaches HMEM.GATE.
+--
+--  The weight is what the shot can prove about the desync side:
+--
+--  WEAPON (ours). The side moves the head by a few units. One accurate
+--  bullet through the centre of the head we aimed at says the server head
+--  was there; a bullet that landed off its aim point says less.
+--    awp, scout, auto, r8, deagle  1     one accurate bullet
+--    pistol                        0.75  accurate first shot, tap spread
+--    rifle, smg                    0.5   head hits come inside a spray
+--    machine gun                   0.25
+--    shotgun, taser, knife, nade   0     pellets cover both sides / no head
+--
+--  HITBOX. Desync turns the upper body around the feet: the head moves
+--  most, the neck less, the pelvis barely.
+--    hit:  aimed head -> head 1, neck 0.5; any other aim 0 (a head hit off
+--          a body shot came from spread, not from our angle)
+--    miss: aimed head 1, neck / chest / stomach 0.5, limbs 0
+--
+--  A resolver miss ("?") on the remembered side moves that memory toward 0
+--  by twice its weight (one precise head miss undoes two precise head
+--  hits); it never crosses zero, since a miss doesn't say the other side
+--  was right. "prediction error" is their movement, not their side: 0.
+--  Teleported / extrapolated shots: 0. Every learn, weaken and skip is
+--  logged as an [hmem] line with weapon, aim and hitbox.
+-- ══════════════════════════════════════════════════════════════════
+local HMEM = { GATE = 2, CAP = 3 }
+do
+    local CLASS = {
+        [9] = "awp", [40] = "scout", [11] = "auto", [38] = "auto", [64] = "r8", [1] = "deagle",
+        [2] = "pistol", [3] = "pistol", [4] = "pistol", [30] = "pistol", [32] = "pistol",
+        [36] = "pistol", [61] = "pistol", [63] = "pistol",
+        [7] = "rifle", [8] = "rifle", [10] = "rifle", [13] = "rifle", [16] = "rifle",
+        [39] = "rifle", [60] = "rifle",
+        [17] = "smg", [19] = "smg", [23] = "smg", [24] = "smg", [26] = "smg", [33] = "smg", [34] = "smg",
+        [14] = "mg", [28] = "mg",
+        [25] = "shotgun", [27] = "shotgun", [29] = "shotgun", [35] = "shotgun",
+        [31] = "taser",
+        [43] = "nade", [44] = "nade", [45] = "nade", [46] = "nade", [47] = "nade", [48] = "nade", [49] = "nade",
+    }
+    HMEM.WPN = { awp = 1, scout = 1, auto = 1, r8 = 1, deagle = 1, pistol = 0.75,
+                 rifle = 0.5, smg = 0.5, mg = 0.25, shotgun = 0, taser = 0, knife = 0, nade = 0,
+                 ["?"] = 0.5 }
+    HMEM.HIT  = { [1] = 1, [8] = 0.5 }                      -- landed, on a head-aimed shot
+    HMEM.MISS = { [1] = 1, [8] = 0.5, [2] = 0.5, [3] = 0.5 } -- aimed, on a resolver miss
+    local HGN = { [0] = "generic", "head", "chest", "stomach", "larm", "rarm", "lleg", "rleg", "neck", [10] = "gear" }
+
+    -- our weapon, by item definition index (knives: 41, 42, 59, 500+)
+    function HMEM.Class()
+        local me = entity.get_local_player()
+        local w = me and entity.get_player_weapon(me)
+        local idx = w and entity.get_prop(w, "m_iItemDefinitionIndex")
+        if type(idx) ~= "number" then return "?" end
+        idx = bit.band(idx, 0xFFFF)
+        if idx == 41 or idx == 42 or idx == 59 or idx >= 500 then return "knife" end
+        return CLASS[idx] or "?"
+    end
+
+    -- the side that was on the hitbox at the shot: gamesense's answer on its
+    -- own shots, the sign of what we forced otherwise; nil when unknown
+    function HMEM.Applied(d)
+        if d.meth == "builtin" then
+            return (isnum(d.gs) and math.abs(d.gs) >= 5) and Sign(d.gs) or nil
+        end
+        return (isnum(d.val) and math.abs(d.val) >= 5) and Sign(d.val) or nil
+    end
+
+    -- remembered side for state st (falls back to overall), and its evidence
+    function HMEM.Side(rec, st)
+        local v = st and rec.hm_st and rec.hm_st[st]
+        if isnum(v) and math.abs(v) >= HMEM.GATE then return Sign(v), v end
+        v = rec.hm or 0
+        if math.abs(v) >= HMEM.GATE then return Sign(v), v end
+        return 0, v
+    end
+
+    -- "+1.5" overall / "standing:+2.0" per state, for shot lines
+    function HMEM.Tag(rec, st)
+        if not rec then return "-" end
+        local v = st and rec.hm_st and rec.hm_st[st]
+        return string.format("%+.1f/%s", rec.hm or 0, isnum(v) and string.format("%+.1f", v) or "-")
+    end
+
+    local function Log(what, name, d, side, ww, gw, w, g0, g1, s0, s1, why)
+        info("hmem", "player=%s %s side=%+d wc=%s ww=%.2f aim=%s hg=%s gw=%.2f w=%.2f mem=%+.2f->%+.2f st=%s smem=%+.2f->%+.2f meth=%s%s",
+            name or "?", what, side or 0, d.wc or "?", ww or 0,
+            HGN[d.aim_hg or -1] or "?", HGN[d.hg_out or -1] or "-", gw or 0, w or 0,
+            g0 or 0, g1 or 0, d.state or "?", s0 or 0, s1 or 0, d.meth or "?",
+            why and (" why=" .. why) or "")
+    end
+
+    -- aim_hit: head hit on the applied side adds evidence
+    function HMEM.OnHit(rec, d, hg, name)
+        rec.hm_st = rec.hm_st or {}
+        d.hg_out = hg
+        local side = HMEM.Applied(d)
+        local ww = HMEM.WPN[d.wc or "?"] or 0
+        local gw = (d.aim_hg == 1) and (HMEM.HIT[hg] or 0) or ((d.aim_hg == 8) and ((hg == 1 or hg == 8) and 0.5 or 0) or 0)
+        local w = ww * gw
+        local why = (d.nolearn and "teleported/extrapolated") or (ww == 0 and "weapon") or (gw == 0 and "hitbox")
+                    or (not side and "no applied side") or nil
+        local g0 = rec.hm or 0
+        local s0 = d.state and rec.hm_st[d.state] or 0
+        if why then Log("skip", name, d, side, ww, gw, 0, g0, g0, s0, s0, why); return 0 end
+        rec.hm = Clamp(g0 + side * w, -HMEM.CAP, HMEM.CAP)
+        if d.state then rec.hm_st[d.state] = Clamp(s0 + side * w, -HMEM.CAP, HMEM.CAP) end
+        Log((g0 ~= 0 and Sign(g0) ~= side) and "against" or "learn", name, d, side, ww, gw, w,
+            g0, rec.hm, s0, d.state and rec.hm_st[d.state] or 0)
+        return w
+    end
+
+    -- aim_miss (resolver): a miss on the remembered side weakens it
+    local function Toward0(v, side, amt)
+        if not isnum(v) or v == 0 or Sign(v) ~= side then return v end
+        if v > 0 then return math.max(0, v - amt) end
+        return math.min(0, v + amt)
+    end
+    function HMEM.OnMiss(rec, d, reason, name)
+        rec.hm_st = rec.hm_st or {}
+        local side = HMEM.Applied(d)
+        local ww = HMEM.WPN[d.wc or "?"] or 0
+        local gw = HMEM.MISS[d.aim_hg or -1] or 0
+        local rw = (reason == "?" or reason == "") and 1 or 0
+        local w = ww * gw * rw
+        local g0 = rec.hm or 0
+        local s0 = d.state and rec.hm_st[d.state] or 0
+        local why = (d.nolearn and "teleported/extrapolated") or (rw == 0 and "prediction error")
+                    or (ww == 0 and "weapon") or (gw == 0 and "hitbox") or (not side and "no applied side")
+                    or ((Sign(g0) ~= side and Sign(s0) ~= side) and "memory not on that side") or nil
+        if why then Log("skip", name, d, side, ww, gw, 0, g0, g0, s0, s0, why); return 0 end
+        rec.hm = Toward0(g0, side, 2 * w)
+        if d.state then rec.hm_st[d.state] = Toward0(s0, side, 2 * w) end
+        local s1 = d.state and rec.hm_st[d.state] or 0
+        local lost = (math.abs(g0) >= HMEM.GATE and math.abs(rec.hm) < HMEM.GATE)
+                  or (math.abs(s0) >= HMEM.GATE and math.abs(s1) < HMEM.GATE)
+        Log(lost and "drop" or "weaken", name, d, side, ww, gw, w, g0, rec.hm, s0, s1)
+        return w
+    end
+end
+
 local function NewRec(player, s64)
     local db = CleanDBEntry(DB[s64]) or {}
     -- DB-seeded confidence: a proven prior against this steam64 (3+ confirmed
@@ -3070,6 +3234,8 @@ local function NewRec(player, s64)
         -- to the global hit_side/hit_count above when this state has no data
         -- yet).
         hit_side_by_state={}, hit_count_by_state={},
+        -- signed hit-memory evidence, overall and per state (HMEM above)
+        hm=0, hm_st={},
         -- Per-player 6lex trust calibration (inspired by vandal.lua's
         -- per-opponent learning, but validated against confirmed head/neck
         -- hits instead of misses -- a hit proves which side was actually
@@ -3686,9 +3852,11 @@ local function ProcessPlayer(player, ctx)
 
         if not window_blocks then
             -- No active vuln window — run the side detection chain
-            if rec.hit_count >= 2 and rec.hit_side ~= 0 then
+            local hm_side = FEATURE.HMEM_WEIGHT and HMEM.Side(rec, rec.state) or 0
+            if (FEATURE.HMEM_WEIGHT and hm_side ~= 0)
+               or (not FEATURE.HMEM_WEIGHT and rec.hit_count >= 2 and rec.hit_side ~= 0) then
                 -- Empirical: hit this player on this side this match
-                tracked_side   = rec.hit_side   -- already flip-encoded at storage time
+                tracked_side   = FEATURE.HMEM_WEIGHT and hm_side or rec.hit_side   -- v6.2: already flip-encoded at storage time
                 tracked_method = METH.HIT_MEM
 
             elseif six_side ~= 0 and rec.conf > 0.30
@@ -3841,7 +4009,14 @@ local function ProcessPlayer(player, ctx)
         -- static guesses are least trustworthy, not when confirmed data should
         -- be thrown out). Seen directly in a debug log: a hit_mem correction
         -- logged val=0.0 for a fast-moving target.
-        elseif DET.hitmem and rec.state
+        elseif FEATURE.HMEM_WEIGHT and DET.hitmem and HMEM.Side(rec, rec.state) ~= 0
+               and CheatTrusts(rec, METH.HIT_MEM) then
+            -- weighted evidence, this state first, then overall (HMEM.Side)
+            should_override = true
+            override_val    = CfgAngle(HMEM.Side(rec, rec.state), rec.state, TrustedCfg(rec), FEATURE.FULL_DESYNC and corr_cap or live_cap)
+            override_meth   = METH.HIT_MEM
+
+        elseif not FEATURE.HMEM_WEIGHT and DET.hitmem and rec.state
                and (rec.hit_count_by_state[rec.state] or 0) >= 2
                and (rec.hit_side_by_state[rec.state] or 0) ~= 0
                and CheatTrusts(rec, METH.HIT_MEM) then
@@ -3849,7 +4024,7 @@ local function ProcessPlayer(player, ctx)
             override_val    = CfgAngle(rec.hit_side_by_state[rec.state], rec.state, TrustedCfg(rec), FEATURE.FULL_DESYNC and corr_cap or live_cap)
             override_meth   = METH.HIT_MEM
 
-        elseif DET.hitmem and rec.hit_count >= 2 and rec.hit_side ~= 0
+        elseif not FEATURE.HMEM_WEIGHT and DET.hitmem and rec.hit_count >= 2 and rec.hit_side ~= 0
                and CheatTrusts(rec, METH.HIT_MEM) then
             should_override = true
             override_val    = CfgAngle(rec.hit_side, rec.state, TrustedCfg(rec), FEATURE.FULL_DESYNC and corr_cap or live_cap)
@@ -4778,6 +4953,10 @@ local function on_aim_fire(e)
         cheat   = r and r.cheat     or nil,  -- enemy cheat (CHEAT REVEALER), logged
         -- per-weapon aim policy: inputs and the choice in effect
         wpn     = LocalWeaponClass(),
+        -- our weapon in full (rifle / smg / shotgun / knife ...) and the
+        -- hit memory in effect at the shot, overall/this state (HMEM)
+        wc      = HMEM.Class(),
+        hm      = HMEM.Tag(r, r and r.state),
         pol     = r and r.aim_pol or "-",
         aim_th  = r and LogInt(r.aim_th or 0) or 0,   -- traced head / body damage
         aim_tb  = r and LogInt(r.aim_tb or 0) or 0,
@@ -4928,6 +5107,9 @@ local function on_aim_hit(e)
         elseif d.side ~= 0 then
             learned = d.flip and -d.side or d.side
         end
+        if FEATURE.HMEM_WEIGHT then
+            d.hw = HMEM.OnHit(rec, d, tonumber(e.hitgroup) or -1, entity.get_player_name(e.target))
+        end
         if learned and is_head then
             rec.hit_side  = learned
             rec.hit_count = rec.hit_count + 1
@@ -4974,7 +5156,7 @@ local function on_aim_hit(e)
         end
     end
 
-    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d eo=%s lbyu=%s gs=%s aa=%s%s%s",
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d wc=%s hw=%s hm=%s eo=%s lbyu=%s gs=%s aa=%s%s%s",
         entity.get_player_name(e.target) or "?",
         HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
         isnum(e.damage) and math.floor(e.damage) or 0,
@@ -4982,6 +5164,7 @@ local function on_aim_hit(e)
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
         (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0, d.cor or "?", d.ls or -1, d.prv or "-", d.lbyd or 999,
+        d.wc or "?", isnum(d.hw) and string.format("%.2f", d.hw) or "-", d.hm or "-",
         d.eo or "-", d.lbyu or "-", isnum(d.gs) and string.format("%.0f", d.gs) or "-",
         AA_SHORT[d.aa] or "?",
         d.cheat and (" cht=" .. d.cheat) or "",
@@ -5053,14 +5236,20 @@ local function on_aim_miss(e)
     do
         local ro = d.s64 and REC[d.s64]
         if ro then ro.last_outcome = is_resolver and "m" or "o" end
+        -- hit memory sees the miss before the line is written, so the line
+        -- carries the weight it was given (hw=)
+        if ro and is_resolver and FEATURE.HMEM_WEIGHT then
+            d.hw = HMEM.OnMiss(ro, d, reason, entity.get_player_name(e.target))
+        end
     end
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d eo=%s lbyu=%s gs=%s aa=%s%s%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d wc=%s hw=%s hm=%s eo=%s lbyu=%s gs=%s aa=%s%s%s",
         entity.get_player_name(e.target) or "?",
         reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.sspd or -1, d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
         d.thp or -1, d.tarm or -1,
         HG[(d.aim_hg or -1) + 1] or "?", d.aim_dmg or -1, d.conf or 0,
         (d.fl or "") ~= "" and d.fl or "-", d.pit or -999, d.df or 0, d.cor or "?", d.ls or -1, d.prv or "-", d.lbyd or 999,
+        d.wc or "?", isnum(d.hw) and string.format("%.2f", d.hw) or "-", d.hm or "-",
         d.eo or "-", d.lbyu or "-", isnum(d.gs) and string.format("%.0f", d.gs) or "-",
         AA_SHORT[d.aa] or "?",
         d.cheat and (" cht=" .. d.cheat) or "",
@@ -5157,6 +5346,7 @@ local function on_aim_miss(e)
                     rec.conf = 0.22; rec.resolver_misses = 0
                     rec.flip = false; rec.hit_side = 0; rec.hit_count = 0
                     rec.hit_side_by_state = {}; rec.hit_count_by_state = {}
+                    rec.hm, rec.hm_st = 0, {}
                     -- Clear torso history so old cluster readings don't persist.
                     -- A soft reset means our corrections were wrong — the player likely
                     -- switched configs. Stale cluster = wrong correction for new config.

@@ -3,6 +3,28 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.39  – Hit memory weighs what each shot can prove (HMEM_WEIGHT).
+          FIXED -- v6.2 counted head hits regardless of side: a head hit
+          on +, then one on -, read as "confirmed twice" and forced -. The
+          memory is now one signed number per movement state and one
+          overall; a + and a - hit cancel.
+          Weapon (ours): awp / scout / auto / r8 / deagle 1, pistol 0.75,
+          rifle / smg 0.5, machine gun 0.25, shotgun / taser / knife /
+          grenade 0. Hitbox: aimed head -> head 1, neck 0.5; a head hit off
+          a body-aimed shot 0 (spread put it there, not our angle). Two
+          precise head hits on one side make a known side, as before.
+          A resolver miss on the remembered side takes twice its weight
+          (head-aimed 1, neck / chest / stomach 0.5, limbs 0), never past
+          zero; "prediction error", teleported / extrapolated shots and a
+          miss on the other side take nothing. A soft reset clears it.
+          Logging: every learn / against / weaken / drop / skip is an [hmem]
+          line with our weapon (wc=), its weight, aimed and landed hitbox,
+          the hitbox weight, memory before -> after (overall and this
+          state) and why a skip taught nothing. Hit / miss lines add wc=
+          (weapon in full: rifle, smg, shotgun, knife ... instead of
+          "other"), hw= (the weight that shot carried) and hm= (memory in
+          effect at the shot, overall/this state); rv_stats shows hm.
+          log_report: BY OUR WEAPON IN FULL, HIT MEMORY EVIDENCE.
   v8.38  – Wiring pass: the v8.32-8.37 pieces made to agree with each other.
           Hit memory stores the side that was on the hitbox (LEARN_GS):
           a forced shot that lands the head files the sign of the value we
