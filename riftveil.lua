@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.39"
+local RV_VERSION = "8.40"
 
 local ffi = require "ffi"
 
@@ -4682,23 +4682,61 @@ local C_LAG = {240, 64, 64}
 local FLASH = 0.5
 local EDGES = {{1, 2}, {2, 3}, {3, 4}, {4, 1}, {5, 6}, {6, 7}, {7, 8}, {8, 5}, {1, 5}, {2, 6}, {3, 7}, {4, 8}}
 -- tb_max / shift: the LC check; bx,by,bz,t,ticks: the box being flashed
-local S = {shift = 0, t = -1, ticks = 0, shot = -1}
+-- shift_t / shift_n: a teleport seen with no shot yet (the shot's event
+-- can arrive after it); lst / lst_w: our weapon's last-shot time and entity
+local S = {shift = 0, t = -1, ticks = 0, shot = -1, shift_t = -1, shift_n = 0}
 -- a double-tap shift lands within one batch of commands after the shot:
 -- at most sv_maxusrcmdprocessticks (16) ticks, 0.25 s at 64 tick
 local SHOT_WIN = 0.25
 
--- weapon_fire: our own shot, fired with double tap on
+-- Our shot, from whichever source sees it first. v8.17-8.39 knew only
+-- weapon_fire, a server event that arrives a ping after the shot -- by then
+-- double tap's teleport had already run in run_command, so most shots
+-- (ragebot and manual alike) drew nothing. Now: the weapon's predicted
+-- m_fLastShotTime in run_command (every shot, manual included, on the same
+-- timeline as the tickbase), aim_fire (the ragebot, client-side) and
+-- weapon_fire as the late fallback, which still flashes a teleport seen up
+-- to SHOT_WIN before it.
+local function Mark(now)
+    if not AIMX.DtReady() then return end
+    S.shot = now
+    if S.shift_t >= 0 and now - S.shift_t >= 0 and now - S.shift_t <= SHOT_WIN then
+        S.t, S.ticks, S.shift_t = now, S.shift_n, -1
+    end
+end
+
+local NO_SHOT = {knife = true, nade = true}
 local function OnShot(e)
     if not IND.lc then return end
     local me = entity.get_local_player()
     if not me or client.userid_to_entindex(e.userid) ~= me then return end
-    if AIMX.DtReady() then S.shot = globals.realtime() end
+    if e.weapon and (tostring(e.weapon):find("knife", 1, true) or tostring(e.weapon):find("grenade", 1, true)) then return end
+    -- the same shot already seen by prediction: nothing to add
+    local now = globals.realtime()
+    if S.shot >= 0 and now - S.shot >= 0 and now - S.shot <= SHOT_WIN then return end
+    Mark(now)
+end
+
+-- aim_fire: the ragebot's shot, client-side, before the teleport
+local function OnAimFire()
+    if IND.lc then Mark(globals.realtime()) end
+end
+
+-- run_command: the weapon's predicted last-shot time moved = we fired
+local function ShotByPrediction(me)
+    local w = entity.get_player_weapon(me)
+    if not w then S.lst, S.lst_w = nil, nil; return end
+    local lst = tonumber(entity.get_prop(w, "m_fLastShotTime"))
+    if not isnum(lst) then return end
+    if S.lst_w == w and S.lst and lst > S.lst and not NO_SHOT[HMEM.Class()] then Mark(globals.realtime()) end
+    S.lst, S.lst_w = lst, w
 end
 
 local function OnRun()
     if not IND.lc then return end
     local me = entity.get_local_player()
     if not (me and entity.is_alive(me)) then S.tb_max, S.tb_prev, S.shift = nil, nil, 0; return end
+    ShotByPrediction(me)
     local tb = tonumber(entity.get_prop(me, "m_nTickBase"))
     if not isnum(tb) then return end   -- a NaN max would never recover
     -- a new life / reconnect starts the tickbase over
@@ -4715,7 +4753,10 @@ local function OnRun()
     if shift > 2 and S.shift <= 2 then
         local now = globals.realtime()
         if S.shot >= 0 and now - S.shot >= 0 and now - S.shot <= SHOT_WIN and AIMX.DtReady() then
-            S.t, S.ticks = now, shift
+            S.t, S.ticks, S.shift_t = now, shift, -1
+        else
+            -- no shot known yet: kept for a shot event that arrives late
+            S.shift_t, S.shift_n = now, shift
         end
     end
     S.shift = shift
@@ -4762,7 +4803,7 @@ local function Draw()
     if tx then renderer.text(tx, ty, c[1], c[2], c[3], math.floor(255 * al), "-c", 0, string.format("LC  %dt", S.ticks)) end
 end
 
-return {OnRun = OnRun, OnShot = OnShot, Draw = Draw, S = S}
+return {OnRun = OnRun, OnShot = OnShot, OnAimFire = OnAimFire, Draw = Draw, S = S}
 end)() -- local lagcomp scope
 
 
@@ -5021,6 +5062,7 @@ local function on_aim_fire(e)
         prv     = r and r.last_outcome or "-",
     }
     if r then r.last_fire_t = globals.realtime(); r.last_outcome = "-" end
+    LOCALLC.OnAimFire()
     SHOTLOG.Fire(e, SHOTS[e.id], r)
     -- Credit a vuln_profile "seen" (trial) here, once per actual shot fired
     -- during an open vuln window -- not once per detection (see the

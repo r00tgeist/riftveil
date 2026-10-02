@@ -228,7 +228,7 @@ local mock = {
         end end
         -- x encodes (entity, hitbox) so the trace_bullet mock knows what it hit
         if k == "hitbox_position"  then return function(ent, hb) return (ent or 0) * 1000 + (tonumber(hb) or 0), 0, 64 end end
-        if k == "get_player_weapon" then return function() return W.weapon and 900 or nil end end
+        if k == "get_player_weapon" then return function() return W.weapon and (W.wpn_ent or 900) or nil end end
         if k == "get_prop" then
             return function(ent, prop, idx)
                 local p = W.players[ent]
@@ -248,7 +248,8 @@ local mock = {
                 if prop == "m_nTickBase"        then return W.tick + (W.tb_off or 0) end
                 if prop == "m_iHealth"          then return p and p.hp or 100 end
                 if prop == "m_ArmorValue"       then return p and p.armor or 100 end
-                if prop == "m_iItemDefinitionIndex" then return ent == 900 and W.weapon or 0 end
+                if prop == "m_iItemDefinitionIndex" then return (ent == 900 or ent == 901) and W.weapon or 0 end
+                if prop == "m_fLastShotTime"    then return (ent == 900 and (W.lst or 0)) or (ent == 901 and (W.lst2 or 0)) or 0 end
                 return 0
             end
         end
@@ -1511,6 +1512,40 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         settle(5003, 5012)
         fire("weapon_fire", {userid = 2, weapon = "weapon_ssg08"}); run(5002)
         if label() ~= nil then fail("drawn for another player's shot") end
+        -- weapon_fire arrives a ping after the teleport: still flashed
+        settle(5003, 5012)
+        run(5002); W.real = W.real + 0.08; shoot()
+        if label() ~= "LC  9t" then fail("no box when the shot event came 80 ms after the teleport: " .. tostring(label())) end
+        settle(5003, 5012)
+        run(5002); W.real = W.real + 0.3; shoot()
+        if label() ~= nil then fail("drawn for a shot event 0.3 s after the shift") end
+        -- a manual shot: the weapon's predicted last-shot time moves in the
+        -- same command as the teleport, no event at all
+        local wpn0, lst0 = W.weapon, W.lst
+        W.weapon, W.lst = 9, 100
+        settle(5003, 5012)
+        W.lst = 101; run(5002)
+        if label() ~= "LC  9t" then fail("no box for a manual shot (predicted last-shot time): " .. tostring(label())) end
+        -- a knife swing moves it too: nothing
+        W.weapon = 42
+        settle(5003, 5012)
+        W.lst = 102; run(5002)
+        if label() ~= nil then fail("drawn for a knife swing") end
+        -- switching to a weapon that fired earlier isn't a shot
+        W.weapon = 9
+        settle(5003, 5012)
+        W.wpn_ent, W.lst2 = 901, 500; run(5002); W.wpn_ent = nil
+        if label() ~= nil then fail("drawn when switching to another weapon") end
+        -- double tap off: a manual shot draws nothing
+        W.weapon = 9
+        settle(5003, 5012)
+        dt_on = false; W.lst = 103; run(5002); dt_on = true
+        if label() ~= nil then fail("drawn for a manual shot with double tap off") end
+        -- the ragebot's aim_fire (client-side) before the teleport
+        settle(5003, 5012)
+        fire("aim_fire", {id = 98001, target = 102, backtrack = 0, hit_chance = 80, hitgroup = 1, damage = 50}); run(5002)
+        if label() ~= "LC  9t" then fail("no box after the ragebot's aim_fire: " .. tostring(label())) end
+        W.weapon, W.lst = wpn0, lst0
         -- an unreadable (NaN) tickbase as the first read of a life doesn't
         -- break detection for the rest of it
         W.real = W.real + 0.6

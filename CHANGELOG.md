@@ -3,6 +3,16 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.40  – FIXED -- the local lagcomp box missed most double-tap shots and
+          every manual one. It learned of our shot only from weapon_fire,
+          a server event that arrives a ping after the shot; double tap's
+          teleport had already run by then, so the "shot, then teleport"
+          check failed unless the shift came late. Our shot is now seen
+          the moment it happens: the weapon's predicted m_fLastShotTime in
+          run_command (every shot, manual included), aim_fire (ragebot),
+          and weapon_fire as a fallback that still flashes a teleport seen
+          up to 0.25 s before it. Knife swings, grenades and switching to
+          another weapon don't count; double tap must be on, as before.
   v8.39  – Hit memory weighs what each shot can prove (HMEM_WEIGHT).
           FIXED -- v6.2 counted head hits regardless of side: a head hit
           on +, then one on -, read as "confirmed twice" and forced -. The
