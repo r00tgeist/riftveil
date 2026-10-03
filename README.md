@@ -5,7 +5,7 @@ One file: `riftveil.lua`. Load it in gamesense under **LUA**; everything
 else in this repository is tooling that runs on a PC, never in the game.
 You don't need to load any other script: the cheat revealer is built in.
 
-## How it resolves (v8.47)
+## How it resolves (v8.48)
 
 RIFTVEIL steers gamesense's own resolver through the player list (Force
 body yaw), and only where it **knows** something. Everywhere else
@@ -26,9 +26,6 @@ gamesense resolves on its own.
   the enemy's own record at that moment; the value is the torso / feet
   against the eye, capped at the engine's desync limit for that frame.
   A confirmed hit memory of the other sign beats a window.
-- **Probe, then counter.** Against a defensive enemy the opening shot of
-  an engagement is gamesense's own; RIFTVEIL resolves the follow-ups with
-  what that shot showed.
 - **A miss is knowledge.** After a resolver miss the side that missed is
   off limits for 3 s -- for every method and for gamesense.
 - **Desync size.** Side x the engine's limit for that frame (58 standing,

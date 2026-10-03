@@ -3,6 +3,13 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.48  – DEF_OPEN off. Its first real match (v8.47, 20:40-20:52): opening
+          shots handed to gamesense went 2 head / 6 resolver miss
+          (head-aimed), gamesense overall 3 / 10, and no hit memory formed
+          because gamesense rarely landed. The v8.47 evidence was 32 shots.
+          The opening shot at a defensive enemy is forced again, as in
+          v8.46. MISS_FLIP stays (none of its head-aimed shots in that match
+          was a resolver miss).
   v8.47  – DEF_OPEN: the opening shot at an enemy in a defensive phase
           (no shot at them for 5 s) is gamesense's -- the probe -- and
           RIFTVEIL resolves the follow-ups with what it taught (the other

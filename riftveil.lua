@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.47"
+local RV_VERSION = "8.48"
 
 local ffi = require "ffi"
 
@@ -1052,8 +1052,11 @@ local FEATURE = {
     -- memory 9 / 8, other windows 13 / 13). Follow-ups there: unchoke
     -- 13 / 4 (76%) vs gamesense 8 / 4. Without defensive frames forcing
     -- wins the opening shot too (74-83% vs 62%), so nothing changes there.
-    -- Off in the v6.2 parity run.
-    DEF_OPEN = true,
+    -- v8.48: OFF. Its first real match: opening shots handed to gamesense
+    -- went 2 head / 6 resolver miss (head-aimed), and no hit memory formed
+    -- because gamesense rarely landed; the evidence was 32 shots. Kept for
+    -- the parity run and the harness.
+    DEF_OPEN = false,
     -- v8.41: duck windows force the torso relative to the eye, within this
     -- frame's limit, like every other window since v8.38. v6.2 forced the
     -- torso's WORLD yaw (-166, 104, ...), clamped to +-60 by the player

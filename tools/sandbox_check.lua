@@ -2780,6 +2780,7 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
             -- them for 5 s) is gamesense's -- even with a -2 def memory or a
             -- window; a follow-up (shot 1 s ago) is forced; outside a
             -- defensive phase the opening shot is forced; flag off: forced
+            FE.DEF_OPEN = true
             def_frame()
             local o1, o1v = rec_once(0, -2, nil, "none")
             -- the shot taken now carries the tag (" open" on its line)
@@ -2793,7 +2794,6 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
             local open_tag = r.def_open
             FE.DEF_OPEN = false
             local o0 = rec_once(0, -2, nil, "none")
-            FE.DEF_OPEN = true
             if o1 ~= "builtin" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive opening shot: forced " .. tostring(o1) .. " " .. tostring(o1v) .. ", expected gamesense" end
             if o2 ~= "builtin" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive opening shot: a window was forced 6 s after the last shot (" .. tostring(o2) .. ")" end
             if o3 ~= "hit_mem" or open_tag then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive follow-up: " .. tostring(o3) .. " (open " .. tostring(open_tag) .. "), expected the def memory forced" end
