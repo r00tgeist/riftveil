@@ -5,7 +5,7 @@ and what comes next. Older versions are kept in `versions/` so none of the
 work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 (the decision engine), `riftveil_v8.1.lua`.
 
-## In the script (v8.46)
+## In the script (v8.47)
 
 | Area | Feature | Changes shots? |
 |---|---|---|
@@ -26,6 +26,7 @@ work is lost: `riftveil_v6.2.lua` (the 74% resolver), `riftveil_v7.9.lua`
 | Core | Hit memory stores the side that was on the hitbox (forced value's sign / gamesense's answer); its own miss drops it; vuln windows only from clean records; stop / peek / landing values eye-relative | yes, `LEARN_GS`, `KNOWN_ONLY`, `POSE_CLEAN`, `VULN_DELTA` |
 | Core | Hit memory is signed evidence weighted by our weapon (awp/scout/auto/deagle 1 ... shotgun 0) and the hitbox (aimed head -> head 1, neck 0.5; stray head hit 0): a +, - pair cancels; a resolver miss on the remembered side takes twice its weight; `[hmem]` line for every learn / weaken / skip | yes, `FEATURE.HMEM_WEIGHT` |
 | Core | Defensive phase (any defensive frame in the last second) has its own hit memory ("def"): the landed side repeats 41/78 there vs 63/87 outside, so the overall memory isn't used in it; event windows still force | yes, `FEATURE.DEF_PHASE` (replaced v8.43's release) |
+| Core | Opening shot at a defensive enemy (no shot for 5 s) is gamesense's probe; follow-ups resolved (opening: gamesense 69% vs forced 54%; follow-ups forced 76%) | yes, `FEATURE.DEF_OPEN` |
 | Core | After a resolver miss, that side is off limits for 3 s (next shot after a miss: 73% on the other side, 55% on the same -- which was shot 2 times in 3) | yes, `FEATURE.MISS_FLIP` |
 | Core | Defensive phase held until 3 s without a defensive frame (gaps under 2 s 79% of the time); a confirmed hit memory beats a window of the other sign | yes, `FEATURE.DEF_HOLD`, `FEATURE.MEM_FIRST` |
 | Core | Duck windows force torso - eye within the frame's limit (were the torso's world yaw, clamped: side by map direction) | yes, `FEATURE.DCK_DELTA` |

@@ -519,7 +519,7 @@ if os.getenv("RV_PARITY") then
     end
     local F
     for _, cb in pairs(CALLBACKS) do F = F or find(cb, 0) end
-    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false; F.POSE_CLEAN = false; F.FULL_DESYNC = false; F.BEAT_BUILTIN = false; F.KNOWN_ONLY = false; F.LEARN_GS = false; F.VULN_DELTA = false; F.HMEM_WEIGHT = false; F.DCK_DELTA = false; F.CAL_FRESH = false; F.DEF_PHASE = false; F.DEF_HOLD = false; F.MEM_FIRST = false; F.MISS_FLIP = false end
+    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false; F.POSE_CLEAN = false; F.FULL_DESYNC = false; F.BEAT_BUILTIN = false; F.KNOWN_ONLY = false; F.LEARN_GS = false; F.VULN_DELTA = false; F.HMEM_WEIGHT = false; F.DCK_DELTA = false; F.CAL_FRESH = false; F.DEF_PHASE = false; F.DEF_HOLD = false; F.MEM_FIRST = false; F.MISS_FLIP = false; F.DEF_OPEN = false end
 end
 
 local cb_errors = {}
@@ -2712,13 +2712,16 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         local FE = probe("FEATURE")
         if r and FE then
             -- a record every 3 ticks (choking: not NO_CHOKE static), jittering
-            local function rec_once(hm, def, win)
+            -- lf: our last shot at them (default: just now, a follow-up;
+            -- "none": never -- the opening shot, DEF_OPEN)
+            local function rec_once(hm, def, win, lf)
                 for k = 1, 3 do
                     W.tick = W.tick + 1; W.real = W.real + TI
                     if k == 3 then p.sim = W.tick * TI; p.pose01 = (p.pose01 == 0.2) and 0.8 or 0.2 end
                     W.players[101].sim = W.tick * TI
                     r.hm, r.hm_st, r.hit_count, r.hit_side, r.vuln_ttl = hm, {def = def}, 2, 1, 0
                     if win then r.vuln_ttl, r.vuln_type, r.vuln_val, r.conf = 5, "unk", win, 0.5 end
+                    if lf == "none" then r.last_fire_t = nil else r.last_fire_t = W.real - (lf or 0) end
                     fire("net_update_end")
                 end
                 return r.last_meth, r.last_val
@@ -2759,6 +2762,9 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
             for _ = 1, 50 do back = rec_once(2, nil) end
             if held ~= "builtin" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive hold: overall memory forced 1.1 s after a defensive frame (" .. tostring(held) .. ")" end
             if back ~= "hit_mem" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive hold: overall memory not back 3.4 s after the last defensive frame (" .. tostring(back) .. ")" end
+            -- outside a defensive phase the opening shot is still forced (DEF_OPEN)
+            local nb = rec_once(2, nil, nil, "none")
+            if nb ~= "hit_mem" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive opening: an opening shot outside a defensive phase wasn't forced (" .. tostring(nb) .. ")" end
             -- MEM_FIRST: a window (-30) against a confirmed memory (+): the
             -- memory's side is forced; an agreeing window (+30) keeps its value;
             -- flag off: the window, as v6.2
@@ -2770,6 +2776,28 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
             if m1 ~= "hit_mem" or not (type(v1) == "number" and v1 > 0) then UNIT_FAIL[#UNIT_FAIL + 1] = "memory first: a -30 window beat a + memory: " .. tostring(m1) .. " " .. tostring(v1) end
             if m2 ~= "vuln_unk" or v2 ~= 30 then UNIT_FAIL[#UNIT_FAIL + 1] = "memory first: an agreeing window lost its value: " .. tostring(m2) .. " " .. tostring(v2) end
             if m0 ~= "vuln_unk" or v0 ~= -30 then UNIT_FAIL[#UNIT_FAIL + 1] = "memory first test: flag off gave " .. tostring(m0) .. " " .. tostring(v0) .. ", not the window" end
+            -- DEF_OPEN: in a defensive phase the opening shot (no shot at
+            -- them for 5 s) is gamesense's -- even with a -2 def memory or a
+            -- window; a follow-up (shot 1 s ago) is forced; outside a
+            -- defensive phase the opening shot is forced; flag off: forced
+            def_frame()
+            local o1, o1v = rec_once(0, -2, nil, "none")
+            -- the shot taken now carries the tag (" open" on its line)
+            local SHT = probe("SHOTS")
+            fire("aim_fire", {id = 97801, target = 102, backtrack = 0, hit_chance = 80, hitgroup = 1, damage = 100})
+            local tagged = SHT and SHT[97801] and SHT[97801].open
+            if SHT then SHT[97801] = nil end
+            if not tagged then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive opening shot: the shot wasn't tagged open" end
+            local o2 = rec_once(0, nil, 30, 6)
+            local o3 = rec_once(0, -2, nil, 1)
+            local open_tag = r.def_open
+            FE.DEF_OPEN = false
+            local o0 = rec_once(0, -2, nil, "none")
+            FE.DEF_OPEN = true
+            if o1 ~= "builtin" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive opening shot: forced " .. tostring(o1) .. " " .. tostring(o1v) .. ", expected gamesense" end
+            if o2 ~= "builtin" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive opening shot: a window was forced 6 s after the last shot (" .. tostring(o2) .. ")" end
+            if o3 ~= "hit_mem" or open_tag then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive follow-up: " .. tostring(o3) .. " (open " .. tostring(open_tag) .. "), expected the def memory forced" end
+            if o0 ~= "hit_mem" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive opening test: flag off gave " .. tostring(o0) .. ", not the def memory" end
             -- MISS_FLIP: a resolver miss on +30 puts + off limits for 3 s:
             -- the +30 window is forced -30, gamesense (nothing known) gets the
             -- other side forced; after 3 s, or a head hit, it's over; flag off
@@ -2784,7 +2812,17 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
             end
             miss_on(30, 97701, true)
             local f1, fv1 = rec_once(0, nil, 30)
-            local f2, fv2 = rec_once(0, nil, nil)
+            -- nothing known: gamesense, unless its live answer is on the
+            -- banned side (or unread) -- then the other side is forced. The
+            -- test enemy jitters, so over three records both cases come up.
+            local f2, fv2, f2ok = nil, nil, true
+            for _ = 1, 3 do
+                local m_, v_ = rec_once(0, nil, nil)
+                local g_ = r.gs_pose
+                if m_ == "miss_flip" and type(v_) == "number" and v_ < -20 then f2, fv2 = m_, v_
+                elseif not (m_ == "builtin" and type(g_) == "number" and g_ <= -5) then f2ok = false; f2, fv2 = m_, v_ end
+            end
+            if not f2ok then f2 = "bad:" .. tostring(f2) end
             W.real = W.real + 3.2
             local f3, fv3 = rec_once(0, nil, 30)
             miss_on(30, 97702, true)

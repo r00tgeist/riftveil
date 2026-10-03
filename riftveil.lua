@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.46"
+local RV_VERSION = "8.47"
 
 local ffi = require "ffi"
 
@@ -1044,6 +1044,16 @@ local FEATURE = {
     -- animation gamesense builds, which gives back the side that missed.
     -- Defensive enemies 6 / 1 vs 6 / 4. Off in the v6.2 parity run.
     MISS_FLIP = true,
+    -- v8.47: the opening shot at an enemy in a defensive phase (no shot at
+    -- them for 5 s) is gamesense's -- the probe; RIFTVEIL resolves the
+    -- follow-ups with what it taught (MISS_FLIP after a miss, memory after
+    -- a hit). Head-aimed opening shots at defensive enemies, every uploaded
+    -- log: gamesense 22 / 10 (69%); forced 61 / 53 (54%: unchoke 39 / 32,
+    -- memory 9 / 8, other windows 13 / 13). Follow-ups there: unchoke
+    -- 13 / 4 (76%) vs gamesense 8 / 4. Without defensive frames forcing
+    -- wins the opening shot too (74-83% vs 62%), so nothing changes there.
+    -- Off in the v6.2 parity run.
+    DEF_OPEN = true,
     -- v8.41: duck windows force the torso relative to the eye, within this
     -- frame's limit, like every other window since v8.38. v6.2 forced the
     -- torso's WORLD yaw (-166, 104, ...), clamped to +-60 by the player
@@ -3412,6 +3422,9 @@ local DEF_HOLD_S = 3
 -- FEATURE.MISS_FLIP: how long the side of a resolver miss stays off limits
 -- (after a miss the next shot on the same side landed 2 / 5 at 1-3 s)
 local MISS_FLIP_S = 3
+-- FEATURE.DEF_OPEN: an engagement's opening shot = none at that enemy for
+-- this long (the logs' follow-ups within 5 s landed 89% since v8.39)
+local DEF_OPEN_S = 5
 local function InDefPhase(rec, now)
     if not FEATURE.DEF_HOLD then return DefFrames(rec, now) > 0 end
     local r = rec.dfr
@@ -4191,6 +4204,18 @@ local function ProcessPlayer(player, ctx)
                         rec._sup_pause  = 0
                     end
                 end
+            end
+        end
+
+        -- FEATURE.DEF_OPEN: defensive phase, no shot at them for 5 s -> the
+        -- opening shot is gamesense's (MISS_FLIP below needs a recent miss,
+        -- so it never applies here)
+        rec.def_open = false
+        if FEATURE.DEF_OPEN and def_on and should_override then
+            local lf = rec.last_fire_t
+            if not isnum(lf) or globals.realtime() - lf > DEF_OPEN_S then
+                should_override = false
+                rec.def_open = true
             end
         end
 
@@ -5215,6 +5240,8 @@ local function on_aim_fire(e)
         -- seconds since the server last moved their LBY target (- = not seen)
         lbyu    = (r and isnum(r.lby_t)) and string.format("%.2f", globals.realtime() - r.lby_t) or "-",
         prv     = r and r.last_outcome or "-",
+        -- DEF_OPEN: this shot was left to gamesense as the opening probe
+        open    = r and r.def_open or false,
     }
     if r then r.last_fire_t = globals.realtime(); r.last_outcome = "-" end
     LOCALLC.OnAimFire()
@@ -5355,7 +5382,7 @@ local function on_aim_hit(e)
         end
     end
 
-    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d wc=%s hw=%s hm=%s eo=%s lbyu=%s gs=%s aa=%s%s%s",
+    info("hit", "player=%s group=%s dmg=%d meth=%s val=%.0f bt=%d st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d wc=%s hw=%s hm=%s eo=%s lbyu=%s gs=%s aa=%s%s%s%s",
         entity.get_player_name(e.target) or "?",
         HG[(tonumber(e.hitgroup) or -1) + 1] or "?",
         isnum(e.damage) and math.floor(e.damage) or 0,
@@ -5367,7 +5394,8 @@ local function on_aim_hit(e)
         d.eo or "-", d.lbyu or "-", isnum(d.gs) and string.format("%.0f", d.gs) or "-",
         AA_SHORT[d.aa] or "?",
         d.cheat and (" cht=" .. d.cheat) or "",
-        d.in_vuln and (" !" .. tostring(d.vuln_t or "?")) or "")
+        d.in_vuln and (" !" .. tostring(d.vuln_t or "?")) or "",
+        d.open and " open" or "")
     SHOTLOG.Hit(e, d)
     SHOTS[e.id] = nil
 end
@@ -5452,7 +5480,7 @@ local function on_aim_miss(e)
         end
     end
 
-    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d wc=%s hw=%s hm=%s eo=%s lbyu=%s gs=%s aa=%s%s%s",
+    warn("miss", "player=%s reason=%s meth=%s val=%.0f bt=%d hc=%.0f%% st=%s mv=%d wpn=%s pol=%s tr=%d/%d hp=%d ar=%d aim=%s pdmg=%d cf=%.2f fl=%s pit=%d df=%d cor=%s ls=%.1f prv=%s lbyd=%d wc=%s hw=%s hm=%s eo=%s lbyu=%s gs=%s aa=%s%s%s%s",
         entity.get_player_name(e.target) or "?",
         reason, d.meth, d.val, d.bt, d.hc, d.state or "?", d.sspd or -1, d.wpn or "?", d.pol or "-", d.aim_th or 0, d.aim_tb or 0,
         d.thp or -1, d.tarm or -1,
@@ -5462,7 +5490,8 @@ local function on_aim_miss(e)
         d.eo or "-", d.lbyu or "-", isnum(d.gs) and string.format("%.0f", d.gs) or "-",
         AA_SHORT[d.aa] or "?",
         d.cheat and (" cht=" .. d.cheat) or "",
-        d.in_vuln and (" !" .. tostring(d.vuln_t or "?")) or "")
+        d.in_vuln and (" !" .. tostring(d.vuln_t or "?")) or "",
+        d.open and " open" or "")
 
     if is_resolver then
         if d.aim_hg == 1 and not d.nolearn then CheatCredit(d.cheat, d.meth, false) end

@@ -3,6 +3,23 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.47  – DEF_OPEN: the opening shot at an enemy in a defensive phase
+          (no shot at them for 5 s) is gamesense's -- the probe -- and
+          RIFTVEIL resolves the follow-ups with what it taught (the other
+          side after a miss, v8.46; memory after a hit).
+          Every uploaded log, head-aimed, head / resolver miss:
+            defensive, opening shot   gamesense 22 / 10 (69%)
+                                      forced    61 / 53 (54%) -- unchoke
+                                      39 / 32, memory 9 / 8, other
+                                      windows 13 / 13
+            defensive, follow-up      unchoke 13 / 4 (76%), gamesense 8 / 4
+            no defensive, opening     forced 74-83%, gamesense 62%
+          Since v8.39 follow-ups land 89%, opening shots 56%: the opening
+          shot at a defensive enemy is the biggest single bucket of
+          resolver misses in the logs. Outside a defensive phase nothing
+          changes. Shot lines carry " open" on such shots.
+          Test: the v8.46 "nothing known" case now covers both jitter
+          phases (it passed by phase luck before).
   v8.46  – MISS_FLIP: a resolver miss is knowledge. For 3 s after one,
           the side that missed is off limits: a window or memory on that
           side is forced to the other one, and when gamesense would resolve
