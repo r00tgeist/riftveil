@@ -3,6 +3,21 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.45  – From the first v8.44 match:
+          DEF_HOLD -- the defensive phase lasts until 3 s without a
+          defensive frame (was 1 s). Gaps between defensive bursts were
+          under 0.5 s half the time and under 2 s for 72 of 91; the rest
+          20 s+. With 1 s, every short gap switched the enemy to the normal
+          memory -- usually empty -- and to gamesense: Maмyebal's full
+          -3.0 defensive memory sat unused on most of his shots.
+          MEM_FIRST -- a confirmed hit memory (over the gate, in its scope)
+          beats an event window of the other sign: an unchoke window's +21
+          overrode that -3.0 memory and missed the head; across the logs
+          window shots against such a memory went 0 / 3 (with it 1 / 1).
+          An agreeing window keeps its own value.
+          Also from that log: 10 body-aimed pistol shots in 4 s at 33-52%
+          hit chance missed on spread -- the ragebot's pistol hit chance,
+          not the resolver.
   v8.44  – Defensive is the meta: RIFTVEIL resolves it instead of handing it
           over (replaces v8.43's DEF_RELEASE). DEF_PHASE:
           On enemies sending defensive frames the side that lands the head

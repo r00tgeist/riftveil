@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.44"
+local RV_VERSION = "8.45"
 
 local ffi = require "ffi"
 
@@ -1029,6 +1029,12 @@ local FEATURE = {
     -- (v8.43 handed everything to gamesense instead.) Off in the v6.2
     -- parity run.
     DEF_PHASE = true,
+    -- v8.45: the defensive phase lasts until 3 s without a defensive frame
+    -- (InDefPhase); a confirmed hit memory beats a window of the other sign
+    -- (in the first v8.44 match an unchoke window's +21 overrode a -3.0
+    -- defensive memory and missed the head). Off in the v6.2 parity run.
+    DEF_HOLD = true,
+    MEM_FIRST = true,
     -- v8.41: duck windows force the torso relative to the eye, within this
     -- frame's limit, like every other window since v8.38. v6.2 forced the
     -- torso's WORLD yaw (-166, 104, ...), clamped to +-60 by the player
@@ -3187,7 +3193,7 @@ do
     -- in a defensive phase (df > 0) teaches only "def"; any other shot its
     -- movement state and the overall memory, as in v8.39
     local function Key(d)
-        if FEATURE.DEF_PHASE and (d.df or 0) > 0 then return "def", false end
+        if FEATURE.DEF_PHASE and (d.dph or (d.dph == nil and (d.df or 0) > 0)) then return "def", false end
         return d.state, true
     end
 
@@ -3384,6 +3390,20 @@ local function DefFrames(rec, now)
     local n, r = 0, rec.dfr
     if r then for i = 1, #r do if now - r[i] <= 64 and now >= r[i] then n = n + 1 end end end
     return n
+end
+
+-- FEATURE.DEF_HOLD: the enemy is in a defensive phase while its last
+-- defensive frame is under 3 s old (v8.44: any in the last second). In the
+-- first v8.44 match the gaps between defensive bursts were under 0.5 s
+-- half the time and under 2 s 79% of the time (72 / 91); the rest were
+-- 20 s+, the player really off. With 1 s every short gap flipped the
+-- player back to the normal memory -- usually empty -- and to gamesense.
+local DEF_HOLD_S = 3
+local function InDefPhase(rec, now)
+    if not FEATURE.DEF_HOLD then return DefFrames(rec, now) > 0 end
+    local r = rec.dfr
+    local last = r and r[#r]
+    return last ~= nil and now >= last and (now - last) * globals.tickinterval() <= DEF_HOLD_S
 end
 
 local function PListRelease(player)
@@ -3906,12 +3926,13 @@ local function ProcessPlayer(player, ctx)
         -- The vuln window is forced this record (the [1] branch below).
         -- FEATURE.DEF_PHASE: defensive frames in the last second -> the
         -- enemy's own "def" hit memory (HMEM); [aa] lines mark the switch
-        local def_on = FEATURE.DEF_PHASE and DefFrames(rec, ctx.cur_tc) > 0
+        local def_on = FEATURE.DEF_PHASE and InDefPhase(rec, ctx.cur_tc)
         if def_on ~= (rec._def_on or false) then
             rec._def_on = def_on
             if DET.verbose then
                 dbg("aa", def_on and "player=%s defensive phase: its own hit memory (def)"
-                    or "player=%s no defensive frame for 1 s: normal hit memory", entity.get_player_name(player) or "?")
+                    or (FEATURE.DEF_HOLD and "player=%s no defensive frame for 3 s: normal hit memory"
+                        or "player=%s no defensive frame for 1 s: normal hit memory"), entity.get_player_name(player) or "?")
             end
         end
         local vuln_on = DET.vuln and rec.vuln_ttl > 0
@@ -4051,6 +4072,18 @@ local function ProcessPlayer(player, ctx)
             should_override = true
             override_val    = rec.vuln_val
             override_meth   = "vuln_" .. rec.vuln_type
+            -- FEATURE.MEM_FIRST: a window read off one record against a
+            -- confirmed side (hit memory over the gate, in its scope): the
+            -- memory wins. Head-aimed window shots against such a memory
+            -- landed 0 of 3 in the uploaded logs, with it 1 of 1; the
+            -- memory itself 45 / 4 outside defensive.
+            if FEATURE.MEM_FIRST and FEATURE.HMEM_WEIGHT and DET.hitmem then
+                local ms = HMEM.Side(rec, rec.state, def_on)
+                if ms ~= 0 and Sign(override_val or 0) == -ms and CheatTrusts(rec, METH.HIT_MEM) then
+                    override_val  = CfgAngle(ms, rec.state, TrustedCfg(rec), FEATURE.FULL_DESYNC and corr_cap or live_cap)
+                    override_meth = METH.HIT_MEM
+                end
+            end
 
         -- [2] 6lex: animlayer digit read — direct, no guessing. Gated by
         -- per-player calibration: once it's been proven wrong against
@@ -5083,7 +5116,9 @@ local function on_aim_fire(e)
         -- our weapon in full (rifle / smg / shotgun / knife ...) and the
         -- hit memory in effect at the shot, overall/this state (HMEM)
         wc      = HMEM.Class(),
-        hm      = HMEM.Tag(r, r and ((FEATURE.DEF_PHASE and DefFrames(r, globals.tickcount()) > 0) and "def" or r.state)),
+        hm      = HMEM.Tag(r, r and ((FEATURE.DEF_PHASE and InDefPhase(r, globals.tickcount())) and "def" or r.state)),
+        -- in a defensive phase at the shot: the memory it teaches (HMEM)
+        dph     = r and FEATURE.DEF_PHASE and InDefPhase(r, globals.tickcount()) or false,
         pol     = r and r.aim_pol or "-",
         aim_th  = r and LogInt(r.aim_th or 0) or 0,   -- traced head / body damage
         aim_tb  = r and LogInt(r.aim_tb or 0) or 0,

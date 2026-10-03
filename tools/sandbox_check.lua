@@ -519,7 +519,7 @@ if os.getenv("RV_PARITY") then
     end
     local F
     for _, cb in pairs(CALLBACKS) do F = F or find(cb, 0) end
-    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false; F.POSE_CLEAN = false; F.FULL_DESYNC = false; F.BEAT_BUILTIN = false; F.KNOWN_ONLY = false; F.LEARN_GS = false; F.VULN_DELTA = false; F.HMEM_WEIGHT = false; F.DCK_DELTA = false; F.CAL_FRESH = false; F.DEF_PHASE = false end
+    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false; F.POSE_CLEAN = false; F.FULL_DESYNC = false; F.BEAT_BUILTIN = false; F.KNOWN_ONLY = false; F.LEARN_GS = false; F.VULN_DELTA = false; F.HMEM_WEIGHT = false; F.DCK_DELTA = false; F.CAL_FRESH = false; F.DEF_PHASE = false; F.DEF_HOLD = false; F.MEM_FIRST = false end
 end
 
 local cb_errors = {}
@@ -2712,12 +2712,13 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
         local FE = probe("FEATURE")
         if r and FE then
             -- a record every 3 ticks (choking: not NO_CHOKE static), jittering
-            local function rec_once(hm, def)
+            local function rec_once(hm, def, win)
                 for k = 1, 3 do
                     W.tick = W.tick + 1; W.real = W.real + TI
                     if k == 3 then p.sim = W.tick * TI; p.pose01 = (p.pose01 == 0.2) and 0.8 or 0.2 end
                     W.players[101].sim = W.tick * TI
                     r.hm, r.hm_st, r.hit_count, r.hit_side, r.vuln_ttl = hm, {def = def}, 2, 1, 0
+                    if win then r.vuln_ttl, r.vuln_type, r.vuln_val, r.conf = 5, "unk", win, 0.5 end
                     fire("net_update_end")
                 end
                 return r.last_meth, r.last_val
@@ -2736,8 +2737,39 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
             FE.DEF_PHASE = false; def_frame()
             local off = rec_once(2, nil)
             FE.DEF_PHASE = true
+            -- DEF_HOLD: 72 ticks after the last defensive frame still defensive
+            -- (3 s hold); v8.44 (flag off) back to the overall memory by then
+            FE.DEF_HOLD = false; def_frame()
             local later
             for _ = 1, 24 do later = rec_once(2, nil) end
+            FE.DEF_HOLD = true; def_frame()
+            local held
+            for _ = 1, 24 do held = rec_once(2, nil) end
+            -- a head hit 1.1 s after the last defensive frame (inside the
+            -- hold, df = 0 by then) teaches the defensive memory
+            local w0 = W.weapon; W.weapon = 9
+            r.last_meth, r.last_val, r.active, r.hm, r.hm_st = "hit_mem", 58, true, 0, {}
+            fire("aim_fire", {id = 97601, target = 102, backtrack = 0, hit_chance = 80, hitgroup = 1, damage = 100})
+            fire("aim_hit", {id = 97601, target = 102, hitgroup = 1, damage = 100})
+            W.weapon = w0
+            if not (type(r.hm_st.def) == "number" and r.hm_st.def > 0) or r.hm ~= 0 then
+                UNIT_FAIL[#UNIT_FAIL + 1] = "defensive hold: a head hit inside the hold taught overall " .. tostring(r.hm) .. " / def " .. tostring(r.hm_st.def)
+            end
+            local back
+            for _ = 1, 50 do back = rec_once(2, nil) end
+            if held ~= "builtin" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive hold: overall memory forced 1.1 s after a defensive frame (" .. tostring(held) .. ")" end
+            if back ~= "hit_mem" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive hold: overall memory not back 3.4 s after the last defensive frame (" .. tostring(back) .. ")" end
+            -- MEM_FIRST: a window (-30) against a confirmed memory (+): the
+            -- memory's side is forced; an agreeing window (+30) keeps its value;
+            -- flag off: the window, as v6.2
+            local m1, v1 = rec_once(2, nil, -30)
+            local m2, v2 = rec_once(2, nil, 30)
+            FE.MEM_FIRST = false
+            local m0, v0 = rec_once(2, nil, -30)
+            FE.MEM_FIRST = true
+            if m1 ~= "hit_mem" or not (type(v1) == "number" and v1 > 0) then UNIT_FAIL[#UNIT_FAIL + 1] = "memory first: a -30 window beat a + memory: " .. tostring(m1) .. " " .. tostring(v1) end
+            if m2 ~= "vuln_unk" or v2 ~= 30 then UNIT_FAIL[#UNIT_FAIL + 1] = "memory first: an agreeing window lost its value: " .. tostring(m2) .. " " .. tostring(v2) end
+            if m0 ~= "vuln_unk" or v0 ~= -30 then UNIT_FAIL[#UNIT_FAIL + 1] = "memory first test: flag off gave " .. tostring(m0) .. " " .. tostring(v0) .. ", not the window" end
             if overall ~= "builtin" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive phase: the overall hit memory was forced (" .. tostring(overall) .. ")" end
             if own ~= "hit_mem" or not (type(own_v) == "number" and own_v < 0) then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive phase: its own memory (-2) wasn't forced: " .. tostring(own) .. " " .. tostring(own_v) end
             if off ~= "hit_mem" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive phase test: flag off gave " .. tostring(off) .. ", not v6.2's hit_mem" end
