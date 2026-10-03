@@ -699,7 +699,7 @@
 -- silently drifting out of sync with every version bump since (it was
 -- still printing "v2.3 loaded" at v3.3). Bump this AND the banner comment
 -- together; nothing else should hardcode a version number.
-local RV_VERSION = "8.45"
+local RV_VERSION = "8.46"
 
 local ffi = require "ffi"
 
@@ -1035,6 +1035,15 @@ local FEATURE = {
     -- defensive memory and missed the head). Off in the v6.2 parity run.
     DEF_HOLD = true,
     MEM_FIRST = true,
+    -- v8.46: a resolver miss is knowledge -- the side on the hitbox was
+    -- wrong. For 3 s nothing forces that side again; gamesense included
+    -- (its answer on that side is overridden with the other one). In every
+    -- uploaded log, the next head-aimed shot after a resolver miss landed
+    -- 8 / 3 (73%) on the other side but 12 / 10 (55%) on the same one --
+    -- and the same side was shot 2 times in 3: windows recompute from the
+    -- animation gamesense builds, which gives back the side that missed.
+    -- Defensive enemies 6 / 1 vs 6 / 4. Off in the v6.2 parity run.
+    MISS_FLIP = true,
     -- v8.41: duck windows force the torso relative to the eye, within this
     -- frame's limit, like every other window since v8.38. v6.2 forced the
     -- torso's WORLD yaw (-166, 104, ...), clamped to +-60 by the player
@@ -1485,6 +1494,7 @@ local STATE = {
 local METH = {
     RING      = "ring",
     HIT_MEM   = "hit_mem",
+    MISS_FLIP = "miss_flip",
     SIX_LEX   = "6lex",
     PERIOD    = "period",
     LAGCOMP   = "lagcomp",
@@ -3399,6 +3409,9 @@ end
 -- 20 s+, the player really off. With 1 s every short gap flipped the
 -- player back to the normal memory -- usually empty -- and to gamesense.
 local DEF_HOLD_S = 3
+-- FEATURE.MISS_FLIP: how long the side of a resolver miss stays off limits
+-- (after a miss the next shot on the same side landed 2 / 5 at 1-3 s)
+local MISS_FLIP_S = 3
 local function InDefPhase(rec, now)
     if not FEATURE.DEF_HOLD then return DefFrames(rec, now) > 0 end
     local r = rec.dfr
@@ -4177,6 +4190,27 @@ local function ProcessPlayer(player, ctx)
                         rec._sup_streak = 0
                         rec._sup_pause  = 0
                     end
+                end
+            end
+        end
+
+        -- FEATURE.MISS_FLIP: the side that just missed on the resolver is
+        -- off limits for MISS_FLIP_S (on_aim_miss sets rec.no_side)
+        if FEATURE.MISS_FLIP and rec.no_side and globals.realtime() < (rec.no_side_until or 0) then
+            local bad = rec.no_side
+            local flip_val = -bad * ((isnum(corr_cap) and corr_cap > 0) and corr_cap or 58)
+            if should_override then
+                if Sign(override_val or 0) == bad then
+                    override_val  = (math.abs(override_val) >= 5) and -override_val or flip_val
+                    override_meth = METH.MISS_FLIP
+                end
+            else
+                -- gamesense's own answer on that side (or none known): the other one
+                local gs = (isnum(rec.gs_pose) and isnum(rec.gs_t) and globals.realtime() - rec.gs_t < 0.25) and rec.gs_pose or nil
+                if not (gs and math.abs(gs) >= 5 and Sign(gs) == -bad) then
+                    should_override = true
+                    override_val    = flip_val
+                    override_meth   = METH.MISS_FLIP
                 end
             end
         end
@@ -5256,6 +5290,8 @@ local function on_aim_hit(e)
         -- Any hit ends a run of resolver misses ("two in a row")
         rec.aim_miss_streak = 0
         rec.last_outcome = is_head and "h" or "b"
+        -- MISS_FLIP: a head hit says where the side is now; the ban is over
+        if is_head then rec.no_side = nil end
         -- FEATURE.LEARN_GS: when gamesense's own resolver landed the head,
         -- the side is the one it was animating at the shot (its answer, read
         -- off a record we didn't force) -- not our majority over 16 records
@@ -5403,6 +5439,16 @@ local function on_aim_miss(e)
         -- carries the weight it was given (hw=)
         if ro and is_resolver and FEATURE.HMEM_WEIGHT then
             d.hw = HMEM.OnMiss(ro, d, reason, entity.get_player_name(e.target))
+        end
+        -- FEATURE.MISS_FLIP: a resolver miss ("?", not a prediction error)
+        -- on a known applied side puts that side off limits for 3 s
+        if ro and FEATURE.MISS_FLIP and (reason == "?" or reason == "") and not d.nolearn then
+            local bad = HMEM.Applied(d)
+            if bad then
+                ro.no_side, ro.no_side_until = bad, globals.realtime() + MISS_FLIP_S
+                info("flip", "player=%s missed on side %+d (%s %.0f) -> side %+d for %.0f s",
+                    entity.get_player_name(e.target) or "?", bad, d.meth or "?", isnum(d.val) and d.val or 0, -bad, MISS_FLIP_S)
+            end
         end
     end
 

@@ -519,7 +519,7 @@ if os.getenv("RV_PARITY") then
     end
     local F
     for _, cb in pairs(CALLBACKS) do F = F or find(cb, 0) end
-    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false; F.POSE_CLEAN = false; F.FULL_DESYNC = false; F.BEAT_BUILTIN = false; F.KNOWN_ONLY = false; F.LEARN_GS = false; F.VULN_DELTA = false; F.HMEM_WEIGHT = false; F.DCK_DELTA = false; F.CAL_FRESH = false; F.DEF_PHASE = false; F.DEF_HOLD = false; F.MEM_FIRST = false end
+    if F then F.STATE_PHYSICS = false; F.SKIP_DEF_FRAMES = false; F.SHIFT_GAP = false; F.DEF_RESET = false; F.DCK_GAP = false; F.CFG_CADENCE = false; F.STALE_WINDOW = false; F.UNK_DELTA = false; F.DESYNC_FORMULA = false; F.NO_CHOKE_STATIC = false; F.WINDOW_GATE = false; F.META_STREAK = false; F.POSE_CLEAN = false; F.FULL_DESYNC = false; F.BEAT_BUILTIN = false; F.KNOWN_ONLY = false; F.LEARN_GS = false; F.VULN_DELTA = false; F.HMEM_WEIGHT = false; F.DCK_DELTA = false; F.CAL_FRESH = false; F.DEF_PHASE = false; F.DEF_HOLD = false; F.MEM_FIRST = false; F.MISS_FLIP = false end
 end
 
 local cb_errors = {}
@@ -2770,6 +2770,42 @@ if not os.getenv("RV_TARGET") and not os.getenv("RV_PARITY") then
             if m1 ~= "hit_mem" or not (type(v1) == "number" and v1 > 0) then UNIT_FAIL[#UNIT_FAIL + 1] = "memory first: a -30 window beat a + memory: " .. tostring(m1) .. " " .. tostring(v1) end
             if m2 ~= "vuln_unk" or v2 ~= 30 then UNIT_FAIL[#UNIT_FAIL + 1] = "memory first: an agreeing window lost its value: " .. tostring(m2) .. " " .. tostring(v2) end
             if m0 ~= "vuln_unk" or v0 ~= -30 then UNIT_FAIL[#UNIT_FAIL + 1] = "memory first test: flag off gave " .. tostring(m0) .. " " .. tostring(v0) .. ", not the window" end
+            -- MISS_FLIP: a resolver miss on +30 puts + off limits for 3 s:
+            -- the +30 window is forced -30, gamesense (nothing known) gets the
+            -- other side forced; after 3 s, or a head hit, it's over; flag off
+            -- leaves the window as it was
+            local function miss_on(val, id, flag, reason)
+                FE.MISS_FLIP = flag
+                local w9 = W.weapon; W.weapon = 9
+                r.last_meth, r.last_val, r.active = "vuln_unk", val, true
+                fire("aim_fire", {id = id, target = 102, backtrack = 0, hit_chance = 80, hitgroup = 1, damage = 100})
+                fire("aim_miss", {id = id, target = 102, hitgroup = 1, reason = reason or "?"})
+                W.weapon = w9
+            end
+            miss_on(30, 97701, true)
+            local f1, fv1 = rec_once(0, nil, 30)
+            local f2, fv2 = rec_once(0, nil, nil)
+            W.real = W.real + 3.2
+            local f3, fv3 = rec_once(0, nil, 30)
+            miss_on(30, 97702, true)
+            r.last_meth, r.last_val = "vuln_unk", -30
+            fire("aim_fire", {id = 97703, target = 102, backtrack = 0, hit_chance = 80, hitgroup = 1, damage = 100})
+            fire("aim_hit", {id = 97703, target = 102, hitgroup = 1, damage = 100})
+            local f4 = rec_once(0, nil, 30)
+            W.real = W.real + 3.2
+            miss_on(30, 97704, false)
+            local f0, fv0 = rec_once(0, nil, 30)
+            FE.MISS_FLIP = true
+            if f1 ~= "miss_flip" or fv1 ~= -30 then UNIT_FAIL[#UNIT_FAIL + 1] = "miss flip: after a miss on +30 the +30 window forced " .. tostring(f1) .. " " .. tostring(fv1) end
+            if f2 ~= "miss_flip" or not (type(fv2) == "number" and fv2 < -20) then UNIT_FAIL[#UNIT_FAIL + 1] = "miss flip: nothing known after the miss forced " .. tostring(f2) .. " " .. tostring(fv2) .. ", expected the other side" end
+            if f3 ~= "vuln_unk" or fv3 ~= 30 then UNIT_FAIL[#UNIT_FAIL + 1] = "miss flip: still flipping 3 s after the miss: " .. tostring(f3) .. " " .. tostring(fv3) end
+            if f4 ~= "vuln_unk" then UNIT_FAIL[#UNIT_FAIL + 1] = "miss flip: a head hit didn't end the ban: " .. tostring(f4) end
+            if f0 ~= "vuln_unk" or fv0 ~= 30 then UNIT_FAIL[#UNIT_FAIL + 1] = "miss flip test: flag off changed the window: " .. tostring(f0) .. " " .. tostring(fv0) end
+            -- a prediction error is their movement, not their side: no ban
+            r.no_side = nil
+            miss_on(30, 97705, true, "prediction error")
+            if r.no_side ~= nil then UNIT_FAIL[#UNIT_FAIL + 1] = "miss flip: a prediction error banned a side" end
+            r.no_side = nil
             if overall ~= "builtin" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive phase: the overall hit memory was forced (" .. tostring(overall) .. ")" end
             if own ~= "hit_mem" or not (type(own_v) == "number" and own_v < 0) then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive phase: its own memory (-2) wasn't forced: " .. tostring(own) .. " " .. tostring(own_v) end
             if off ~= "hit_mem" then UNIT_FAIL[#UNIT_FAIL + 1] = "defensive phase test: flag off gave " .. tostring(off) .. ", not v6.2's hit_mem" end

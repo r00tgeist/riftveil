@@ -3,6 +3,18 @@
 Moved out of `riftveil.lua` in v7.2. Newest first.
 
 ```text
+  v8.46  – MISS_FLIP: a resolver miss is knowledge. For 3 s after one,
+          the side that missed is off limits: a window or memory on that
+          side is forced to the other one, and when gamesense would resolve
+          (nothing known, or its answer on that side) the other side is
+          forced. A head hit ends it; a prediction error doesn't start it.
+          In every uploaded log the next head-aimed shot after a resolver
+          miss landed 8 / 3 (73%) on the other side and 12 / 10 (55%) on
+          the same one -- which was shot 2 times in 3: windows recompute
+          from the animation gamesense builds and give back the side that
+          missed (v6.2's flip only fed the side chain KNOWN_ONLY retired).
+          Defensive enemies 6 / 1 vs 6 / 4. [flip] lines mark each ban; the
+          shot line says meth=miss_flip.
   v8.45  – From the first v8.44 match:
           DEF_HOLD -- the defensive phase lasts until 3 s without a
           defensive frame (was 1 s). Gaps between defensive bursts were
