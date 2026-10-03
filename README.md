@@ -5,21 +5,46 @@ One file: `riftveil.lua`. Load it in gamesense under **LUA**; everything
 else in this repository is tooling that runs on a PC, never in the game.
 You don't need to load any other script: the cheat revealer is built in.
 
-## Why v8.0 is the v6.2 resolver
+## How it resolves (v8.45)
 
-Every shot the resolver decided (head hit vs resolver miss), across all
-uploaded logs:
+RIFTVEIL steers gamesense's own resolver through the player list (Force
+body yaw), and only where it **knows** something. Everywhere else
+gamesense resolves on its own.
 
-| Versions | Head rate | Opponents |
-|---|---|---|
-| v5.2 – v6.2 | **74%** (100/135) | 10 of 10 at 57% or better |
-| v6.7 – v7.9 | 49% (54/111) | 9 of 12 at 60% or worse |
+- **Hit memory.** A head hit confirms the side that was on the hitbox. It
+  is weighed by your weapon (AWP / scout / auto / R8 / deagle 1, pistol
+  0.75, rifle / SMG 0.5, shotgun or knife 0) and by the hitbox (aimed head
+  -> head 1, neck 0.5; a stray head hit off a body shot 0). Two precise head
+  hits on one side make a known side. Hits on opposite sides cancel; a
+  resolver miss on the remembered side takes it back. Kept per movement
+  state and overall.
+- **Defensive phase.** Defensive AA is the meta. While an enemy sends
+  defensive frames (and for 3 s after the last one) it gets its own
+  memory, learned only from shots in that phase -- the side outside it
+  doesn't hold inside it.
+- **Event windows.** Unchoke, stop, peek, landing and duck crossing read
+  the enemy's own record at that moment; the value is the torso / feet
+  against the eye, capped at the engine's desync limit for that frame.
+  A confirmed hit memory of the other sign beats a window.
+- **Desync size.** Side x the engine's limit for that frame (58 standing,
+  down to 29 running), for every AA script and setting -- no presets.
+- **Read only clean records.** The enemy's pose on a record we forced is
+  our own value; detection reads only records with nothing forced.
+- **Enemies that can't desync** (sending every tick: bots, no-AA) are left
+  to gamesense.
 
-The drop was in every method, not one. So v8.0 takes v6.2's decision code
-as it was and carries forward only fixes that don't change a decision
-(crash and NaN guards, bounded logging, callback guards, DB fixes). The
-test suite proves it: on every tick of the harness match, v8.0 forces the
-same side with the same value as v6.2 (`tools/check_all.sh`, step 7).
+## Setup
+
+1. Load `riftveil.lua` in gamesense under **LUA**. Nothing else is needed;
+   the cheat revealer is built in.
+2. First load turns on: Resolver, Detection (Vulnerability, Hit memory,
+   Cheat profiles, Weapon aim), Tight interpolation and every indicator.
+   Your later choices are saved with your config.
+3. RIFTVEIL never changes your ragebot's hit chance, minimum damage or
+   double tap settings. A low pistol hit chance shows up as `due to
+   spread` misses -- in the logs, pistol shots at 33-52% hit chance missed
+   on spread in bursts.
+4. Turn on **Debug log** for matches you want to send in (see below).
 
 ## Menu (LUA › B)
 
@@ -33,8 +58,7 @@ same side with the same value as v6.2 (`tools/check_all.sh`, step 7).
 
 The accent follows gamesense's own *Menu color*; drag the panel by its
 header while the menu is open. The info panel's INFO row shows the current
-threat's cheat. Suppress and asymmetric angles are fixed on and jitter
-prediction off, as v6.2 ran in the logs.
+threat's cheat.
 
 Console: `rv_stats`, `rv_db` (saved profiles and learned cheat profiles),
 `rv_perf`, `rv_save`, `rv_clear`, `rv_reset`, `rv_wipe` (everything saved,
@@ -138,7 +162,7 @@ against the ragebot's own damage prediction. How and why, with sources:
    can recover). Each save logs what was learned: `[cheat] learned nl: ...`.
 
 With no cheat detected, too few shots, or Detection › Cheat profiles off,
-the resolver is exactly v6.2.
+no method is skipped for a cheat; the rest of the resolver is unchanged.
 
 ## Sending a match log
 
@@ -158,6 +182,28 @@ at them and its outcome (`ls=`, `prv=`; anti-bruteforce windows), eye yaw
 minus the networked LBY target (`lbyd=`), the enemy's AA type (`aa=`,
 or the debug log's `[corr]` lines in older logs) and 3/5-way after a
 resolver miss, DB-seeded vs cold start, enemy cheat (`cht=`) and player, with 95% intervals.
+
+## History
+
+### Why v8.0 started from the v6.2 resolver
+
+Every shot the resolver decided (head hit vs resolver miss), across all
+uploaded logs:
+
+| Versions | Head rate | Opponents |
+|---|---|---|
+| v5.2 – v6.2 | **74%** (100/135) | 10 of 10 at 57% or better |
+| v6.7 – v7.9 | 49% (54/111) | 9 of 12 at 60% or worse |
+
+The drop was in every method, not one. So v8.0 takes v6.2's decision code
+as it was and carries forward only fixes that don't change a decision
+(crash and NaN guards, bounded logging, callback guards, DB fixes). The
+test suite proves it: on every tick of the harness match, v8.0 forces the
+same side with the same value as v6.2 (`tools/check_all.sh`, step 7).
+
+Every change since v8.28 is behind a `FEATURE` flag; with them off the
+script still makes v6.2's decisions (step 7 of `tools/check_all.sh`).
+What changed and why, version by version: `CHANGELOG.md`.
 
 ## Development
 
